@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 360px;
+      font-family: 'Malgun Gothic', -apple-system, sans-serif;
+      font-size: 12px;
+      background: #111;
+      color: #ccc;
+    }
+
+    .hdr {
+      background: #03c75a;
+      padding: 10px 14px;
+      display: flex; align-items: center; gap: 8px;
+      color: #fff;
+    }
+    .hdr b { font-size: 13px; }
+    .hdr .v { margin-left: auto; font-size: 9px; opacity: 0.6; }
+
+    .row {
+      padding: 8px 14px;
+      border-bottom: 1px solid #222;
+      display: flex; align-items: center; gap: 10px;
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .dot-ok { background: #03c75a; }
+    .dot-ng { background: #ef4444; }
+    .dot-wt { background: #f59e0b; }
+    .dot-off { background: #444; }
+    .lbl { color: #666; font-size: 10px; width: 44px; }
+    .val { font-size: 11px; }
+
+    .input-row {
+      padding: 10px 14px;
+      display: flex; gap: 6px;
+      border-bottom: 1px solid #222;
+    }
+    .input-row input {
+      flex: 1; padding: 7px 10px;
+      border: 1px solid #333; border-radius: 6px;
+      background: #1a1a1a; color: #fff; font-size: 12px; outline: none;
+    }
+    .input-row input:focus { border-color: #03c75a; }
+    .input-row input::placeholder { color: #444; }
+    .btn {
+      padding: 7px 12px; border: none; border-radius: 6px;
+      font-size: 11px; font-weight: 700; cursor: pointer;
+    }
+    .btn:active { transform: scale(0.95); }
+    .btn-go { background: #03c75a; color: #fff; }
+    .btn-stop { background: #333; color: #888; }
+
+    /* 프로그레스 */
+    .prog { padding: 10px 14px; border-bottom: 1px solid #222; display: none; }
+    .prog-kw { font-size: 13px; font-weight: 800; color: #fff; margin-bottom: 8px; }
+
+    .tabs3 { display: flex; gap: 4px; margin-bottom: 8px; }
+    .t3 {
+      flex: 1; text-align: center; padding: 6px 0;
+      border-radius: 6px; background: #1a1a1a;
+      border: 1px solid #222; font-size: 10px; color: #555;
+    }
+    .t3.ok { border-color: #03c75a55; color: #03c75a; background: #03c75a0d; }
+    .t3.act { border-color: #03c75a; color: #fff; background: #03c75a18; }
+    .t3 .t3i { font-size: 14px; display: block; margin-bottom: 1px; }
+
+    .bar { height: 4px; background: #222; border-radius: 2px; overflow: hidden; }
+    .bar-fill { height: 100%; border-radius: 2px; background: #03c75a; transition: width 0.3s; }
+    .bar-info { display: flex; justify-content: space-between; font-size: 10px; color: #555; margin-top: 3px; }
+    .bar-info .pct { color: #03c75a; font-weight: 700; }
+
+    /* 로그 */
+    .log-hdr {
+      padding: 6px 14px;
+      border-bottom: 1px solid #222;
+      display: flex; align-items: center; gap: 6px;
+      cursor: pointer; user-select: none;
+    }
+    .log-hdr:hover { background: #1a1a1a; }
+    .log-hdr .arrow { font-size: 8px; color: #555; transition: transform 0.2s; }
+    .log-hdr .arrow.open { transform: rotate(90deg); }
+    .log-hdr span { font-size: 10px; color: #666; }
+    .log-hdr .cnt { margin-left: auto; font-size: 9px; color: #444; }
+    .log-last { font-size: 10px; color: #888; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .log-box {
+      max-height: 0; overflow-y: auto; transition: max-height 0.2s;
+      border-bottom: 1px solid #222; background: #0a0a0a;
+      font-family: monospace; font-size: 10px;
+    }
+    .log-box.open { max-height: 180px; }
+    .ll { padding: 2px 14px; border-bottom: 1px solid #1a1a1a; white-space: nowrap; }
+    .g { color: #03c75a; } .r { color: #ef4444; } .b { color: #60a5fa; }
+    .y { color: #f59e0b; } .w { color: #888; }
+
+    .footer {
+      padding: 8px 14px;
+      display: flex; gap: 5px;
+    }
+    .fb {
+      flex: 1; padding: 8px 4px; border: none; border-radius: 6px;
+      font-size: 9px; font-weight: 700; cursor: pointer; text-align: center;
+    }
+    .fb:active { transform: scale(0.97); }
+    .fb-t { background: #1a2a3e; color: #60a5fa; }
+    .fb-d { background: #03c75a; color: #fff; }
+    .fb-r { background: #2a1a1a; color: #f87171; }
+    .fb-s { background: #1a1a1a; color: #666; }
+  </style>
+</head>
+<body>
+  <div class="hdr">
+    <b>🔍 Term 분석기</b>
+    <span class="v" id="ver">v-</span>
+  </div>
+
+  <div class="row">
+    <div class="dot dot-off" id="djDot"></div>
+    <span class="lbl">Django</span>
+    <span class="val" id="djVal">-</span>
+    <div style="width:16px"></div>
+    <div class="dot dot-off" id="crDot"></div>
+    <span class="lbl">크롤링</span>
+    <span class="val" id="crVal">대기</span>
+  </div>
+
+  <div class="input-row">
+    <input type="text" id="kw" placeholder="키워드 (쉼표 구분)" />
+    <button class="btn btn-go" id="go">수집</button>
+    <button class="btn btn-stop" id="stop">중지</button>
+  </div>
+
+  <div class="prog" id="prog">
+    <div class="prog-kw" id="kwLabel">-</div>
+    <div class="tabs3">
+      <div class="t3" id="t-total"><span class="t3i">📋</span>전체</div>
+      <div class="t3" id="t-model"><span class="t3i">💰</span>가격비교</div>
+      <div class="t3" id="t-checkout"><span class="t3i">💚</span>네이버페이</div>
+    </div>
+    <div class="bar"><div class="bar-fill" id="fill"></div></div>
+    <div class="bar-info">
+      <span id="steps">-</span>
+      <span class="pct" id="pct">0%</span>
+    </div>
+  </div>
+
+  <!-- 로그 -->
+  <div class="log-hdr" id="logHdr">
+    <span class="arrow" id="logArrow">▶</span>
+    <span class="log-last" id="logLast">-</span>
+    <span class="cnt" id="logCnt">0</span>
+  </div>
+  <div class="log-box" id="logBox"></div>
+
+  <div class="footer">
+    <button class="fb fb-t" id="btnTest">🔌 연결</button>
+    <button class="fb fb-d" id="btnDash">📊 대시보드</button>
+    <button class="fb fb-r" id="btnReset">🗑 초기화</button>
+    <button class="fb fb-s" id="btnExt">⚙</button>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

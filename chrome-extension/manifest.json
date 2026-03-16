@@ -1,0 +1,58 @@
+{
+  "manifest_version": 3,
+  "name": "네이버쇼핑 Term 분석기",
+  "version": "1.7.1",
+  "description": "네이버쇼핑 검색 키워드의 term 구조 분석 및 순위추적",
+  "permissions": [
+    "tabs",
+    "scripting",
+    "alarms",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://search.shopping.naver.com/*",
+    "http://localhost:*/*",
+    "http://192.168.219.100:*/*",
+    "http://192.168.219.200:*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://search.shopping.naver.com/*"],
+      "js": ["injected.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://search.shopping.naver.com/*"],
+      "js": ["content-script.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["http://localhost:*/*", "http://192.168.219.100:*/*", "http://192.168.219.200:*/*"],
+      "js": ["content_app_naver.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["injected.js"],
+      "matches": ["https://search.shopping.naver.com/*"]
+    }
+  ]
+}
