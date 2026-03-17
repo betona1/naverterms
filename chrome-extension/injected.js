@@ -1,13 +1,11 @@
-// injected.js v1.6.0 — MAIN world
-// ★ productSet 식별 + per-tab 중복방지 + "만 검색" 자동클릭
+// injected.js v1.7.0 — MAIN world
+// ★ fetch/XHR 가로채기 로깅 강화 + __NEXT_DATA__ 개선
 (function () {
   'use strict';
 
-  let lastCaptureKeys = {};  // per-productSet 중복키
+  let captured = {};   // productSet별 중복키
   let capturedCount = 0;
-  let polling = false;
 
-  // ── URL에서 productSet 추출 ──
   function getProductSet(url) {
     const m = url.match(/[?&]productSet=(\w+)/);
     return m ? m[1] : 'total';
@@ -17,14 +15,21 @@
     if (!sr || !sr.products || sr.products.length === 0) return;
 
     const productSet = getProductSet(url);
-    const key = `${sr.query || ''}_${productSet}_${sr.products.length}_${sr.total || 0}`;
-
-    // ★ per-tab 중복방지 (model/checkout 상품수 같아도 별개로 캡처)
-    if (lastCaptureKeys[productSet] === key) return;
-    lastCaptureKeys[productSet] = key;
+    const key = `${sr.query || ''}_${productSet}_${sr.products.length}`;
+    if (captured[productSet] === key) {
+      console.log(`[NaverExt] 중복 스킵: [${productSet}]`);
+      return;
+    }
+    captured[productSet] = key;
 
     capturedCount++;
     console.log(`[NaverExt] ★ #${capturedCount}: "${sr.query}" [${productSet}] ${sr.products.length}개 total=${sr.total}`);
+
+    // 상품 필드 확인 로그
+    if (sr.products[0]) {
+      const p = sr.products[0];
+      console.log(`[NaverExt] 상품필드: mallName=${!!p.mallName} manuTag=${!!p.manuTag} attrVal=${!!p.attributeValue}`);
+    }
 
     window.postMessage({
       type: 'NAVER_SHOPPING_RESPONSE',
@@ -55,7 +60,7 @@
     return null;
   }
 
-  // ── "000만 검색하기" 버튼 감지 + 클릭 ──
+  // ── "000만 검색하기" 버튼 ──
   function clickExactSearchButton() {
     const buttons = document.querySelectorAll('a, button');
     for (const btn of buttons) {
@@ -69,33 +74,54 @@
     return false;
   }
 
-  // ── __NEXT_DATA__ 추출 (초기 페이지 로드 전용) ──
+  // ── __NEXT_DATA__ 추출 ──
   function extractFromPage() {
     try {
       const el = document.getElementById('__NEXT_DATA__');
-      if (!el) return false;
+      if (!el) {
+        console.log('[NaverExt] __NEXT_DATA__ 없음');
+        return false;
+      }
 
       const data = JSON.parse(el.textContent);
       const pp = data?.props?.pageProps;
-      if (!pp) return false;
+      if (!pp) {
+        console.log('[NaverExt] pageProps 없음, 키:', Object.keys(data?.props || {}).join(','));
+        return false;
+      }
 
-      const targets = [pp.initialState, pp.dehydratedState, pp.compositeList, pp];
+      console.log('[NaverExt] pageProps 키:', Object.keys(pp).slice(0, 8).join(','));
+
+      // 다양한 경로 탐색
+      const targets = [pp.initialState, pp.dehydratedState, pp.compositeList, pp, data?.props];
       for (const t of targets) {
         if (!t) continue;
         const sr = findProducts(t, 0);
-        if (sr) { sendData(location.href, sr); return true; }
+        if (sr) {
+          console.log('[NaverExt] __NEXT_DATA__ 추출 성공');
+          sendData(location.href, sr);
+          return true;
+        }
         if (t.queries) {
           for (const q of t.queries) {
             const sr2 = findProducts(q?.state?.data, 0);
-            if (sr2) { sendData(location.href, sr2); return true; }
+            if (sr2) {
+              console.log('[NaverExt] __NEXT_DATA__ queries 추출 성공');
+              sendData(location.href, sr2);
+              return true;
+            }
           }
         }
       }
-    } catch (e) {}
+      console.log('[NaverExt] __NEXT_DATA__ 에서 상품 못찾음');
+    } catch (e) {
+      console.error('[NaverExt] __NEXT_DATA__ 파싱 오류:', e.message);
+    }
     return false;
   }
 
-  // ── 폴링: 초기 페이지 로드 전용 ──
+  // ── 폴링: 페이지 로드 후 __NEXT_DATA__ 추출 ──
+  let polling = false;
   function startPolling() {
     if (polling) return;
     polling = true;
@@ -108,50 +134,22 @@
         polling = false;
         return;
       }
-      if (attempts < 30) {
+      if (attempts < 20) {
         setTimeout(poll, 500);
       } else {
-        console.log('[NaverExt] 추출 타임아웃');
+        console.log('[NaverExt] __NEXT_DATA__ 추출 타임아웃 — fetch hook 대기');
         polling = false;
       }
     }
     poll();
   }
 
-  // ── URL 변경 감지 ──
-  let lastUrl = location.href;
-
-  function onUrlChange() {
-    if (location.href === lastUrl) return;
-    lastUrl = location.href;
-    if (!location.href.includes('search.shopping.naver.com')) return;
-
-    console.log('[NaverExt] URL 변경:', location.href.substring(0, 100));
-    lastCaptureKeys = {};  // ★ 전체 리셋 → 새 캡처 허용
-    // ★ 폴링 재시작 안함 — fetch/XHR hook이 SPA 데이터 캡처
-  }
-
-  const origPush = history.pushState;
-  history.pushState = function (...args) {
-    origPush.apply(this, args);
-    setTimeout(onUrlChange, 100);
-  };
-  const origReplace = history.replaceState;
-  history.replaceState = function (...args) {
-    origReplace.apply(this, args);
-    setTimeout(onUrlChange, 100);
-  };
-  window.addEventListener('popstate', () => setTimeout(onUrlChange, 100));
-  setInterval(onUrlChange, 1000);
-
-  // ── ★ 초기 페이지: "만 검색" 체크 후 폴링 ──
+  // ── 초기 페이지 ──
   function initPage() {
     if (clickExactSearchButton()) {
-      // 클릭됨 → 페이지 리로드 또는 SPA 업데이트 대기
-      // 리로드면 스크립트 재실행됨, SPA면 fetch hook이 캡처
-      setTimeout(startPolling, 3000);  // fallback
+      setTimeout(startPolling, 3000);
     } else {
-      setTimeout(startPolling, 200);
+      setTimeout(startPolling, 300);
     }
   }
 
@@ -161,20 +159,31 @@
     initPage();
   }
 
-  // ── fetch 가로채기 ──
+  // ── ★ fetch 가로채기 (로깅 강화) ──
   const origFetch = window.fetch;
   window.fetch = function (...args) {
     return origFetch.apply(this, args).then(response => {
       try {
         const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
-        if (url.includes('/search') && url.includes('query=') && response.status === 200) {
+
+        // 넓은 패턴 매칭
+        const isSearch = (url.includes('/search') || url.includes('shopping.naver.com')) && url.includes('query=');
+        const isNextData = url.includes('/_next/data/');
+
+        if ((isSearch || isNextData) && response.status === 200) {
+          console.log('[NaverExt] fetch 감지:', url.substring(0, 120));
           response.clone().json().then(data => {
             const sr = findProducts(data, 0);
             if (sr) {
-              console.log('[NaverExt] fetch:', url.substring(0, 100));
-              sendData(url, sr);
+              console.log('[NaverExt] fetch 상품 발견:', sr.products.length, '개');
+              // _next/data 응답은 pageProps 안에 있을 수 있음
+              sendData(url.includes('productSet=') ? url : location.href, sr);
+            } else {
+              console.log('[NaverExt] fetch 응답에서 상품 못찾음');
             }
-          }).catch(() => {});
+          }).catch(e => {
+            console.log('[NaverExt] fetch JSON 파싱 실패:', e.message);
+          });
         }
       } catch (e) {}
       return response;
@@ -192,12 +201,14 @@
     this.addEventListener('load', function () {
       try {
         const url = this._naverUrl || '';
-        if (url.includes('/search') && url.includes('query=') && this.status === 200) {
+        const isSearch = (url.includes('/search') || url.includes('shopping.naver.com')) && url.includes('query=');
+        if (isSearch && this.status === 200) {
+          console.log('[NaverExt] XHR 감지:', url.substring(0, 100));
           const data = JSON.parse(this.responseText);
           const sr = findProducts(data, 0);
           if (sr) {
-            console.log('[NaverExt] XHR:', url.substring(0, 80));
-            sendData(url, sr);
+            console.log('[NaverExt] XHR 상품 발견:', sr.products.length, '개');
+            sendData(url.includes('productSet=') ? url : location.href, sr);
           }
         }
       } catch (e) {}
@@ -205,5 +216,5 @@
     return origSend.apply(this, args);
   };
 
-  console.log('[NaverExt] injected.js v1.6.0');
+  console.log('[NaverExt] injected.js v1.7.0');
 })();

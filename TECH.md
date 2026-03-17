@@ -56,33 +56,30 @@
 5. background.js → onData() → Django POST /ext/search-result/
 ```
 
-### 수집 전략 (v1.7.1)
+### 수집 전략 (v1.9.0) — URL 네비게이션 방식
 
 ```
-페이지 열기 (total 탭 기본)
+키워드별 3회 URL 이동 (탭 클릭 대신 URL 직접 이동)
   ↓
-초기 __NEXT_DATA__ 대기 (1.5초)
-  ├── 성공 → total 데이터 캡처 → model 클릭
-  └── 타임아웃 → model 클릭 (total은 마지막에)
+1. chrome.tabs.update → ?productSet=total → 페이지 로드 → 데이터 캡처
+  ↓ (1.5~3.5초 랜덤 대기)
+2. chrome.tabs.update → ?productSet=model → 페이지 로드 → 데이터 캡처
+  ↓ (1.5~3.5초 랜덤 대기)
+3. chrome.tabs.update → ?productSet=checkout → 페이지 로드 → 데이터 캡처
   ↓
-model 탭 클릭 → SPA fetch → 캡처
-  ↓
-checkout 탭 클릭 → SPA fetch → 캡처
-  ↓
-(total 미수집 시) total 탭 클릭 → SPA fetch → 캡처
-  ↓
-키워드 완료 → 1.5~3초 랜덤 대기 → 다음 키워드
+키워드 완료 → 2~5초 랜덤 대기 → 다음 키워드
 ```
 
-### 핵심: SSR vs SPA
+**v1.8.x에서 탭 클릭 방식 문제**: SPA 탭 클릭 시 React Query 캐시로 인해
+2번째/3번째 탭에서 새 fetch가 발생하지 않아 데이터 미수신. URL 직접 이동으로 해결.
 
-| 상황 | 데이터 소스 | 캡처 방법 |
-|------|------------|-----------|
-| 초기 페이지 로드 (SSR) | `__NEXT_DATA__` 스크립트 태그 | 폴링 추출 |
-| 탭 클릭 (SPA) | client-side fetch (`/_next/data/`) | fetch hook |
+### 데이터 캡처 방법
 
-**주의**: `onUrlChange()` 에서 `__NEXT_DATA__` 폴링을 재시작하면 안됨!
-→ 이전 total 데이터가 model/checkout 데이터로 잘못 전송되는 버그 발생
+| 방법 | 우선순위 | 설명 |
+|------|---------|------|
+| `__NEXT_DATA__` 폴링 | 1순위 | SSR 렌더링 데이터 추출 |
+| fetch hook | 2순위 | SPA hydration 시 API 호출 가로채기 |
+| XHR hook | 3순위 | fetch 대신 XHR 사용 시 |
 
 ### 메시지 프로토콜
 
@@ -95,6 +92,32 @@ checkout 탭 클릭 → SPA fetch → 캡처
 | CS → BG | `NAVER_PAGE_READY` | 페이지 로드 완료 |
 | CS → BG | `CAPTCHA_DETECTED` | CAPTCHA 감지 |
 | BG → CS | `CLICK_NAVER_TAB` | 탭 클릭 명령 |
+
+---
+
+## UC 크롤러 (서버측)
+
+### 파일
+`ai100/viewer/gmarket_cpc/backend/naver/uc_crawler.py`
+
+### 동작 방식
+1. Django API로 시작 요청 (`POST /uc/start/`)
+2. 백그라운드 스레드에서 undetected-chromedriver 실행
+3. 키워드별 3개 URL 이동 (total/model/checkout)
+4. `__NEXT_DATA__` 추출 → 실패 시 CDP fallback
+5. Django ORM으로 직접 DB 저장
+
+### API
+```
+POST /api/cpc/naver/uc/start/     UC 크롤링 시작 {keywords: [...]}
+GET  /api/cpc/naver/uc/status/    진행 상태 조회
+POST /api/cpc/naver/uc/stop/      크롤링 중지
+```
+
+### 환경
+- Chrome: `/home/joacham/.local/share/google-chrome/chrome` (v145)
+- UC: `undetected-chromedriver 3.5.5`
+- Selenium: `4.41.0`
 
 ---
 
@@ -228,6 +251,9 @@ npm run dev  # :5173
 
 | 버전 | 날짜 | 변경 |
 |------|------|------|
+| v1.9.2 | 2026-03-17 | UC 검색을 웹 대시보드(NaverTermsPage)로 이동, 확장 팝업에서 UC 코드 제거, popup.js Chrome 전용으로 정리 |
+| v1.9.1 | 2026-03-17 | UC 크롤러 추가 (서버측 undetected-chromedriver), Django API 엔드포인트 (uc/start, uc/status, uc/stop) |
+| v1.9.0 | 2026-03-17 | URL 네비게이션 방식 전환 (탭 클릭 → URL 직접 이동), 프로그레스 심플화, 로그 통일 |
 | v1.8.0 | 2026-03-17 | 7가지 크롤링 신뢰성 개선: productSet 검증, per-tab 중복방지, "만 검색" 자동클릭, SW 상태보존, 탭클릭 결과확인, CAPTCHA 일시정지/재개, 메시지 재시도 |
 | v1.7.1 | 2026-03-16 | injected.js stale 데이터 버그 수정, 전체탭 명시적 클릭, 로그 복원, 데이터 초기화 API |
 | v1.7.0 | 2026-03-16 | 심플 로직 재작성 (페이지→total→model→checkout) |
@@ -237,6 +263,6 @@ npm run dev  # :5173
 
 ## 알려진 이슈
 
-- `__NEXT_DATA__` 구조 변경 시 초기 total 캡처 실패 가능 → 명시적 탭 클릭으로 fallback
 - 파트가중치(search5_partwt) 구현됨 (services.py) 단 UI 미연동
 - nid.naver.com 2FA 리다이렉트 시 content-script 미작동 → background.js URL 감시로 대응
+- React 웹 대시보드에서 실시간 데이터 반영하려면 페이지 새로고침 필요

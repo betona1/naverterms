@@ -54,26 +54,13 @@
     .btn-go { background: #03c75a; color: #fff; }
     .btn-stop { background: #333; color: #888; }
 
-    /* 프로그레스 */
     .prog { padding: 10px 14px; border-bottom: 1px solid #222; display: none; }
     .prog-kw { font-size: 13px; font-weight: 800; color: #fff; margin-bottom: 8px; }
-
-    .tabs3 { display: flex; gap: 4px; margin-bottom: 8px; }
-    .t3 {
-      flex: 1; text-align: center; padding: 6px 0;
-      border-radius: 6px; background: #1a1a1a;
-      border: 1px solid #222; font-size: 10px; color: #555;
-    }
-    .t3.ok { border-color: #03c75a55; color: #03c75a; background: #03c75a0d; }
-    .t3.act { border-color: #03c75a; color: #fff; background: #03c75a18; }
-    .t3 .t3i { font-size: 14px; display: block; margin-bottom: 1px; }
-
     .bar { height: 4px; background: #222; border-radius: 2px; overflow: hidden; }
     .bar-fill { height: 100%; border-radius: 2px; background: #03c75a; transition: width 0.3s; }
     .bar-info { display: flex; justify-content: space-between; font-size: 10px; color: #555; margin-top: 3px; }
     .bar-info .pct { color: #03c75a; font-weight: 700; }
 
-    /* 로그 */
     .log-hdr {
       padding: 6px 14px;
       border-bottom: 1px solid #222;
@@ -113,7 +100,7 @@
 </head>
 <body>
   <div class="hdr">
-    <b>🔍 Term 분석기</b>
+    <b>Term 분석기</b>
     <span class="v" id="ver">v-</span>
   </div>
 
@@ -135,11 +122,6 @@
 
   <div class="prog" id="prog">
     <div class="prog-kw" id="kwLabel">-</div>
-    <div class="tabs3">
-      <div class="t3" id="t-total"><span class="t3i">📋</span>전체</div>
-      <div class="t3" id="t-model"><span class="t3i">💰</span>가격비교</div>
-      <div class="t3" id="t-checkout"><span class="t3i">💚</span>네이버페이</div>
-    </div>
     <div class="bar"><div class="bar-fill" id="fill"></div></div>
     <div class="bar-info">
       <span id="steps">-</span>
@@ -147,7 +129,6 @@
     </div>
   </div>
 
-  <!-- 로그 -->
   <div class="log-hdr" id="logHdr">
     <span class="arrow" id="logArrow">▶</span>
     <span class="log-last" id="logLast">-</span>
@@ -156,10 +137,10 @@
   <div class="log-box" id="logBox"></div>
 
   <div class="footer">
-    <button class="fb fb-t" id="btnTest">🔌 연결</button>
-    <button class="fb fb-d" id="btnDash">📊 대시보드</button>
-    <button class="fb fb-r" id="btnReset">🗑 초기화</button>
-    <button class="fb fb-s" id="btnExt">⚙</button>
+    <button class="fb fb-t" id="btnTest">연결</button>
+    <button class="fb fb-d" id="btnDash">대시보드</button>
+    <button class="fb fb-r" id="btnReset">초기화</button>
+    <button class="fb fb-s" id="btnExt">설정</button>
   </div>
 
   <script src="popup.js"></script>
