@@ -228,6 +228,7 @@ npm run dev  # :5173
 
 | 버전 | 날짜 | 변경 |
 |------|------|------|
+| v1.8.0 | 2026-03-17 | 7가지 크롤링 신뢰성 개선: productSet 검증, per-tab 중복방지, "만 검색" 자동클릭, SW 상태보존, 탭클릭 결과확인, CAPTCHA 일시정지/재개, 메시지 재시도 |
 | v1.7.1 | 2026-03-16 | injected.js stale 데이터 버그 수정, 전체탭 명시적 클릭, 로그 복원, 데이터 초기화 API |
 | v1.7.0 | 2026-03-16 | 심플 로직 재작성 (페이지→total→model→checkout) |
 | v1.6.x | 2026-03-16 | 퀵클릭 시퀀스 시도 (실패) |
@@ -237,5 +238,5 @@ npm run dev  # :5173
 ## 알려진 이슈
 
 - `__NEXT_DATA__` 구조 변경 시 초기 total 캡처 실패 가능 → 명시적 탭 클릭으로 fallback
-- CAPTCHA 감지 후 자동 재개 로직 미검증
 - 파트가중치(search5_partwt) 구현됨 (services.py) 단 UI 미연동
+- nid.naver.com 2FA 리다이렉트 시 content-script 미작동 → background.js URL 감시로 대응

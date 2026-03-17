@@ -1,26 +1,35 @@
-// injected.js v1.5.0 — MAIN world
-// __NEXT_DATA__ 초기 추출 + fetch/XHR 캡처
-// ★ 탭 변경 시 폴링 재시작 제거 (stale 데이터 방지)
+// injected.js v1.6.0 — MAIN world
+// ★ productSet 식별 + per-tab 중복방지 + "만 검색" 자동클릭
 (function () {
   'use strict';
 
-  let lastCaptureKey = '';
+  let lastCaptureKeys = {};  // per-productSet 중복키
   let capturedCount = 0;
   let polling = false;
+
+  // ── URL에서 productSet 추출 ──
+  function getProductSet(url) {
+    const m = url.match(/[?&]productSet=(\w+)/);
+    return m ? m[1] : 'total';
+  }
 
   function sendData(url, sr) {
     if (!sr || !sr.products || sr.products.length === 0) return;
 
-    const key = `${sr.query || ''}_${url}_${sr.products.length}`;
-    if (key === lastCaptureKey) return;
-    lastCaptureKey = key;
+    const productSet = getProductSet(url);
+    const key = `${sr.query || ''}_${productSet}_${sr.products.length}_${sr.total || 0}`;
+
+    // ★ per-tab 중복방지 (model/checkout 상품수 같아도 별개로 캡처)
+    if (lastCaptureKeys[productSet] === key) return;
+    lastCaptureKeys[productSet] = key;
 
     capturedCount++;
-    console.log(`[NaverExt] ★ #${capturedCount}: "${sr.query}" ${sr.products.length}개 total=${sr.total} terms=[${(sr.terms || []).join(',')}]`);
+    console.log(`[NaverExt] ★ #${capturedCount}: "${sr.query}" [${productSet}] ${sr.products.length}개 total=${sr.total}`);
 
     window.postMessage({
       type: 'NAVER_SHOPPING_RESPONSE',
       url: url,
+      productSet: productSet,
       query: sr.query || '',
       terms: sr.terms || [],
       termCount: sr.termCount || 0,
@@ -44,6 +53,20 @@
       }
     }
     return null;
+  }
+
+  // ── "000만 검색하기" 버튼 감지 + 클릭 ──
+  function clickExactSearchButton() {
+    const buttons = document.querySelectorAll('a, button');
+    for (const btn of buttons) {
+      const text = (btn.textContent || '').trim();
+      if (text.includes('만 검색') || text.includes('만검색')) {
+        console.log(`[NaverExt] "만 검색" 자동클릭:`, text);
+        btn.click();
+        return true;
+      }
+    }
+    return false;
   }
 
   // ── __NEXT_DATA__ 추출 (초기 페이지 로드 전용) ──
@@ -104,7 +127,7 @@
     if (!location.href.includes('search.shopping.naver.com')) return;
 
     console.log('[NaverExt] URL 변경:', location.href.substring(0, 100));
-    lastCaptureKey = '';  // 리셋 → 새 캡처 허용
+    lastCaptureKeys = {};  // ★ 전체 리셋 → 새 캡처 허용
     // ★ 폴링 재시작 안함 — fetch/XHR hook이 SPA 데이터 캡처
   }
 
@@ -121,11 +144,21 @@
   window.addEventListener('popstate', () => setTimeout(onUrlChange, 100));
   setInterval(onUrlChange, 1000);
 
-  // ── 초기 페이지 로드만 폴링 ──
+  // ── ★ 초기 페이지: "만 검색" 체크 후 폴링 ──
+  function initPage() {
+    if (clickExactSearchButton()) {
+      // 클릭됨 → 페이지 리로드 또는 SPA 업데이트 대기
+      // 리로드면 스크립트 재실행됨, SPA면 fetch hook이 캡처
+      setTimeout(startPolling, 3000);  // fallback
+    } else {
+      setTimeout(startPolling, 200);
+    }
+  }
+
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => setTimeout(startPolling, 200));
+    document.addEventListener('DOMContentLoaded', initPage);
   } else {
-    setTimeout(startPolling, 200);
+    initPage();
   }
 
   // ── fetch 가로채기 ──
@@ -172,5 +205,5 @@
     return origSend.apply(this, args);
   };
 
-  console.log('[NaverExt] injected.js v1.5.0');
+  console.log('[NaverExt] injected.js v1.6.0');
 })();

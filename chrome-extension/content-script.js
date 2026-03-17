@@ -1,19 +1,31 @@
-// content-script.js v1.2.0 — 네이버쇼핑 페이지에 주입
-// 역할: injected.js 삽입 + 탭 클릭 제어 + CAPTCHA 감지
+// content-script.js v1.3.0 — 네이버쇼핑 페이지에 주입
+// ★ 메시지 재시도 + "만 검색" 자동클릭 + productSet 전달
 (function () {
   'use strict';
 
-  console.log('[NaverExt v1.4] content-script.js 로드 (ISOLATED world)');
-  // injected.js는 manifest.json에서 world:"MAIN"으로 직접 로드됨 (CSP 우회)
+  console.log('[NaverExt] content-script.js v1.3.0 (ISOLATED world)');
+
+  // ── ★ 메시지 전송 (재시도 포함) ──
+  function sendToBackground(data, retries) {
+    if (retries === undefined) retries = 2;
+    chrome.runtime.sendMessage(data, (response) => {
+      if (chrome.runtime.lastError) {
+        console.warn('[NaverExt] 메시지 실패:', chrome.runtime.lastError.message);
+        if (retries > 0) {
+          setTimeout(() => sendToBackground(data, retries - 1), 500);
+        }
+      }
+    });
+  }
 
   // ── MAIN world에서 보낸 메시지 수신 → background.js로 전달 ──
-  // injected.js가 shoppingResult에서 추출한 데이터를 직접 전달
   window.addEventListener('message', (event) => {
     if (event.source !== window) return;
     if (event.data?.type === 'NAVER_SHOPPING_RESPONSE') {
-      chrome.runtime.sendMessage({
+      sendToBackground({
         type: 'NAVER_SHOPPING_DATA',
         url: event.data.url,
+        productSet: event.data.productSet || 'total',
         query: event.data.query,
         terms: event.data.terms,
         termCount: event.data.termCount,
@@ -24,8 +36,6 @@
   });
 
   // ── 탭 클릭 함수 ──
-  // 원본 betonaTerms2.py XPath: //*[@id="content"]/div[1]/div[1]/ul/li[N]/a
-  // li[1]=전체, li[2]=가격비교, li[3]=네이버페이
   const TAB_TEXT = {
     total: '전체',
     model: '가격비교',
@@ -36,7 +46,7 @@
     const targetText = TAB_TEXT[tabKey];
     if (!targetText) return false;
 
-    console.log(`[NaverExt v1.4] 탭 클릭 시도: "${targetText}"`);
+    console.log(`[NaverExt] 탭 클릭 시도: "${targetText}"`);
 
     // 전략 1: productSet 필터 영역 내 링크/버튼
     const filterAreas = document.querySelectorAll(
@@ -47,30 +57,28 @@
       for (const el of links) {
         const text = (el.textContent || '').replace(/[\s,]/g, '');
         if (text.startsWith(targetText)) {
-          console.log(`[NaverExt v1.4] 탭 발견 (필터영역):`, el.tagName, text.substring(0, 20));
+          console.log(`[NaverExt] 탭 발견 (필터영역):`, el.tagName, text.substring(0, 20));
           el.click();
           return true;
         }
       }
     }
 
-    // 전략 2: 상단 영역 (헤더 아래) 에서 텍스트 매칭
+    // 전략 2: 상단 영역에서 텍스트 매칭
     const allClickable = document.querySelectorAll('a, button, [role="tab"]');
     for (const el of allClickable) {
       const text = (el.textContent || '').trim();
-      // "전체 73,065" 또는 "가격비교 1,234" 형태
       if (text.startsWith(targetText) && el.offsetParent !== null) {
         const rect = el.getBoundingClientRect();
         if (rect.top < window.innerHeight * 0.5 && rect.height > 0) {
-          console.log(`[NaverExt v1.4] 탭 발견 (텍스트):`, el.tagName, text.substring(0, 30));
+          console.log(`[NaverExt] 탭 발견 (텍스트):`, el.tagName, text.substring(0, 30));
           el.click();
           return true;
         }
       }
     }
 
-    // 전략 3: li > a 구조 (원본 betonaTerms2.py XPath 기반)
-    // //*[@id="content"]/div[1]/div[1]/ul/li[1~3]/a
+    // 전략 3: li > a 구조 (XPath 기반)
     const tabIndices = { total: 0, model: 1, checkout: 2 };
     const idx = tabIndices[tabKey];
     const tabContainers = document.querySelectorAll('ul');
@@ -82,7 +90,7 @@
           const text = (li.textContent || '').trim();
           if (text.includes(targetText) || (idx === 0 && text.includes('전체'))) {
             const link = li.querySelector('a') || li;
-            console.log(`[NaverExt v1.4] 탭 발견 (li구조):`, text.substring(0, 30));
+            console.log(`[NaverExt] 탭 발견 (li구조):`, text.substring(0, 30));
             link.click();
             return true;
           }
@@ -90,18 +98,17 @@
       }
     }
 
-    console.warn(`[NaverExt v1.4] 탭 "${targetText}" 찾지 못함`);
+    console.warn(`[NaverExt] 탭 "${targetText}" 찾지 못함`);
     return false;
   }
 
-  // ── "000만 검색하기" 버튼 자동 클릭 ──
-  // 원본 XPath: //*[@id="container"]/div/div[1]/div/a/em
+  // ── "000만 검색하기" 버튼 클릭 ──
   function clickExactSearchButton() {
     const buttons = document.querySelectorAll('a, button');
     for (const btn of buttons) {
       const text = (btn.textContent || '').trim();
       if (text.includes('만 검색') || text.includes('만검색')) {
-        console.log(`[NaverExt v1.4] "만 검색" 버튼 클릭:`, text);
+        console.log(`[NaverExt] "만 검색" 버튼 클릭:`, text);
         btn.click();
         return true;
       }
@@ -139,10 +146,7 @@
   }
 
   function hideGuide() {
-    if (guideEl) {
-      guideEl.remove();
-      guideEl = null;
-    }
+    if (guideEl) { guideEl.remove(); guideEl = null; }
     const existing = document.getElementById('naver-ext-guide');
     if (existing) existing.remove();
   }
@@ -155,35 +159,26 @@
         sendResponse({ ok: true });
         break;
       }
-
       case 'HIDE_TAB_GUIDE': {
         hideGuide();
         sendResponse({ ok: true });
         break;
       }
-
       case 'CLICK_NAVER_TAB': {
         const clicked = clickNaverTab(msg.tab);
         sendResponse({ success: clicked, tab: msg.tab });
         break;
       }
-
       case 'CLICK_EXACT_SEARCH': {
         const clicked = clickExactSearchButton();
         sendResponse({ success: clicked });
         break;
       }
-
       case 'CHECK_PAGE_STATUS': {
         const captchaType = detectCaptcha();
-        sendResponse({
-          captcha: captchaType,
-          url: location.href,
-          ready: document.readyState === 'complete'
-        });
+        sendResponse({ captcha: captchaType, url: location.href, ready: document.readyState === 'complete' });
         break;
       }
-
       case 'CHECK_PAGE_READY': {
         sendResponse({
           ready: document.readyState === 'complete',
@@ -200,18 +195,13 @@
   function detectCaptcha() {
     if (document.querySelector('[class*="captcha"]')) return 'captcha';
     if (document.querySelector('[class*="receipt"]')) return 'receipt';
-    if (location.href.includes('nid.naver.com')) return '2fa';
     return null;
   }
 
   function checkCaptcha() {
     const captchaType = detectCaptcha();
     if (captchaType) {
-      chrome.runtime.sendMessage({
-        type: 'CAPTCHA_DETECTED',
-        captchaType: captchaType,
-        url: location.href
-      });
+      sendToBackground({ type: 'CAPTCHA_DETECTED', captchaType: captchaType, url: location.href });
     }
   }
 
@@ -229,19 +219,27 @@
       wasCaptcha = true;
     } else if (wasCaptcha) {
       wasCaptcha = false;
-      chrome.runtime.sendMessage({ type: 'CAPTCHA_RESOLVED' });
+      sendToBackground({ type: 'CAPTCHA_RESOLVED' });
     }
   });
   observer.observe(document.documentElement, { childList: true, subtree: true });
 
-  // 페이지 로드 완료 알림
-  function notifyReady() {
-    chrome.runtime.sendMessage({ type: 'NAVER_PAGE_READY', url: location.href });
+  // ── ★ 페이지 로드 완료: "만 검색" 체크 후 PAGE_READY ──
+  function handlePageReady() {
+    if (clickExactSearchButton()) {
+      console.log('[NaverExt] "만 검색" 클릭 → 페이지 업데이트 대기');
+      // 리로드면 스크립트 재실행, SPA면 2.5초 후 PAGE_READY
+      setTimeout(() => {
+        sendToBackground({ type: 'NAVER_PAGE_READY', url: location.href });
+      }, 2500);
+    } else {
+      sendToBackground({ type: 'NAVER_PAGE_READY', url: location.href });
+    }
   }
 
   if (document.readyState === 'complete') {
-    setTimeout(notifyReady, 500);
+    setTimeout(handlePageReady, 500);
   } else {
-    window.addEventListener('load', () => setTimeout(notifyReady, 500));
+    window.addEventListener('load', () => setTimeout(handlePageReady, 500));
   }
 })();

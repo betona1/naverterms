@@ -1,4 +1,4 @@
-// popup.js v1.7.1 — 로그 복원 + 데이터 초기화
+// popup.js v1.8.0 — CAPTCHA 상태 + 로그 + 데이터 초기화
 document.addEventListener('DOMContentLoaded', () => {
   const API = 'http://192.168.219.100:8003/api/cpc/naver';
   const $ = id => document.getElementById(id);
@@ -57,7 +57,10 @@ document.addEventListener('DOMContentLoaded', () => {
       }
 
       // 크롤링 상태
-      if (r.running) {
+      if (r.captchaPaused) {
+        $('crVal').textContent = 'CAPTCHA';
+        setDot('crDot', 'dot-ng');
+      } else if (r.running) {
         $('crVal').textContent = '수집중';
         setDot('crDot', 'dot-ok');
       } else if (r.total > 0 && r.done >= r.total) {
