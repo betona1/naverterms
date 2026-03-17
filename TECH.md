@@ -266,3 +266,13 @@ npm run dev  # :5173
 - 파트가중치(search5_partwt) 구현됨 (services.py) 단 UI 미연동
 - nid.naver.com 2FA 리다이렉트 시 content-script 미작동 → background.js URL 감시로 대응
 - React 웹 대시보드에서 실시간 데이터 반영하려면 페이지 새로고침 필요
+
+### UC 크롤러 이슈 (2026-03-17)
+
+| 이슈 | 상태 | 상세 |
+|------|------|------|
+| 네이버 IP 차단 | 미해결 | 서버(192.168.219.100)에서 네이버쇼핑 접속 시 "쇼핑 서비스 접속이 일시적으로 제한" 응답. 짧은 시간 내 다수 요청으로 IP 차단됨. 시간 경과 후 자동 해제 예상 |
+| headless 모드 차단 | 해결 | UC headless 모드를 네이버가 감지하여 빈 페이지(body 693자) 반환 → `headless=False` + Xvfb 가상 디스플레이 사용 |
+| ChromeDriver 버전 불일치 | 해결 | Chrome 145 vs UC 자동다운로드 ChromeDriver 146 → `version_main=145` 명시 |
+| DISPLAY 미설정 | 해결 | Django 프로세스에 DISPLAY 환경변수 없음 → `os.environ['DISPLAY'] = ':0'` 설정 |
+| 모달 깜빡임 | 해결 | UC 모드에서 Chrome 확장 폴링이 동시 실행되어 상태 충돌 → mode 체크로 분리 |
