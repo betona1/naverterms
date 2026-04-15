@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 import { useTheme } from '../hooks/useTheme';
 import * as naverApi from '../api/naverApi';
+import { fetchStores, type SmartStore } from '../api/smartstoreApi';
 import { useNaverExtension } from '../components/naver/useNaverExtension';
 import ExtensionStatus from '../components/naver/ExtensionStatus';
 import { NaverLogo, RankIcon } from '../components/naver/NaverIcon';
@@ -38,6 +39,7 @@ export default function NaverRankPage() {
   const [days, setDays] = useState(30);
   const [loading, setLoading] = useState(false);
 
+  const [stores, setStores] = useState<SmartStore[]>([]);
   const [newKeyword, setNewKeyword] = useState('');
   const [newTargetType, setNewTargetType] = useState('store');
   const [newTargetValue, setNewTargetValue] = useState('');
@@ -55,6 +57,7 @@ export default function NaverRankPage() {
 
   useEffect(() => { loadSummary(); }, [loadSummary]);
   useEffect(() => { loadHistory(); }, [loadHistory]);
+  useEffect(() => { fetchStores().then(setStores).catch(console.error); }, []);
 
   useEffect(() => {
     return onProgress((e) => {
@@ -177,9 +180,25 @@ export default function NaverRankPage() {
             </div>
             <div className="flex-1 min-w-[160px]">
               <label className={`text-[11px] font-bold block mb-1.5 ${txtSub}`}>대상값</label>
-              <input value={newTargetValue} onChange={e => setNewTargetValue(e.target.value)}
-                className={`w-full rounded-lg border px-3 py-2 text-[12px] focus:outline-none focus:ring-2 transition ${inputCls}`}
-                placeholder="스토어명 또는 nvMid" />
+              {newTargetType === 'store' && stores.length > 0 ? (
+                <select value={newTargetValue}
+                  onChange={e => {
+                    const val = e.target.value;
+                    setNewTargetValue(val);
+                    const s = stores.find(st => st.store_name === val);
+                    if (s) setNewDisplayName(s.store_name);
+                  }}
+                  className={`w-full rounded-lg border px-3 py-2 text-[12px] focus:outline-none focus:ring-2 focus:ring-[#03c75a]/50 transition ${selectCls}`}>
+                  <option value="">스토어 선택</option>
+                  {stores.map(s => (
+                    <option key={s.id} value={s.store_name}>{s.store_name}</option>
+                  ))}
+                </select>
+              ) : (
+                <input value={newTargetValue} onChange={e => setNewTargetValue(e.target.value)}
+                  className={`w-full rounded-lg border px-3 py-2 text-[12px] focus:outline-none focus:ring-2 transition ${inputCls}`}
+                  placeholder={newTargetType === 'store' ? '스토어명' : 'nvMid'} />
+              )}
             </div>
             <div className="flex-1 min-w-[130px]">
               <label className={`text-[11px] font-bold block mb-1.5 ${txtSub}`}>표시이름</label>

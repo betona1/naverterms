@@ -7,11 +7,13 @@ import {
   fetchWCodes,
   previewSuspend,
   suspendProducts as apiSuspendProducts,
+  toggleFocus,
   type SmartStoreProduct,
   type ProductStats,
   type SuspendPreviewResult,
 } from '../api/smartstoreProductApi';
 import { fetchStores, type SmartStore } from '../api/smartstoreApi';
+import ProductOrdersModal from '../components/smartstore/ProductOrdersModal';
 
 const STATUS_LABELS: Record<string, string> = {
   SALE: '판매중',
@@ -51,6 +53,7 @@ export default function SmartStoreProductsPage() {
   const [stats, setStats] = useState<ProductStats | null>(null);
   const [loading, setLoading] = useState(false);
   const [soldoutFilter, setSoldoutFilter] = useState(false);
+  const [filterMode, setFilterMode] = useState<'all' | 'focus' | 'sold'>('all');
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState('');
   const [excelOpen, setExcelOpen] = useState(false);
@@ -63,6 +66,10 @@ export default function SmartStoreProductsPage() {
   const [suspendLoading, setSuspendLoading] = useState(false);
   const [suspendExecuting, setSuspendExecuting] = useState(false);
   const [suspendResult, setSuspendResult] = useState<{ success: number; fail: number } | null>(null);
+  const [orderModal, setOrderModal] = useState<{ code: string; name: string } | null>(null);
+  // 정렬
+  const [sortBy, setSortBy] = useState('');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
 
   // 상점명 + API 상점 목록 조회
   useEffect(() => {
@@ -87,14 +94,14 @@ export default function SmartStoreProductsPage() {
     if (storeId < 0) return;
     setLoading(true);
     try {
-      const res = await fetchProducts(storeId, page, perPage, status || undefined, search || undefined, soldoutFilter ? 1 : undefined);
+      const res = await fetchProducts(storeId, page, perPage, status || undefined, search || undefined, soldoutFilter ? 1 : undefined, filterMode === 'focus' ? 1 : undefined, filterMode === 'sold' ? 1 : undefined, sortBy || undefined, sortBy ? sortDir : undefined);
       setProducts(res.items);
       setTotal(res.total);
       setTotalPages(res.total_pages);
     } finally {
       setLoading(false);
     }
-  }, [storeId, page, perPage, status, search, soldoutFilter]);
+  }, [storeId, page, perPage, status, search, soldoutFilter, filterMode, sortBy, sortDir]);
 
   // 통계 조회
   const loadStats = useCallback(async () => {
@@ -132,6 +139,24 @@ export default function SmartStoreProductsPage() {
   const handleStatusChange = (v: string) => {
     setStatus(v);
     setPage(1);
+  };
+
+  // 정렬 토글: desc → asc → 해제
+  const toggleSort = (col: string) => {
+    if (sortBy !== col) {
+      setSortBy(col);
+      setSortDir('desc');
+    } else if (sortDir === 'desc') {
+      setSortDir('asc');
+    } else {
+      setSortBy('');
+      setSortDir('desc');
+    }
+    setPage(1);
+  };
+  const sortIcon = (col: string) => {
+    if (sortBy !== col) return '';
+    return sortDir === 'desc' ? ' ↓' : ' ↑';
   };
 
   // 체크박스 핸들러
@@ -231,9 +256,24 @@ export default function SmartStoreProductsPage() {
     }
   };
 
+  // 집중관리 토글
+  const handleToggleFocus = async (productId: number, currentFocus: number) => {
+    await toggleFocus([productId], currentFocus ? 0 : 1);
+    setProducts(prev => prev.map(p => p.id === productId ? { ...p, is_focus: currentFocus ? 0 : 1 } : p));
+  };
+
+  const handleBulkFocus = async (isFocus: number) => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    await toggleFocus(ids, isFocus);
+    setSelectedIds(new Set());
+    setSelectAll(false);
+    loadProducts();
+  };
+
   // storeId는 항상 0 이상 (0=전체, n=개별상점)
 
-  const colSpan = isAllStores ? 10 : 9;
+  const colSpan = isAllStores ? 11 : 10;
   const getStoreUrlById = (sid: number) => apiStores.find(st => st.id === sid)?.store_url || '';
 
   return (
@@ -271,6 +311,22 @@ export default function SmartStoreProductsPage() {
               <span className="text-xs text-gray-500 dark:text-gray-400">
                 {selectAll ? `전체 ${total.toLocaleString()}개` : `${selectedIds.size.toLocaleString()}개`} 선택
               </span>
+            )}
+            {hasSelection && !selectAll && (
+              <>
+                <button
+                  className="px-3 py-1.5 text-sm bg-yellow-500 text-white rounded hover:bg-yellow-600 font-medium"
+                  onClick={() => handleBulkFocus(1)}
+                >
+                  ★ 집중관리
+                </button>
+                <button
+                  className="px-3 py-1.5 text-sm bg-gray-400 text-white rounded hover:bg-gray-500 font-medium"
+                  onClick={() => handleBulkFocus(0)}
+                >
+                  ☆ 해제
+                </button>
+              </>
             )}
             <button
               className="px-4 py-1.5 text-sm bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50 font-medium"
@@ -313,7 +369,7 @@ export default function SmartStoreProductsPage() {
 
         {/* Stats bar */}
         {stats && (
-          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+          <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
             <div className="bg-white dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700 px-3 py-2">
               <div className="text-xs text-gray-400">전체</div>
               <div className="text-lg font-bold">{stats.total.toLocaleString()}</div>
@@ -321,6 +377,18 @@ export default function SmartStoreProductsPage() {
             <div className="bg-white dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700 px-3 py-2">
               <div className="text-xs text-green-500">판매중</div>
               <div className="text-lg font-bold text-green-600">{(stats.by_status['SALE'] || 0).toLocaleString()}</div>
+            </div>
+            <div
+              className={`bg-white dark:bg-gray-800 rounded border px-3 py-2 cursor-pointer transition-colors ${
+                filterMode === 'sold'
+                  ? 'border-blue-500 dark:border-blue-400 ring-1 ring-blue-500/30'
+                  : 'border-gray-200 dark:border-gray-700 hover:border-blue-300 dark:hover:border-blue-600'
+              }`}
+              onClick={() => { setFilterMode(filterMode === 'sold' ? 'all' : 'sold'); setPage(1); }}
+              title="클릭하면 판매된 상품만 필터"
+            >
+              <div className="text-xs text-blue-500">판매된상품</div>
+              <div className="text-lg font-bold text-blue-600 dark:text-blue-400">{stats.sold_count.toLocaleString()}</div>
             </div>
             <div className="bg-white dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700 px-3 py-2">
               <div className="text-xs text-yellow-500">판매중지</div>
@@ -343,6 +411,20 @@ export default function SmartStoreProductsPage() {
 
         {/* Filters */}
         <div className="flex flex-wrap gap-2">
+          <div className="flex rounded overflow-hidden border border-gray-300 dark:border-gray-600">
+            <button
+              className={`px-3 py-1.5 text-sm font-medium transition-colors ${filterMode === 'all' ? 'bg-[#03c75a] text-white' : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700'}`}
+              onClick={() => { setFilterMode('all'); setPage(1); }}
+            >전체</button>
+            <button
+              className={`px-3 py-1.5 text-sm font-medium transition-colors ${filterMode === 'focus' ? 'bg-yellow-500 text-white' : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700'}`}
+              onClick={() => { setFilterMode('focus'); setPage(1); }}
+            >★ 집중관리</button>
+            <button
+              className={`px-3 py-1.5 text-sm font-medium transition-colors ${filterMode === 'sold' ? 'bg-blue-600 text-white' : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700'}`}
+              onClick={() => { setFilterMode('sold'); setPage(1); }}
+            >판매된상품{stats ? ` ${stats.sold_count.toLocaleString()}` : ''}</button>
+          </div>
           <select
             className="text-sm border border-gray-300 dark:border-gray-600 rounded px-2 py-1.5 bg-white dark:bg-gray-800"
             value={status}
@@ -369,6 +451,34 @@ export default function SmartStoreProductsPage() {
               검색
             </button>
           </div>
+          {/* 상단 미니 페이지네이션 */}
+          {totalPages > 1 && (
+            <div className="flex items-center gap-0.5 ml-2">
+              <button
+                className="px-1.5 py-1 text-xs rounded border border-gray-300 dark:border-gray-600 disabled:opacity-30"
+                disabled={page <= 1}
+                onClick={() => setPage(page - 1)}
+              >&lt;</button>
+              {Array.from({ length: Math.min(totalPages, 5) }, (_, i) => {
+                let p: number;
+                if (totalPages <= 5) p = i + 1;
+                else if (page <= 3) p = i + 1;
+                else if (page >= totalPages - 2) p = totalPages - 4 + i;
+                else p = page - 2 + i;
+                return (
+                  <button key={p}
+                    className={`px-1.5 py-1 text-xs rounded border ${p === page ? 'bg-[#03c75a] text-white border-[#03c75a]' : 'border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700'}`}
+                    onClick={() => setPage(p)}
+                  >{p}</button>
+                );
+              })}
+              <button
+                className="px-1.5 py-1 text-xs rounded border border-gray-300 dark:border-gray-600 disabled:opacity-30"
+                disabled={page >= totalPages}
+                onClick={() => setPage(page + 1)}
+              >&gt;</button>
+            </div>
+          )}
           <div className="ml-auto text-sm text-gray-400 self-center">
             총 {total.toLocaleString()}개
           </div>
@@ -401,19 +511,32 @@ export default function SmartStoreProductsPage() {
                     </label>
                   </div>
                 </th>
+                <th className="px-3 py-2 w-10 text-center" title="집중관리">★</th>
                 {isAllStores && <th className="px-3 py-2 w-24">상점</th>}
                 <th className="px-3 py-2 w-16">이미지</th>
                 <th className="px-3 py-2">상품명</th>
                 <th className="px-3 py-2 w-28">관리코드</th>
-                <th className="px-3 py-2 w-24 text-right">판매가</th>
-                <th className="px-3 py-2 w-20 text-right">재고</th>
-                <th className="px-3 py-2 w-24 text-center">상태</th>
-                <th className="px-3 py-2 w-20 text-center">노출</th>
                 <th
-                  className={`px-3 py-2 w-24 text-center cursor-pointer select-none hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors ${soldoutFilter ? 'bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400' : ''}`}
-                  onClick={() => { setSoldoutFilter(!soldoutFilter); setPage(1); }}
-                  title="클릭하면 품절 상품만 필터"
-                >오너클랜품절{soldoutFilter ? ' ✕' : ''}</th>
+                  className={`px-3 py-2 w-24 text-right cursor-pointer select-none hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors ${sortBy === 'sale_price' ? 'text-blue-600 dark:text-blue-400' : ''}`}
+                  onClick={() => toggleSort('sale_price')}
+                  title="판매가순 정렬"
+                >판매가{sortIcon('sale_price')}</th>
+                <th
+                  className={`px-3 py-2 w-20 text-right cursor-pointer select-none hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors ${sortBy === 'stock' ? 'text-blue-600 dark:text-blue-400' : ''}`}
+                  onClick={() => toggleSort('stock')}
+                  title="재고순 정렬"
+                >재고{sortIcon('stock')}</th>
+                <th className="px-3 py-2 w-20 text-center">상태</th>
+                <th
+                  className={`px-3 py-2 w-32 text-right cursor-pointer select-none hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors ${sortBy === 'order_amount' ? 'text-blue-600 dark:text-blue-400' : ''}`}
+                  onClick={() => toggleSort('order_amount')}
+                  title="판매금액순 정렬"
+                >판매금액{sortIcon('order_amount')}</th>
+                <th
+                  className={`px-3 py-2 w-24 text-right cursor-pointer select-none hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors ${sortBy === 'order_qty' ? 'text-blue-600 dark:text-blue-400' : ''}`}
+                  onClick={() => toggleSort('order_qty')}
+                  title="판매수량순 정렬"
+                >판매수량{sortIcon('order_qty')}</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
@@ -432,6 +555,13 @@ export default function SmartStoreProductsPage() {
                       onChange={() => handleToggleId(p.id)}
                       className="rounded"
                     />
+                  </td>
+                  <td className="px-2 py-2 text-center">
+                    <button
+                      className={`text-lg leading-none transition-colors ${p.is_focus ? 'text-yellow-500' : 'text-gray-300 dark:text-gray-600 hover:text-yellow-400'}`}
+                      onClick={() => handleToggleFocus(p.id, p.is_focus)}
+                      title={p.is_focus ? '집중관리 해제' : '집중관리 지정'}
+                    >{p.is_focus ? '★' : '☆'}</button>
                   </td>
                   {isAllStores && (
                     <td className="px-3 py-2 text-xs text-gray-600 dark:text-gray-400 whitespace-nowrap">
@@ -464,16 +594,32 @@ export default function SmartStoreProductsPage() {
                       );
                     })()}
                   </td>
-                  <td className="px-3 py-2 text-xs truncate max-w-[120px]" title={p.seller_management_code || ''}>
-                    {p.seller_management_code?.startsWith('W') ? (
-                      <a
-                        href={`https://ownerclan.com/V2/product/view.php?selfcode=${p.seller_management_code}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-orange-600 dark:text-orange-400 hover:underline"
-                      >{p.seller_management_code}</a>
+                  <td className="px-3 py-2 text-xs max-w-[140px]" title={p.seller_management_code || ''}>
+                    {p.seller_management_code ? (
+                      <div>
+                        <span className="flex items-center gap-1">
+                          {p.seller_management_code.startsWith('W') ? (
+                            <a
+                              href={`https://ownerclan.com/V2/product/view.php?selfcode=${p.seller_management_code}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-orange-600 dark:text-orange-400 hover:underline"
+                              onClick={e => e.stopPropagation()}
+                            >{p.seller_management_code}</a>
+                          ) : (
+                            <span className="text-gray-500">{p.seller_management_code}</span>
+                          )}
+                          {p.has_orders && (
+                            <button
+                              className="text-[10px] px-1 py-0.5 rounded bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900/50 whitespace-nowrap"
+                              onClick={() => setOrderModal({ code: p.seller_management_code || '', name: p.name })}
+                              title="주문이력 보기"
+                            >주문</button>
+                          )}
+                        </span>
+                      </div>
                     ) : (
-                      <span className="text-gray-500">{p.seller_management_code || '-'}</span>
+                      <span className="text-gray-500">-</span>
                     )}
                   </td>
                   <td className="px-3 py-2 text-right text-xs font-medium">
@@ -491,18 +637,28 @@ export default function SmartStoreProductsPage() {
                       {STATUS_LABELS[p.status_type || ''] || p.status_type || '-'}
                     </span>
                   </td>
-                  <td className="px-3 py-2 text-center text-xs">
-                    {p.channel_product_display_status_type === 'ON' ? (
-                      <span className="text-green-500 font-medium">ON</span>
+                  <td className="px-3 py-2 text-right text-xs tabular-nums">
+                    {p.all_order_amount > 0 ? (
+                      <div>
+                        <div className="font-medium text-gray-900 dark:text-gray-100">{p.all_order_amount.toLocaleString()}</div>
+                        {p.total_order_amount > 0 && p.total_order_amount !== p.all_order_amount && (
+                          <div className="text-[10px] text-[#03c75a] leading-tight">({p.total_order_amount.toLocaleString()})</div>
+                        )}
+                      </div>
                     ) : (
-                      <span className="text-gray-400">{p.channel_product_display_status_type || '-'}</span>
+                      <span className="text-gray-300 dark:text-gray-600">-</span>
                     )}
                   </td>
-                  <td className="px-3 py-2 text-center">
-                    {p.ownerclan_soldout === 1 ? (
-                      <span className="inline-block px-2 py-0.5 rounded-full text-[10px] font-medium bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400">상품품절</span>
+                  <td className="px-3 py-2 text-right text-xs tabular-nums">
+                    {p.all_order_qty > 0 ? (
+                      <div>
+                        <div className="font-medium text-gray-900 dark:text-gray-100">{p.all_order_qty.toLocaleString()}</div>
+                        {p.total_order_qty > 0 && p.total_order_qty !== p.all_order_qty && (
+                          <div className="text-[10px] text-[#03c75a] leading-tight">({p.total_order_qty.toLocaleString()})</div>
+                        )}
+                      </div>
                     ) : (
-                      <span className="text-gray-400 text-xs">-</span>
+                      <span className="text-gray-300 dark:text-gray-600">-</span>
                     )}
                   </td>
                 </tr>
@@ -568,6 +724,15 @@ export default function SmartStoreProductsPage() {
           product={detailProduct}
           storeUrl={isAllStores ? getStoreUrlById(detailProduct.store_id) : storeUrl}
           onClose={() => setDetailProduct(null)}
+        />
+      )}
+
+      {/* Product Orders Modal */}
+      {orderModal && (
+        <ProductOrdersModal
+          code={orderModal.code}
+          productName={orderModal.name}
+          onClose={() => setOrderModal(null)}
         />
       )}
 

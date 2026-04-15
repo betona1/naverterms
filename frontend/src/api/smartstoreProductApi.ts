@@ -16,6 +16,12 @@ export interface SmartStoreProduct {
   category_id: string | null;
   product_image_url: string | null;
   ownerclan_soldout: number;
+  is_focus: number;
+  total_order_qty: number;
+  total_order_amount: number;
+  all_order_qty: number;
+  all_order_amount: number;
+  has_orders?: boolean;
   store_name?: string;
   synced_at: string;
   created_at: string;
@@ -33,6 +39,7 @@ export interface ProductListResponse {
 export interface ProductStats {
   total: number;
   by_status: Record<string, number>;
+  sold_count: number;
   last_synced_at: string | null;
 }
 
@@ -50,12 +57,28 @@ export async function fetchProducts(
   status?: string,
   search?: string,
   ownerclanSoldout?: number,
+  isFocus?: number,
+  hasOrders?: number,
+  sortBy?: string,
+  sortDir?: string,
 ): Promise<ProductListResponse> {
   const params: Record<string, string | number> = { store_id: storeId, page, per_page: perPage };
   if (status) params.status = status;
   if (search) params.search = search;
   if (ownerclanSoldout !== undefined) params.ownerclan_soldout = ownerclanSoldout;
+  if (isFocus !== undefined) params.is_focus = isFocus;
+  if (hasOrders !== undefined) params.has_orders = hasOrders;
+  if (sortBy) params.sort_by = sortBy;
+  if (sortDir) params.sort_dir = sortDir;
   const { data } = await api.get<ProductListResponse>('/', { params });
+  return data;
+}
+
+export async function toggleFocus(productIds: number[], isFocus: number): Promise<{ updated: number }> {
+  const { data } = await api.post<{ updated: number }>('/focus/', {
+    product_ids: productIds,
+    is_focus: isFocus,
+  });
   return data;
 }
 
@@ -128,6 +151,59 @@ export async function fetchWCodes(
   });
   return data.codes;
 }
+
+// ── 주문이력 ──
+
+export interface ProductOrderRow {
+  order_date: string;
+  site_name: string;
+  order_status: string;
+  quantity: number;
+  payment_price: number;
+  settlement_price: number;
+  cost: number;
+  profit: number;
+  receiver_name: string;
+  order_option: string;
+  bid_number: string;
+  product_name: string;
+  product_seller_code: string;
+}
+
+export interface SiteSummary {
+  site_name: string;
+  count: number;
+  qty: number;
+  amount: number;
+}
+
+export interface ProductOrdersResponse {
+  orders: ProductOrderRow[];
+  summary: {
+    count: number;
+    total_qty: number;
+    total_payment: number;
+    total_settle: number;
+    total_cost: number;
+    total_profit: number;
+  };
+  by_site: SiteSummary[];
+}
+
+export async function fetchProductOrders(
+  code: string,
+  startDate: string,
+  endDate: string,
+  productName?: string,
+): Promise<ProductOrdersResponse> {
+  const params: Record<string, string> = { start_date: startDate, end_date: endDate };
+  if (code) params.code = code;
+  if (productName) params.product_name = productName;
+  const { data } = await api.get<ProductOrdersResponse>('/orders/', { params });
+  return data;
+}
+
+// ── 품절처리 ──
 
 export interface SuspendPreviewResult {
   total_count: number;

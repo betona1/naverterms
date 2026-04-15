@@ -164,8 +164,21 @@ def sync_products(store_pk):
     }
 
 
-def get_products(store_pk, page=1, per_page=50, status=None, search=None, ownerclan_soldout=None):
-    """DB에서 상품 목록 조회 (페이지네이션, 필터). store_pk=0이면 전체상점."""
+SORT_COLUMNS = {
+    'sale_price': 'p.sale_price',
+    'stock': 'p.stock_quantity',
+    'order_amount': 'p.all_order_amount',
+    'order_qty': 'p.all_order_qty',
+}
+
+
+def get_products(store_pk, page=1, per_page=50, status=None, search=None,
+                 ownerclan_soldout=None, is_focus=None, has_orders=None,
+                 sort_by=None, sort_dir=None):
+    """DB에서 상품 목록 조회 (페이지네이션, 필터, 정렬). store_pk=0이면 전체상점."""
+    from . import smartstore_order_service
+    sold_codes = smartstore_order_service.get_sold_seller_codes()
+
     all_stores = (store_pk == 0)
     where = []
     params = []
@@ -183,9 +196,24 @@ def get_products(store_pk, page=1, per_page=50, status=None, search=None, ownerc
     if ownerclan_soldout is not None:
         where.append('p.ownerclan_soldout = %s')
         params.append(int(ownerclan_soldout))
+    if is_focus is not None:
+        where.append('p.is_focus = %s')
+        params.append(int(is_focus))
+    if has_orders is not None:
+        if not sold_codes:
+            return {'items': [], 'total': 0, 'page': page, 'per_page': per_page, 'total_pages': 0}
+        sold_list = list(sold_codes)
+        sold_ph = ','.join(['%s'] * len(sold_list))
+        where.append(f'p.seller_management_code IN ({sold_ph})')
+        params.extend(sold_list)
 
     where_sql = ' AND '.join(where) if where else '1=1'
     offset = (page - 1) * per_page
+
+    # 정렬
+    col = SORT_COLUMNS.get(sort_by or '')
+    direction = 'ASC' if sort_dir == 'asc' else 'DESC'
+    order_sql = f'{col} {direction}, p.origin_product_no DESC' if col else 'p.origin_product_no DESC'
 
     with connections['myproduct'].cursor() as cur:
         cur.execute(f"SELECT COUNT(*) FROM smartstore_product p WHERE {where_sql}", params)
@@ -196,16 +224,20 @@ def get_products(store_pk, page=1, per_page=50, status=None, search=None, ownerc
                 f"SELECT p.*, s.store_name FROM smartstore_product p "
                 f"JOIN smartstoreIdList s ON s.id = p.store_id "
                 f"WHERE {where_sql} "
-                f"ORDER BY p.origin_product_no DESC LIMIT %s OFFSET %s",
+                f"ORDER BY {order_sql} LIMIT %s OFFSET %s",
                 params + [per_page, offset],
             )
         else:
             cur.execute(
                 f"SELECT p.* FROM smartstore_product p WHERE {where_sql} "
-                f"ORDER BY p.origin_product_no DESC LIMIT %s OFFSET %s",
+                f"ORDER BY {order_sql} LIMIT %s OFFSET %s",
                 params + [per_page, offset],
             )
         rows = [_serialize_row(r) for r in _dictfetchall(cur)]
+
+    for row in rows:
+        code = row.get('seller_management_code') or ''
+        row['has_orders'] = code != '' and code in sold_codes
 
     return {
         'items': rows,
@@ -218,6 +250,9 @@ def get_products(store_pk, page=1, per_page=50, status=None, search=None, ownerc
 
 def get_product_stats(store_pk):
     """상태별 개수 통계. store_pk=0이면 전체상점 통합."""
+    from . import smartstore_order_service
+    sold_codes = smartstore_order_service.get_sold_seller_codes()
+
     with connections['myproduct'].cursor() as cur:
         if store_pk:
             cur.execute(
@@ -244,6 +279,25 @@ def get_product_stats(store_pk):
         synced_row = _dictfetchall(cur)
         last_synced = synced_row[0]['last_synced'] if synced_row else None
 
+        # 판매된 상품 수 (주문 1건 이상)
+        sold_count = 0
+        if sold_codes:
+            sold_list = list(sold_codes)
+            sold_ph = ','.join(['%s'] * len(sold_list))
+            if store_pk:
+                cur.execute(
+                    f"SELECT COUNT(*) FROM smartstore_product "
+                    f"WHERE store_id = %s AND seller_management_code IN ({sold_ph})",
+                    [store_pk] + sold_list,
+                )
+            else:
+                cur.execute(
+                    f"SELECT COUNT(*) FROM smartstore_product "
+                    f"WHERE seller_management_code IN ({sold_ph})",
+                    sold_list,
+                )
+            sold_count = cur.fetchone()[0]
+
     stats = {}
     total = 0
     for r in status_rows:
@@ -254,6 +308,7 @@ def get_product_stats(store_pk):
     result = {
         'total': total,
         'by_status': stats,
+        'sold_count': sold_count,
         'last_synced_at': last_synced.isoformat() if last_synced and isinstance(last_synced, datetime) else (last_synced or None),
     }
     return result
@@ -516,3 +571,16 @@ def get_all_stores_stats():
         result[sid]['total'] += r['cnt']
 
     return result
+
+
+def toggle_focus(product_ids, is_focus):
+    """상품의 집중관리 상태를 벌크 토글"""
+    if not product_ids:
+        return {'updated': 0}
+    placeholders = ','.join(['%s'] * len(product_ids))
+    with connections['myproduct'].cursor() as cur:
+        cur.execute(
+            f"UPDATE smartstore_product SET is_focus = %s WHERE id IN ({placeholders})",
+            [int(is_focus)] + list(product_ids),
+        )
+        return {'updated': cur.rowcount}

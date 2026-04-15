@@ -16,4 +16,6 @@ urlpatterns = [
     path('products/wcodes/', views.SmartStoreProductWCodesView.as_view()),
     path('products/suspend-preview/', views.SmartStoreProductSuspendPreviewView.as_view()),
     path('products/suspend/', views.SmartStoreProductSuspendView.as_view()),
+    path('products/focus/', views.SmartStoreProductFocusView.as_view()),
+    path('products/orders/', views.SmartStoreProductOrdersView.as_view()),
 ]

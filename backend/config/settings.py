@@ -54,6 +54,15 @@ DATABASES = {
         'PASSWORD': os.getenv('MYPRODUCT_DB_PASSWORD', '').strip("'"),
         'OPTIONS': {'charset': 'utf8mb4'},
     },
+    'joacham': {
+        'ENGINE': 'django.db.backends.mysql',
+        'NAME': 'joacham',
+        'HOST': os.getenv('MYPRODUCT_DB_HOST', '192.168.219.200'),
+        'PORT': int(os.getenv('MYPRODUCT_DB_PORT', 3306)),
+        'USER': os.getenv('MYPRODUCT_DB_USER', 'root'),
+        'PASSWORD': os.getenv('MYPRODUCT_DB_PASSWORD', '').strip("'"),
+        'OPTIONS': {'charset': 'utf8mb4'},
+    },
 }
 
 DATABASE_ROUTERS = ['config.db_router.NaverDbRouter']

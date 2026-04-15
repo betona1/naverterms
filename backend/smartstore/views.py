@@ -7,6 +7,7 @@ from rest_framework.response import Response
 
 from . import smartstore_service
 from . import smartstore_product_service
+from . import smartstore_order_service
 
 
 # ── 스마트스토어 상점 관리 ──
@@ -177,9 +178,17 @@ class SmartStoreProductListView(APIView):
         status = request.query_params.get('status') or None
         search = request.query_params.get('search') or None
         ownerclan_soldout = request.query_params.get('ownerclan_soldout')
+        is_focus = request.query_params.get('is_focus')
+        has_orders = request.query_params.get('has_orders')
+        sort_by = request.query_params.get('sort_by') or None
+        sort_dir = request.query_params.get('sort_dir') or None
         result = smartstore_product_service.get_products(
             int(store_id), page, per_page, status, search,
             ownerclan_soldout=int(ownerclan_soldout) if ownerclan_soldout is not None else None,
+            is_focus=int(is_focus) if is_focus is not None else None,
+            has_orders=int(has_orders) if has_orders is not None else None,
+            sort_by=sort_by,
+            sort_dir=sort_dir,
         )
         return Response(result)
 
@@ -305,4 +314,31 @@ class SmartStoreProductSuspendView(APIView):
         select_all = request.data.get('select_all', False)
         filters = request.data.get('filters', {})
         result = smartstore_product_service.suspend_products(product_ids, select_all, filters)
+        return Response(result)
+
+
+class SmartStoreProductFocusView(APIView):
+    def post(self, request):
+        product_ids = request.data.get('product_ids', [])
+        is_focus = request.data.get('is_focus', 1)
+        if not product_ids:
+            return Response({'error': 'product_ids required'}, status=400)
+        result = smartstore_product_service.toggle_focus(product_ids, is_focus)
+        return Response(result)
+
+
+class SmartStoreProductOrdersView(APIView):
+    def get(self, request):
+        code = request.query_params.get('code', '')
+        product_name = request.query_params.get('product_name', '')
+        start_date = request.query_params.get('start_date', '')
+        end_date = request.query_params.get('end_date', '')
+        if not code and not product_name:
+            return Response({'error': 'code or product_name required'}, status=400)
+        result = smartstore_order_service.get_product_orders(
+            seller_code=code or None,
+            product_name=product_name or None,
+            start_date=start_date or None,
+            end_date=end_date or None,
+        )
         return Response(result)

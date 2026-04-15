@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useTheme } from './hooks/useTheme';
-import Sidebar from './components/Sidebar';
+import TopNav from './components/TopNav';
 import StoreSettingsModal from './components/smartstore/StoreSettingsModal';
 import NaverTermsPage from './pages/NaverTermsPage';
 import NaverRankPage from './pages/NaverRankPage';
@@ -21,7 +21,7 @@ export default function App() {
   const [page, setPage] = useState(() => {
     const hash = window.location.hash;
     if (hash && HASH_MAP[hash]) return HASH_MAP[hash];
-    try { return localStorage.getItem(PAGE_KEY) || 'terms'; } catch { return 'terms'; }
+    try { return localStorage.getItem(PAGE_KEY) || 'products'; } catch { return 'products'; }
   });
   const [showStoreSettings, setShowStoreSettings] = useState(false);
 
@@ -48,14 +48,14 @@ export default function App() {
   return (
     <div className={dark ? 'dark' : ''}>
       <div className={`min-h-screen ${pageBg}`}>
-        <Sidebar
+        <TopNav
           page={page}
           onPageChange={changePage}
           onStoreSettings={() => setShowStoreSettings(true)}
           dark={dark}
           onToggleTheme={toggle}
         />
-        <main className="ml-[220px] min-h-screen">
+        <main className="min-h-[calc(100vh-42px)]">
           {page === 'terms' && <NaverTermsPage />}
           {page === 'rank' && <NaverRankPage />}
           {page === 'products' && <SmartStoreProductsPage />}
