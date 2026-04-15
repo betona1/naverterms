@@ -1,16 +1,19 @@
 {
   "manifest_version": 3,
-  "name": "네이버쇼핑 Term 분석기",
-  "version": "1.9.2",
-  "description": "네이버쇼핑 검색 키워드의 term 구조 분석 및 순위추적",
+  "name": "쇼핑 통합 도우미",
+  "version": "2.0.0",
+  "description": "네이버쇼핑 Term 분석 + 로하스 상품수집 + 지마켓 순위추적",
   "permissions": [
     "tabs",
     "scripting",
     "alarms",
-    "storage"
+    "storage",
+    "system.display"
   ],
   "host_permissions": [
     "https://search.shopping.naver.com/*",
+    "https://www.gmarket.co.kr/*",
+    "http://com.exponet.co.kr/*",
     "http://localhost:*/*",
     "http://192.168.219.100:*/*",
     "http://192.168.219.200:*/*"
@@ -32,7 +35,7 @@
     },
     {
       "matches": ["http://localhost:*/*", "http://192.168.219.100:*/*", "http://192.168.219.200:*/*"],
-      "js": ["content_app_naver.js"],
+      "js": ["content_app.js"],
       "run_at": "document_idle"
     }
   ],
@@ -48,11 +51,5 @@
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
-  },
-  "web_accessible_resources": [
-    {
-      "resources": ["injected.js"],
-      "matches": ["https://search.shopping.naver.com/*"]
-    }
-  ]
+  }
 }

@@ -1,5 +1,13 @@
-// background.js v1.9.0 — URL 네비게이션 방식 (탭 클릭 → URL 이동)
+// background.js v2.0.0 — 통합 서비스 워커
+// 네이버 Term 분석 + 로하스 수집 + 지마켓 순위추적
 'use strict';
+
+// 로하스 / 지마켓 모듈 로드
+importScripts('bg_lohas.js', 'bg_gmarket.js');
+
+// ══════════════════════════════════════════
+// 네이버 Term 분석
+// ══════════════════════════════════════════
 
 const API = 'http://192.168.219.100:8003/api/cpc/naver';
 const TAB_ORDER = ['total', 'model', 'checkout'];
@@ -23,44 +31,40 @@ function log(msg) {
   if (logs.length > 300) logs.splice(0, 100);
 }
 
-// ══════════════════════════════════════════
-// 메시지
-// ══════════════════════════════════════════
+// ── 메시지 (네이버) ──
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   switch (msg.type) {
     case 'NAVER_START_TERM_SEARCH':
       start(msg.keywords || []);
       reply({ ok: true, count: (msg.keywords || []).length });
-      break;
+      return false;
     case 'NAVER_CANCEL':
       cancel();
       reply({ ok: true });
-      break;
+      return false;
     case 'NAVER_GET_STATUS':
       reply(getStatus(msg.logSince || 0));
-      break;
+      return false;
     case 'NAVER_SHOPPING_DATA':
       onData(msg);
       reply({ ok: true });
-      break;
+      return false;
     case 'NAVER_PAGE_READY':
       onPageReady(sender.tab?.id);
       reply({ ok: true });
-      break;
+      return false;
     case 'CAPTCHA_DETECTED':
       log('⚠ CAPTCHA: ' + msg.captchaType);
       pauseForCaptcha();
       reply({ ok: true });
-      break;
+      return false;
     case 'CAPTCHA_RESOLVED':
       log('CAPTCHA 해결');
       resumeAfterCaptcha();
       reply({ ok: true });
-      break;
-    default:
-      reply({});
+      return false;
   }
-  return false;
+  // 네이버 메시지가 아니면 다음 리스너로 전달
 });
 
 // ══════════════════════════════════════════
@@ -308,4 +312,4 @@ chrome.alarms.onAlarm.addListener(alarm => {
 
 // 초기화
 fetch(`${API}/keywords/`).then(r => log('Django ' + (r.ok ? 'OK' : r.status))).catch(() => log('Django 연결실패'));
-log('background.js v1.9.0');
+log('background.js v2.0.0 (통합)');
