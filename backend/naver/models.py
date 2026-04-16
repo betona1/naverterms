@@ -64,6 +64,8 @@ class NaverRankTarget(models.Model):
     target_value = models.CharField(max_length=200)
     display_name = models.CharField(max_length=200, blank=True, default='')
     is_active = models.BooleanField(default=True)
+    source_product_id = models.IntegerField(null=True, blank=True)
+    source_product_name = models.CharField(max_length=500, blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -79,6 +81,9 @@ class NaverRankHistory(models.Model):
     found_product_name = models.CharField(max_length=500, blank=True, default='')
     found_product_price = models.IntegerField(null=True, blank=True)
     found_review_count = models.IntegerField(null=True, blank=True)
+    found_product_id = models.CharField(max_length=50, blank=True, default='')
+    found_product_url = models.URLField(max_length=500, blank=True, default='')
+    found_product_image = models.URLField(max_length=500, blank=True, default='')
     tracked_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

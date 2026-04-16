@@ -30,6 +30,9 @@ urlpatterns = [
     # 데이터 초기화
     path('reset-data/', views.DataResetView.as_view()),
 
+    # 연관키워드
+    path('related-keywords/', views.RelatedKeywordView.as_view()),
+
     # UC 크롤러
     path('uc/start/', views.UCStartView.as_view()),
     path('uc/status/', views.UCStatusView.as_view()),

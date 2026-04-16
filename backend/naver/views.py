@@ -130,14 +130,22 @@ class RankTargetListView(APIView):
         target_type = request.data.get('target_type', 'store')
         target_value = request.data.get('target_value', '').strip()
         display_name = request.data.get('display_name', '').strip()
+        source_product_id = request.data.get('source_product_id')
+        source_product_name = request.data.get('source_product_name', '').strip()
 
         if not keyword_text or not target_value:
             return Response({'error': '키워드와 대상을 입력하세요'}, status=400)
 
         kw, _ = NaverKeyword.objects.get_or_create(keyword=keyword_text)
+        defaults = {'display_name': display_name or target_value}
+        if source_product_id is not None:
+            defaults['source_product_id'] = source_product_id
+        if source_product_name:
+            defaults['source_product_name'] = source_product_name
+
         target, created = NaverRankTarget.objects.get_or_create(
             keyword=kw, target_type=target_type, target_value=target_value,
-            defaults={'display_name': display_name or target_value}
+            defaults=defaults,
         )
         return Response(NaverRankTargetSerializer(target).data, status=201 if created else 200)
 
@@ -377,6 +385,22 @@ class ExportRankView(APIView):
 
 
 # ──── UC 크롤러 ────
+
+# ──── 연관키워드 ────
+
+class RelatedKeywordView(APIView):
+    def get(self, request):
+        keyword = request.query_params.get('keyword', '').strip()
+        if not keyword:
+            return Response({'error': '키워드를 입력하세요'}, status=400)
+        try:
+            keyword_list = services.search_related_keywords(keyword)
+            return Response({'keywordList': keyword_list})
+        except ValueError as e:
+            return Response({'error': str(e)}, status=500)
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
+
 
 class UCStartView(APIView):
     def post(self, request):

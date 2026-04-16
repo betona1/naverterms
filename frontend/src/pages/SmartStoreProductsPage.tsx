@@ -13,6 +13,7 @@ import {
   type SuspendPreviewResult,
 } from '../api/smartstoreProductApi';
 import { fetchStores, type SmartStore } from '../api/smartstoreApi';
+import * as naverApi from '../api/naverApi';
 import ProductOrdersModal from '../components/smartstore/ProductOrdersModal';
 
 const STATUS_LABELS: Record<string, string> = {
@@ -68,6 +69,7 @@ export default function SmartStoreProductsPage() {
   const [suspendExecuting, setSuspendExecuting] = useState(false);
   const [suspendResult, setSuspendResult] = useState<{ success: number; fail: number } | null>(null);
   const [orderModal, setOrderModal] = useState<{ code: string; name: string } | null>(null);
+  const [rankTrackProduct, setRankTrackProduct] = useState<SmartStoreProduct | null>(null);
   // 정렬
   const [sortBy, setSortBy] = useState('');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
@@ -870,6 +872,16 @@ export default function SmartStoreProductsPage() {
           product={detailProduct}
           storeUrl={isAllStores ? getStoreUrlById(detailProduct.store_id) : storeUrl}
           onClose={() => setDetailProduct(null)}
+          onRankTrack={(p) => { setDetailProduct(null); setRankTrackProduct(p); }}
+        />
+      )}
+
+      {/* Rank Tracking Modal */}
+      {rankTrackProduct && (
+        <RankTrackingModal
+          product={rankTrackProduct}
+          stores={apiStores}
+          onClose={() => setRankTrackProduct(null)}
         />
       )}
 
@@ -1319,7 +1331,10 @@ function SSHoverImage({ src }: { src: string | null }) {
 }
 
 
-function SSProductDetailModal({ product: p, storeUrl, onClose }: { product: SmartStoreProduct; storeUrl: string; onClose: () => void }) {
+function SSProductDetailModal({ product: p, storeUrl, onClose, onRankTrack }: {
+  product: SmartStoreProduct; storeUrl: string; onClose: () => void;
+  onRankTrack: (product: SmartStoreProduct) => void;
+}) {
   const detailUrl = storeUrl && p.channel_product_no
     ? `https://smartstore.naver.com/${storeUrl}/products/${p.channel_product_no}`
     : null;
@@ -1364,19 +1379,25 @@ function SSProductDetailModal({ product: p, storeUrl, onClose }: { product: Smar
             </div>
           )}
 
-          {/* 상세페이지 버튼 */}
-          {detailUrl && (
-            <div className="mb-4">
+          {/* 순위추적 + 상세페이지 버튼 */}
+          <div className="mb-4 flex gap-2">
+            <button
+              onClick={() => onRankTrack(p)}
+              className="flex-1 px-4 py-2.5 text-sm font-medium bg-[#03c75a] text-white rounded-lg hover:bg-[#02b351] transition-colors"
+            >
+              순위추적에 추가
+            </button>
+            {detailUrl && (
               <a
                 href={detailUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="block w-full text-center px-4 py-2.5 text-sm font-medium bg-[#03c75a] text-white rounded-lg hover:bg-[#02b351] transition-colors"
+                className="px-4 py-2.5 text-sm font-medium bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors"
               >
-                상세페이지 보기
+                상세페이지
               </a>
-            </div>
-          )}
+            )}
+          </div>
 
           <table className="w-full text-sm">
             <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
@@ -1388,6 +1409,225 @@ function SSProductDetailModal({ product: p, storeUrl, onClose }: { product: Smar
               ))}
             </tbody>
           </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+function RankTrackingModal({ product: p, stores, onClose }: {
+  product: SmartStoreProduct; stores: SmartStore[]; onClose: () => void;
+}) {
+  // 상품명을 공백 split → 1글자 이하 제거, 중복 제거
+  const initialKeywords = [...new Set(
+    p.name.split(/\s+/).filter(w => w.length > 1)
+  )];
+
+  const [keywords, setKeywords] = useState(initialKeywords.join('\n'));
+  const [targetType, setTargetType] = useState('store');
+  const [targetValue, setTargetValue] = useState(p.store_name || '');
+  const [tracking, setTracking] = useState(false);
+  const [results, setResults] = useState<{ keyword: string; rank: number | null; product_name?: string; error?: string }[] | null>(null);
+  const [step, setStep] = useState<string>('');
+
+  const handleTrack = async () => {
+    const kwList = keywords.split('\n').map(k => k.trim()).filter(Boolean);
+    if (!kwList.length || !targetValue) return;
+
+    setTracking(true);
+    setResults(null);
+
+    try {
+      // 1. 각 키워드별로 rank target 추가
+      const targetIds: number[] = [];
+      setStep(`타겟 등록 중... (0/${kwList.length})`);
+
+      for (let i = 0; i < kwList.length; i++) {
+        setStep(`타겟 등록 중... (${i + 1}/${kwList.length})`);
+        const res = await naverApi.addRankTarget({
+          keyword: kwList[i],
+          target_type: targetType,
+          target_value: targetValue,
+          display_name: targetValue,
+          source_product_id: p.id,
+          source_product_name: p.name,
+        });
+        if (res?.id) targetIds.push(res.id);
+      }
+
+      // 2. 등록된 타겟들로 순위 조회
+      setStep(`순위 조회 중... (${targetIds.length}개 키워드)`);
+      const trackResult = await naverApi.runRankTracking(targetIds);
+
+      // 3. 결과 매핑
+      const resultList = kwList.map(kw => {
+        const r = trackResult.results?.find((t: any) => t.keyword === kw && t.target_value === targetValue);
+        return {
+          keyword: kw,
+          rank: r?.rank ?? null,
+          product_name: r?.product_name || '',
+          error: r?.error || '',
+        };
+      });
+      setResults(resultList);
+      setStep('');
+    } catch (e: any) {
+      setResults([{ keyword: '오류', rank: null, error: e.message || '순위추적 실패' }]);
+      setStep('');
+    } finally {
+      setTracking(false);
+    }
+  };
+
+  const inputCls = 'bg-white dark:bg-gray-700 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-white';
+  const selectCls = 'bg-white dark:bg-gray-700 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-white';
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => !tracking && onClose()}>
+      <div
+        className="bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-lg mx-4 max-h-[90vh] flex flex-col"
+        onClick={e => e.stopPropagation()}
+      >
+        {/* 헤더 */}
+        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-700 shrink-0">
+          <h3 className="font-bold text-sm text-gray-900 dark:text-white">순위추적 추가</h3>
+          {!tracking && (
+            <button className="text-gray-400 hover:text-gray-600 text-lg" onClick={onClose}>&times;</button>
+          )}
+        </div>
+
+        <div className="overflow-y-auto flex-1 px-4 py-3 space-y-4">
+          {/* 상품 정보 */}
+          <div className="flex items-start gap-3">
+            {p.product_image_url && (
+              <img src={p.product_image_url} alt="" className="w-16 h-16 object-cover rounded-lg border border-gray-200 dark:border-gray-600 shrink-0" />
+            )}
+            <div className="min-w-0">
+              <div className="text-xs font-bold text-gray-900 dark:text-white line-clamp-2 leading-relaxed">{p.name}</div>
+              <div className="text-[10px] text-gray-400 mt-1">
+                {p.store_name && <span className="text-[#03c75a] font-medium">{p.store_name}</span>}
+                {p.sale_price > 0 && <span className="ml-2">{p.sale_price.toLocaleString()}원</span>}
+              </div>
+            </div>
+          </div>
+
+          {/* 키워드 textarea */}
+          <div>
+            <label className="text-[11px] font-bold text-gray-500 dark:text-gray-400 block mb-1.5">
+              검색 키워드 (줄 단위로 편집)
+            </label>
+            <textarea
+              value={keywords}
+              onChange={e => setKeywords(e.target.value)}
+              rows={Math.min(Math.max(initialKeywords.length, 3), 8)}
+              className={`w-full rounded-lg border px-3 py-2 text-[13px] resize-none focus:outline-none focus:ring-2 focus:ring-[#03c75a]/50 transition ${inputCls}`}
+              placeholder="키워드를 줄 단위로 입력"
+              disabled={tracking}
+            />
+            <div className="text-[10px] text-gray-400 mt-1">
+              {keywords.split('\n').filter(k => k.trim()).length}개 키워드
+            </div>
+          </div>
+
+          {/* 대상 설정 */}
+          <div className="flex gap-3">
+            <div className="flex-1">
+              <label className="text-[11px] font-bold text-gray-500 dark:text-gray-400 block mb-1.5">대상유형</label>
+              <select
+                value={targetType}
+                onChange={e => setTargetType(e.target.value)}
+                className={`w-full rounded-lg border px-3 py-2 text-[12px] focus:outline-none focus:ring-2 focus:ring-[#03c75a]/50 transition ${selectCls}`}
+                disabled={tracking}
+              >
+                <option value="store">스토어명</option>
+                <option value="product_id">상품ID (nvMid)</option>
+              </select>
+            </div>
+            <div className="flex-1">
+              <label className="text-[11px] font-bold text-gray-500 dark:text-gray-400 block mb-1.5">대상값</label>
+              {targetType === 'store' && stores.length > 0 ? (
+                <select
+                  value={targetValue}
+                  onChange={e => setTargetValue(e.target.value)}
+                  className={`w-full rounded-lg border px-3 py-2 text-[12px] focus:outline-none focus:ring-2 focus:ring-[#03c75a]/50 transition ${selectCls}`}
+                  disabled={tracking}
+                >
+                  <option value="">스토어 선택</option>
+                  {stores.map(s => (
+                    <option key={s.id} value={s.store_name}>{s.store_name}</option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  value={targetValue}
+                  onChange={e => setTargetValue(e.target.value)}
+                  className={`w-full rounded-lg border px-3 py-2 text-[12px] focus:outline-none focus:ring-2 focus:ring-[#03c75a]/50 transition ${inputCls}`}
+                  placeholder={targetType === 'store' ? '스토어명' : 'nvMid'}
+                  disabled={tracking}
+                />
+              )}
+            </div>
+          </div>
+
+          {/* 버튼 */}
+          <div className="flex gap-2">
+            <button
+              onClick={onClose}
+              disabled={tracking}
+              className="flex-1 px-4 py-2.5 text-sm font-medium bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors disabled:opacity-50"
+            >
+              취소
+            </button>
+            <button
+              onClick={handleTrack}
+              disabled={tracking || !targetValue || !keywords.trim()}
+              className="flex-1 px-4 py-2.5 text-sm font-medium bg-[#03c75a] text-white rounded-lg hover:bg-[#02b351] transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+            >
+              {tracking ? (
+                <>
+                  <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  {step || '처리 중...'}
+                </>
+              ) : (
+                '순위추적 시작'
+              )}
+            </button>
+          </div>
+
+          {/* 결과 */}
+          {results && (
+            <div className="border-t border-gray-200 dark:border-gray-700 pt-3">
+              <div className="text-[11px] font-bold text-gray-500 dark:text-gray-400 mb-2">조회 결과</div>
+              <div className="space-y-1.5">
+                {results.map((r, i) => (
+                  <div key={i} className="flex items-center gap-2 text-xs">
+                    <span className="font-bold text-gray-900 dark:text-white min-w-[100px]">{r.keyword}</span>
+                    <span className="text-gray-400">→</span>
+                    <span className="text-gray-500 dark:text-gray-400">{targetValue}</span>
+                    {r.error ? (
+                      <span className="ml-auto text-red-500 font-medium">{r.error}</span>
+                    ) : r.rank ? (
+                      <span className={`ml-auto font-extrabold ${r.rank <= 10 ? 'text-[#03c75a]' : 'text-gray-900 dark:text-white'}`}>
+                        {r.rank}위
+                      </span>
+                    ) : (
+                      <span className="ml-auto text-red-400 font-medium">미발견</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+              {results.some(r => r.product_name) && (
+                <div className="mt-2 text-[10px] text-gray-400">
+                  {results.filter(r => r.product_name).map((r, i) => (
+                    <div key={i} className="truncate">
+                      [{r.keyword}] {r.product_name}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>

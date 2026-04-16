@@ -1,6 +1,9 @@
 import os
 import re
 import time
+import hmac
+import hashlib
+import base64
 import logging
 import urllib.parse
 from collections import Counter
@@ -213,6 +216,49 @@ def get_tag_statistics(keyword_id):
 
 
 # ══════════════════════════════════════════
+# 연관키워드 — 네이버 검색광고 API
+# ══════════════════════════════════════════
+
+_NAVER_AD_BASE = 'https://api.naver.com'
+_NAVER_AD_URI = '/keywordstool'
+
+
+def _naver_ad_signature(timestamp, method, uri):
+    secret = os.getenv('NAVER_AD_SECRET_KEY', '')
+    message = f'{timestamp}.{method}.{uri}'
+    sig = hmac.new(secret.encode(), message.encode(), hashlib.sha256)
+    return base64.b64encode(sig.digest()).decode()
+
+
+def search_related_keywords(hint_keyword):
+    """네이버 검색광고 API — 연관키워드 조회"""
+    customer_id = os.getenv('NAVER_AD_CUSTOMER_ID', '')
+    access_key = os.getenv('NAVER_AD_ACCESS_KEY', '')
+    if not customer_id or not access_key:
+        raise ValueError('NAVER_AD_CUSTOMER_ID / ACCESS_KEY / SECRET_KEY 미설정')
+
+    timestamp = str(int(time.time() * 1000))
+    signature = _naver_ad_signature(timestamp, 'GET', _NAVER_AD_URI)
+
+    headers = {
+        'Content-Type': 'application/json; charset=UTF-8',
+        'X-Timestamp': timestamp,
+        'X-API-KEY': access_key,
+        'X-Customer': customer_id,
+        'X-Signature': signature,
+    }
+    params = {'hintKeywords': hint_keyword, 'showDetail': 1}
+
+    resp = http_requests.get(
+        _NAVER_AD_BASE + _NAVER_AD_URI,
+        headers=headers, params=params, timeout=10,
+    )
+    if resp.status_code == 200:
+        return resp.json().get('keywordList', [])
+    raise Exception(f'Naver Ad API error: {resp.status_code} {resp.text}')
+
+
+# ══════════════════════════════════════════
 # 순위추적 — 네이버 쇼핑 검색 API
 # ══════════════════════════════════════════
 
@@ -302,6 +348,9 @@ def run_rank_tracking(target_ids=None):
                     found_product_name=product_name,
                     found_product_price=int(found['lprice']) if found and found.get('lprice') else None,
                     found_review_count=None,
+                    found_product_id=found.get('productId', '') if found else '',
+                    found_product_url=found.get('link', '') if found else '',
+                    found_product_image=found.get('image', '') if found else '',
                 )
                 results.append({
                     'target_id': target.id,
@@ -309,6 +358,9 @@ def run_rank_tracking(target_ids=None):
                     'target_value': target.target_value,
                     'rank': rank,
                     'product_name': product_name,
+                    'product_url': found.get('link', '') if found else '',
+                    'product_image': found.get('image', '') if found else '',
+                    'product_id': found.get('productId', '') if found else '',
                 })
                 logger.info(f'  [{target.target_value}] {rank or "미발견"}위')
 

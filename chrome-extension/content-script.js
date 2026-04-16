@@ -1,9 +1,9 @@
-// content-script.js v1.4.0 — ISOLATED world
-// ★ 메시지 재시도 + "만 검색" + productSet 전달
+// content-script.js v1.5.0 — ISOLATED world
+// ★ 메시지 재시도 + productSet 전달 ("만 검색"은 injected.js에서만 처리)
 (function () {
   'use strict';
 
-  console.log('[NaverExt] content-script.js v1.4.0');
+  console.log('[NaverExt] content-script.js v1.5.0');
 
   function sendToBackground(data, retries) {
     if (retries === undefined) retries = 2;
@@ -34,20 +34,6 @@
       });
     }
   });
-
-  // ── "만 검색" 버튼 클릭 ──
-  function clickExactSearchButton() {
-    const buttons = document.querySelectorAll('a, button');
-    for (const btn of buttons) {
-      const text = (btn.textContent || '').trim();
-      if (text.includes('만 검색') || text.includes('만검색')) {
-        console.log('[NaverExt] "만 검색" 버튼 클릭:', text);
-        btn.click();
-        return true;
-      }
-    }
-    return false;
-  }
 
   // ── CAPTCHA 감지 ──
   function detectCaptcha() {
@@ -82,15 +68,9 @@
   observer.observe(document.documentElement, { childList: true, subtree: true });
 
   // ── 페이지 로드 완료 ──
+  // ★ "만 검색" 클릭은 injected.js(MAIN world)에서만 처리
   function handlePageReady() {
-    if (clickExactSearchButton()) {
-      console.log('[NaverExt] "만 검색" 클릭 → 대기');
-      setTimeout(() => {
-        sendToBackground({ type: 'NAVER_PAGE_READY', url: location.href });
-      }, 2500);
-    } else {
-      sendToBackground({ type: 'NAVER_PAGE_READY', url: location.href });
-    }
+    sendToBackground({ type: 'NAVER_PAGE_READY', url: location.href });
   }
 
   if (document.readyState === 'complete') {

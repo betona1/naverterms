@@ -1,4 +1,4 @@
-// background.js v2.1.0 — 통합 서비스 워커
+// background.js v2.2.0 — 통합 서비스 워커
 // 네이버 Term 분석 + 순위추적 + 로하스 수집 + 지마켓 순위추적
 'use strict';
 
@@ -181,6 +181,15 @@ async function onData(msg) {
   if (!products.length) { log('  (상품 0개 무시)'); return; }
 
   const dataTab = msg.productSet || 'total';
+
+  // ★ BUG FIX: productSet 검증 — 이전 탭의 지연 데이터 무시
+  const tabs = mode === 'rank' ? RANK_TAB_ORDER : TAB_ORDER;
+  const expectedTab = tabs[item.tabIdx];
+  if (dataTab !== expectedTab) {
+    log(`  (productSet 불일치: ${dataTab} ≠ ${expectedTab}, 무시)`);
+    return;
+  }
+
   waitingData = false;
   clr();
 
@@ -197,7 +206,7 @@ async function onData(msg) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          keyword: msg.query || item.keyword,
+          keyword: item.keyword,
           tab_type: dataTab,
           products: products.slice(0, 40),
           total: msg.total || 0,
@@ -423,4 +432,4 @@ chrome.alarms.onAlarm.addListener(alarm => {
 
 // 초기화
 fetch(`${API}/keywords/`).then(r => log('Django ' + (r.ok ? 'OK' : r.status))).catch(() => log('Django 연결실패'));
-log('background.js v2.1.0 (통합+순위추적)');
+log('background.js v2.2.0 (통합+순위추적+버그수정)');

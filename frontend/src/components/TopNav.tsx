@@ -11,6 +11,7 @@ const NAV_ITEMS = [
   { key: 'analytics', label: '스토어분석', color: '#10b981' },
   { key: 'terms', label: 'Term 분석', color: '#0078d7' },
   { key: 'rank', label: '순위추적', color: '#f59e0b' },
+  { key: 'keywords', label: '연관키워드', color: '#06b6d4' },
   { key: 'ownerclan', label: '오너클랜상품', color: '#ff6b35' },
   { key: 'extension', label: '도우미프로그램', color: '#8b5cf6' },
 ] as const;

@@ -9,9 +9,9 @@
 
 | 항목 | 내용 |
 |------|------|
-| Version | 3.0 (ai100에서 독립 분리) |
-| 최종 수정일 | 2026-04-16 |
-| 대상 사이트 | search.shopping.naver.com, api.commerce.naver.com |
+| Version | 3.4 |
+| 최종 수정일 | 2026-04-17 |
+| 대상 사이트 | search.shopping.naver.com, api.commerce.naver.com, api.naver.com(검색광고) |
 | 프론트엔드 | React 19 + TypeScript + Vite + Tailwind CSS v4 |
 | 백엔드 | Django REST Framework |
 | 크롤링 | Chrome 확장프로그램 + UC 크롤러 (undetected-chromedriver) |
@@ -46,8 +46,8 @@ naverterms/
 │   │   └── wsgi.py, asgi.py
 │   ├── naver/                    # 네이버 Term 분석 앱
 │   │   ├── models.py             # 6개 모델 (Django ORM, naverdb)
-│   │   ├── views.py              # 18개 API 뷰
-│   │   ├── services.py           # 6가지 가중치 분석 로직
+│   │   ├── views.py              # 20개 API 뷰
+│   │   ├── services.py           # 6가지 가중치 분석 + 연관키워드 + 순위추적
 │   │   ├── uc_crawler.py         # UC 크롤러 (스레드 기반)
 │   │   ├── serializers.py        # DRF 시리얼라이저
 │   │   ├── urls.py               # 20개 엔드포인트
@@ -61,8 +61,8 @@ naverterms/
 └── frontend/
     ├── package.json, vite.config.ts
     ├── src/
-    │   ├── App.tsx               # 사이드바 + 4페이지 라우팅
-    │   ├── components/Sidebar.tsx # 좌측 네비게이션
+    │   ├── App.tsx               # TopNav + 7페이지 해시 라우팅
+    │   ├── components/TopNav.tsx # 상단 탭 네비게이션
     │   ├── hooks/useTheme.ts     # 다크/라이트 모드
     │   ├── api/                  # API 클라이언트 (axios)
     │   │   ├── naverApi.ts       # baseURL: /api/naver
@@ -73,8 +73,11 @@ naverterms/
     │   │   └── smartstore/       # StoreSettingsModal
     │   └── pages/
     │       ├── NaverTermsPage.tsx     # Term 분석 대시보드
-    │       ├── NaverRankPage.tsx      # 순위추적 (Recharts)
+    │       ├── NaverRankPage.tsx      # 순위추적 (네이버 검색 API)
+    │       ├── NaverKeywordPage.tsx   # 연관키워드 검색 (검색광고 API)
     │       ├── SmartStoreProductsPage.tsx  # 스마트스토어 상품관리
+    │       ├── SmartStoreAnalyticsPage.tsx # 스토어 분석 대시보드
+    │       ├── OwnerClanProductsPage.tsx   # 오너클랜 상품관리
     │       └── NaverExtDownloadPage.tsx   # 확장프로그램 설치 가이드
     └── public/downloads/         # 확장프로그램 ZIP
 ```
@@ -94,23 +97,26 @@ naverterms/
 | 차트 | Recharts |
 | 백엔드 | Django 5 + Django REST Framework |
 | DB 드라이버 | PyMySQL (MySQLdb 호환 어댑터) |
-| 엑셀 | openpyxl |
+| 엑셀 | openpyxl (백엔드), xlsx (프론트엔드) |
 | 크롤링 | undetected-chromedriver, Selenium |
-| API 인증 | bcrypt (네이버 커머스 API OAuth2) |
+| API 인증 | bcrypt (네이버 커머스 OAuth2), HMAC-SHA256 (검색광고 API) |
 | 프로세스 관리 | PM2 |
 
 ---
 
-## 2. 페이지 구성 (4개)
+## 2. 페이지 구성 (7개)
 
 | # | 페이지 | 라우트 | 설명 |
 |---|--------|--------|------|
-| 1 | **Term 분석** | `#terms` | 키워드 term 분해, 6가지 가중치, 상품 팝업, UC/확장프로그램 크롤링 |
-| 2 | **순위추적** | `#rank` | 스토어/상품 순위 추적, 30일 차트, 히스토리 테이블 |
-| 3 | **스마트스토어 상품** | `#products` | 상품 목록, 동기화, 품절처리, Excel 내보내기 |
-| 4 | **확장프로그램** | `#extension` | 크롬 확장프로그램 ZIP 다운로드 + 설치 가이드 |
+| 1 | **스마트스토어상품** | `#products` | 상품 목록, 동기화, 품절처리, 순위추적 연동, Excel 내보내기 |
+| 2 | **스토어분석** | `#analytics` | 스토어별 카테고리 분석, 사업자/스토어 토글 |
+| 3 | **Term 분석** | `#terms` | 키워드 term 분해, 6가지 가중치, 상품 팝업, UC/확장프로그램 크롤링 |
+| 4 | **순위추적** | `#rank` | 네이버 검색 API로 스토어/상품 순위 추적, 30일 차트, 히스토리 |
+| 5 | **연관키워드** | `#keywords` | 네이버 검색광고 API 연관키워드 검색, 모두검색, 필터/엑셀 |
+| 6 | **오너클랜상품** | `#ownerclan` | 오너클랜 상품 관리 |
+| 7 | **도우미프로그램** | `#extension` | 크롬 확장프로그램 ZIP 다운로드 + 설치 가이드 |
 
-추가 모달: **상점설정** (StoreSettingsModal) — 사이드바 하단 기어 아이콘
+추가 모달: **상점설정** (StoreSettingsModal) — TopNav 우측 기어 아이콘
 
 ---
 
@@ -128,10 +134,12 @@ naverterms/
 | `/analysis/<keyword_id>/` | GET, POST | 가중치 분석 조회/실행 |
 | `/products/<keyword_id>/` | GET | 탭별 상품 조회 (?tab=total/model/checkout) |
 | `/tags/<keyword_id>/` | GET | 태그 통계 |
-| `/rank/targets/` | GET, POST | 순위추적 대상 관리 |
+| `/rank/targets/` | GET, POST | 순위추적 대상 관리 (source_product_id/name 지원) |
 | `/rank/targets/<id>/` | DELETE | 대상 삭제 |
+| `/rank/track/` | POST | 순위추적 실행 (네이버 검색 API, 200위까지) |
 | `/rank/history/` | GET | 순위 이력 (?target_id, ?days) |
 | `/rank/summary/` | GET | 순위 요약 (최근 변화) |
+| `/related-keywords/` | GET | 연관키워드 검색 (?keyword, 검색광고 API) |
 | `/schedules/` | GET, POST | 스케줄 관리 |
 | `/schedules/<id>/` | PUT, DELETE | 스케줄 수정/삭제 |
 | `/uc/start/` | POST | UC 크롤러 시작 |
@@ -166,8 +174,8 @@ naverterms/
 | NaverKeyword | keyword(unique), terms(JSON), total_count, naverpay_count, price_compare_count | 키워드 + term 분해 |
 | NaverSearchSnapshot | keyword(FK), tab_type, products(JSON), total | 탭별 상품 스냅샷 |
 | NaverTermAnalysis | keyword(FK), term1~4, order/position/name/part_weight(JSON), category_priority(JSON) | 6가지 가중치 분석 결과 |
-| NaverRankTarget | keyword(FK), target_type(store/product_id), target_value | 순위추적 대상 |
-| NaverRankHistory | target(FK), rank_position, found_product_name, found_product_price | 순위 이력 |
+| NaverRankTarget | keyword(FK), target_type(store/product_id), target_value, source_product_id, source_product_name | 순위추적 대상 (상품 연결) |
+| NaverRankHistory | target(FK), rank_position, found_product_name/price/id/url/image | 순위 이력 |
 | NaverTrackingSchedule | name, target_ids(JSON), schedule_type, schedule_time | 자동 추적 스케줄 |
 
 ---
@@ -276,6 +284,29 @@ signature = base64(bcrypt.hashpw(password, client_secret))
 | 상품 조회 | GET `/external/v2/products/origin-products/{no}` |
 | 상품 수정 | PUT `/external/v2/products/origin-products/{no}` |
 
+### 9.3 네이버 검색광고 API (연관키워드)
+
+```python
+# HMAC-SHA256 인증
+timestamp = str(int(time.time() * 1000))
+message = f'{timestamp}.GET./keywordstool'
+signature = base64(hmac.new(SECRET_KEY, message, sha256))
+# GET https://api.naver.com/keywordstool?hintKeywords=키워드&showDetail=1
+# Headers: X-Timestamp, X-API-KEY, X-Customer, X-Signature
+```
+
+| 응답 필드 | 설명 |
+|-----------|------|
+| `relKeyword` | 연관 키워드명 |
+| `monthlyPcQcCnt` | 월간 PC 검색수 |
+| `monthlyMobileQcCnt` | 월간 모바일 검색수 |
+| `monthlyAvePcClkCnt` | 월평균 PC 클릭수 |
+| `monthlyAveMobileClkCnt` | 월평균 모바일 클릭수 |
+| `monthlyAvePcCtr` | 월평균 PC 클릭률 |
+| `monthlyAveMobileCtr` | 월평균 모바일 클릭률 |
+| `compIdx` | 경쟁도 (HIGH/MEDIUM/LOW) |
+| `plAvgDepth` | 월평균 노출 광고수 |
+
 ---
 
 ## 10. UI/UX 디자인 가이드라인 (필수)
@@ -352,3 +383,5 @@ signature = base64(bcrypt.hashpw(password, client_secret))
 | 2026-03-15 | v1.0 | 초기 기술문서 작성 (betonaTerms2.py 분석 기반) |
 | 2026-03-15 | v1.1 | UI/UX 디자인 가이드라인 추가 |
 | 2026-04-16 | **v3.0** | **ai100에서 독립 프로젝트로 분리** — Django+React 웹앱, 포트 8900, 스마트스토어 상품관리 추가 |
+| 2026-04-16 | v3.3 | 순위추적 네이버API 전환, 상품등록한도 계산기, PDF내보내기, 오너클랜 |
+| 2026-04-17 | **v3.4** | **Term 분석 5가지 버그 수정**, 스마트스토어 상품→순위추적 연동 모달, **연관키워드 검색**(검색광고 API), 확장프로그램 v2.2.0 |

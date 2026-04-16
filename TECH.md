@@ -98,7 +98,7 @@
 ## UC 크롤러 (서버측)
 
 ### 파일
-`ai100/viewer/gmarket_cpc/backend/naver/uc_crawler.py`
+`backend/naver/uc_crawler.py`
 
 ### 동작 방식
 1. Django API로 시작 요청 (`POST /uc/start/`)
@@ -109,9 +109,9 @@
 
 ### API
 ```
-POST /api/cpc/naver/uc/start/     UC 크롤링 시작 {keywords: [...]}
-GET  /api/cpc/naver/uc/status/    진행 상태 조회
-POST /api/cpc/naver/uc/stop/      크롤링 중지
+POST /api/naver/uc/start/     UC 크롤링 시작 {keywords: [...]}
+GET  /api/naver/uc/status/    진행 상태 조회
+POST /api/naver/uc/stop/      크롤링 중지
 ```
 
 ### 환경
@@ -126,7 +126,7 @@ POST /api/cpc/naver/uc/stop/      크롤링 중지
 ### 엔드포인트
 
 ```
-Base: /api/cpc/naver/
+Base: /api/naver/
 
 # 키워드
 GET    /keywords/                 키워드 목록
@@ -151,6 +151,12 @@ DELETE /rank/targets/<id>/        추적 대상 삭제
 GET    /rank/history/             순위 이력 (?target_id=&days=)
 GET    /rank/summary/             순위 요약
 
+# 순위추적 실행
+POST   /rank/track/               순위추적 실행 (네이버 검색 API, 200위)
+
+# 연관키워드
+GET    /related-keywords/         연관키워드 검색 (?keyword, 검색광고 API)
+
 # 관리
 POST   /reset-data/               데이터 초기화 (키워드 유지)
 
@@ -159,15 +165,15 @@ GET    /export/terms/             Term 분석 엑셀
 GET    /export/rank/              순위 이력 엑셀
 ```
 
-### DB 테이블 (6개, ads DB)
+### DB 테이블 (6개, naverdb)
 
 | 테이블 | 설명 |
 |--------|------|
 | `naver_keyword` | 키워드 + terms + 탭별 검색수 |
 | `naver_search_snapshot` | 탭별 상품 데이터 (JSON, 최대 40개) |
 | `naver_term_analysis` | 6가지 가중치 분석 결과 |
-| `naver_rank_target` | 순위추적 대상 (스토어/상품ID) |
-| `naver_rank_history` | 순위 이력 |
+| `naver_rank_target` | 순위추적 대상 (스토어/상품ID, source_product_id/name) |
+| `naver_rank_history` | 순위 이력 (상품정보: id/url/image 포함) |
 | `naver_tracking_schedule` | 자동 스케줄 |
 
 ### 가중치 분석 (services.py)
@@ -234,15 +240,17 @@ https://search.shopping.naver.com/search/all?query=키워드&sort=rel&productSet
 ### Django Backend
 
 ```bash
-cd ai100/viewer/gmarket_cpc/backend
-python3 manage.py runserver 0.0.0.0:8003
+cd backend
+python3 manage.py runserver 0.0.0.0:8900
+# 또는 PM2: pm2 start naverterms-backend
 ```
 
 ### React Frontend
 
 ```bash
-cd ai100/viewer/gmarket_cpc/frontend
-npm run dev  # :5173
+cd frontend
+npm run dev  # :5174
+# 또는 PM2: pm2 start naverterms-frontend
 ```
 
 ---
@@ -329,6 +337,9 @@ ownerclan_product (마스터)
 
 | 버전 | 날짜 | 변경 |
 |------|------|------|
+| **v3.4** | **2026-04-17** | **Term 분석 5가지 버그 수정** (status polling 필드 불일치, productSet 미검증, 중복 "만 검색" 클릭, 키워드 자동보정 혼동, total 탭 실패→term 미수집), 스마트스토어 상품→순위추적 연동 (RankTrackingModal), **연관키워드 검색** (네이버 검색광고 API HMAC-SHA256), 확장프로그램 v2.2.0 |
+| v3.3 | 2026-04-16 | 순위추적 네이버 검색 API 전환 (확장프로그램→서버 API), 상품등록한도 계산기, PDF 내보내기, 오너클랜 상품관리 |
+| v3.0 | 2026-04-16 | ai100에서 독립 프로젝트 분리 — Django+React, PM2 포트 8900/5174, 스마트스토어 상품관리+분석 |
 | v1.9.2 | 2026-03-17 | UC 검색을 웹 대시보드(NaverTermsPage)로 이동, 확장 팝업에서 UC 코드 제거, popup.js Chrome 전용으로 정리 |
 | v1.9.1 | 2026-03-17 | UC 크롤러 추가 (서버측 undetected-chromedriver), Django API 엔드포인트 (uc/start, uc/status, uc/stop) |
 | v1.9.0 | 2026-03-17 | URL 네비게이션 방식 전환 (탭 클릭 → URL 직접 이동), 프로그레스 심플화, 로그 통일 |
@@ -338,6 +349,102 @@ ownerclan_product (마스터)
 | v1.6.x | 2026-03-16 | 퀵클릭 시퀀스 시도 (실패) |
 | v1.5.x | 2026-03-16 | 탭 클릭 방식 + race condition 수정 시도 |
 | v1.4.x | 2026-03-16 | 초기 작동 버전 (injected.js + content-script.js) |
+
+## 연관키워드 검색 (네이버 검색광고 API)
+
+### 인증 (HMAC-SHA256)
+
+```
+timestamp = 밀리초 타임스탬프
+message = "{timestamp}.GET./keywordstool"
+signature = base64(HMAC-SHA256(SECRET_KEY, message))
+Headers: X-Timestamp, X-API-KEY(ACCESS_KEY), X-Customer(CUSTOMER_ID), X-Signature
+```
+
+### API
+
+```
+GET https://api.naver.com/keywordstool?hintKeywords=키워드&showDetail=1
+```
+
+### 응답 필드 (keywordList[])
+
+| 필드 | 설명 |
+|------|------|
+| `relKeyword` | 연관 키워드 |
+| `monthlyPcQcCnt` | 월간 PC 검색수 |
+| `monthlyMobileQcCnt` | 월간 모바일 검색수 |
+| `monthlyAvePcClkCnt` | 월평균 PC 클릭수 |
+| `monthlyAveMobileClkCnt` | 월평균 모바일 클릭수 |
+| `compIdx` | 경쟁도 (HIGH/MEDIUM/LOW) |
+| `plAvgDepth` | 월평균 노출 광고수 |
+
+### 환경변수 (.env)
+
+```
+NAVER_AD_CUSTOMER_ID=...
+NAVER_AD_ACCESS_KEY=...
+NAVER_AD_SECRET_KEY=...
+```
+
+### 프론트엔드 기능
+
+- 단일/복수 키워드 검색 (줄바꿈 구분)
+- **모두검색**: 체크된 키워드로 재검색 → 중복제거 + 중복카운트
+- 필터: 키워드 포함, PC/모바일 조회수, 클릭수, 경쟁도
+- 포함하기/제거하기: 문자열 기반 체크박스 일괄 선택
+- 정렬, 페이지네이션 (100/300/500/1000)
+- 우측 모니터 패널: 선택 키워드 + 지표 표시 + 전체복사
+- 엑셀 다운로드 (xlsx)
+- 다크/라이트 모드 지원
+
+---
+
+## 순위추적 — 네이버 검색 API (v3.3~)
+
+### API
+
+```
+GET https://openapi.naver.com/v1/search/shop.json?query=키워드&display=100&start=1&sort=sim
+Headers: X-Naver-Client-Id, X-Naver-Client-Secret
+```
+
+- 100개씩 2회 호출 → 최대 200위까지 검색
+- 스토어명 또는 상품ID로 매칭하여 순위 결정
+- 결과: rank_position, found_product_name/price/id/url/image 저장
+
+### 환경변수 (.env)
+
+```
+NAVER_SEARCH_CLIENT_ID=...
+NAVER_SEARCH_CLIENT_SECRET=...
+```
+
+---
+
+## 스마트스토어 상품 → 순위추적 연동 (v3.4)
+
+### 워크플로우
+
+```
+상품 클릭 → SSProductDetailModal → "순위추적에 추가" 버튼
+  → RankTrackingModal 오픈
+  → 상품명 공백 split → 키워드 textarea (편집 가능)
+  → 대상유형(스토어/상품ID) + 대상값(스토어목록 자동선택)
+  → "순위추적 시작" → addRankTarget × N + runRankTracking
+  → 결과 표시 (키워드별 순위)
+```
+
+### NaverRankTarget 상품 연결
+
+```python
+source_product_id = IntegerField(null=True)  # smartstore_product.id
+source_product_name = CharField(max_length=500)  # 상품명
+```
+
+> naverdb ↔ myproduct DB 분리로 FK 불가 → IntegerField 참조
+
+---
 
 ## 알려진 이슈
 

@@ -142,16 +142,16 @@ export default function NaverTermsPage() {
           }
         }
 
-        // 완료 체크
-        const isComplete = resp.totalSteps > 0 && resp.completedSteps >= resp.totalSteps && !resp.isProcessing;
+        // 완료 체크 (getStatus 반환값: running, steps, totalSteps, keyword, kwIdx)
+        const isComplete = resp.totalSteps > 0 && resp.steps >= resp.totalSteps && !resp.running;
 
         return {
           ...prev,
-          active: !isComplete && (resp.isProcessing || resp.pending > 0),
-          currentKeyword: resp.currentKeyword || prev.currentKeyword,
-          currentKeywordIdx: resp.currentKwIdx || prev.currentKeywordIdx,
-          currentTab: resp.currentTab || prev.currentTab,
-          completedSteps: resp.completedSteps || 0,
+          active: !isComplete && resp.running,
+          currentKeyword: resp.keyword || prev.currentKeyword,
+          currentKeywordIdx: resp.kwIdx || prev.currentKeywordIdx,
+          currentTab: prev.currentTab,
+          completedSteps: resp.steps || 0,
           totalSteps: resp.totalSteps || prev.totalSteps,
           logs: newLogs,
           lastLogIdx: newLastLogIdx,

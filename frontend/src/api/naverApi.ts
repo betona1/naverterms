@@ -44,6 +44,7 @@ export async function getRankTargets() {
 }
 export async function addRankTarget(payload: {
   keyword: string; target_type: string; target_value: string; display_name?: string;
+  source_product_id?: number; source_product_name?: string;
 }) {
   const { data } = await api.post('/rank/targets/', payload);
   return data;
@@ -96,6 +97,12 @@ export async function ucStatus(logSince = 0) {
 }
 export async function ucStop() {
   const { data } = await api.post('/uc/stop/');
+  return data;
+}
+
+// ── 연관키워드 ──
+export async function getRelatedKeywords(keyword: string) {
+  const { data } = await api.get('/related-keywords/', { params: { keyword } });
   return data;
 }
 
