@@ -180,6 +180,20 @@ class ExtRankResultView(APIView):
         return Response(NaverRankHistorySerializer(history).data, status=201)
 
 
+# ──── 순위추적 실행 (네이버 API) ────
+
+class RunRankTrackingView(APIView):
+    def post(self, request):
+        target_ids = request.data.get('target_ids')  # None = 전체
+        try:
+            result = services.run_rank_tracking(target_ids)
+            return Response(result)
+        except ValueError as e:
+            return Response({'error': str(e)}, status=400)
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
+
+
 # ──── 순위 이력 ────
 
 class RankHistoryView(APIView):

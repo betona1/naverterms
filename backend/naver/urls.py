@@ -17,6 +17,7 @@ urlpatterns = [
     path('tags/<int:keyword_id>/', views.TagStatsView.as_view()),
 
     # 순위추적
+    path('rank/track/', views.RunRankTrackingView.as_view()),
     path('rank/targets/', views.RankTargetListView.as_view()),
     path('rank/targets/<int:pk>/', views.RankTargetDetailView.as_view()),
     path('rank/history/', views.RankHistoryView.as_view()),

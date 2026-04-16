@@ -19,6 +19,7 @@ export interface BusinessSummary {
   total_profit: number;
   total_products: number;
   sold_products: number;
+  recent_sold_products: number;
   top_categories: MiniCategory[];
 }
 
@@ -31,6 +32,7 @@ export interface StoreOverviewItem {
   profit: number;
   total_products: number;
   sold_products: number;
+  recent_sold_products: number;
   top_categories: MiniCategory[];
 }
 
@@ -45,6 +47,7 @@ export interface OverviewData {
   };
   businesses: BusinessSummary[];
   all_stores: StoreOverviewItem[];
+  top_products: TopProductRow[];
 }
 
 export interface StoreSummaryDetail {
@@ -84,9 +87,11 @@ export interface TopProductRow {
   cost: number;
   profit: number;
   order_count: number;
+  channel_product_no?: string | null;
   product_url?: string | null;
   status?: string | null;
   status_type?: string | null;
+  store_name?: string | null;
 }
 
 export interface StoreDetailData {
@@ -148,5 +153,41 @@ export async function fetchBusinessDetail(
 
 export async function syncCategories(): Promise<{ synced: number; errors: number; total: number }> {
   const { data } = await api.post('/sync-categories/');
+  return data;
+}
+
+// ── 상품등록한도 ──
+
+export interface RegistrationLimitStore {
+  store_id: number;
+  store_name: string;
+  transaction_amount: number;
+  order_count: number;
+  recent_sold_products: number;
+  total_products: number;
+  sales_ratio: number;
+  current_limit: number;
+  next_limit: number | null;
+  needed_amount: number | null;
+  needed_orders: number | null;
+  period_label: string;
+}
+
+export interface RegistrationLimitTier {
+  amount: number;
+  orders: number;
+  ratio: number;
+  limit: number;
+}
+
+export interface RegistrationLimitData {
+  stores: RegistrationLimitStore[];
+  tiers: RegistrationLimitTier[];
+  period_label: string;
+  calculated_at: string;
+}
+
+export async function fetchRegistrationLimits(): Promise<RegistrationLimitData> {
+  const { data } = await api.get<RegistrationLimitData>('/registration-limits/');
   return data;
 }

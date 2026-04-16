@@ -53,10 +53,11 @@ export default function SmartStoreProductsPage() {
   const [stats, setStats] = useState<ProductStats | null>(null);
   const [loading, setLoading] = useState(false);
   const [soldoutFilter, setSoldoutFilter] = useState(false);
-  const [filterMode, setFilterMode] = useState<'all' | 'focus' | 'sold'>('all');
+  const [filterMode, setFilterMode] = useState<'all' | 'focus' | 'premium' | 'sold'>('all');
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState('');
   const [excelOpen, setExcelOpen] = useState(false);
+  const [excelDownloading, setExcelDownloading] = useState(false);
   const [detailProduct, setDetailProduct] = useState<SmartStoreProduct | null>(null);
   // 체크박스 + 품절처리
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
@@ -94,10 +95,14 @@ export default function SmartStoreProductsPage() {
     if (storeId < 0) return;
     setLoading(true);
     try {
-      const res = await fetchProducts(storeId, page, perPage, status || undefined, search || undefined, soldoutFilter ? 1 : undefined, filterMode === 'focus' ? 1 : undefined, filterMode === 'sold' ? 1 : undefined, sortBy || undefined, sortBy ? sortDir : undefined);
+      const res = await fetchProducts(storeId, page, perPage, status || undefined, search || undefined, soldoutFilter ? 1 : undefined, filterMode === 'focus' ? 1 : undefined, filterMode === 'sold' ? 1 : undefined, sortBy || undefined, sortBy ? sortDir : undefined, filterMode === 'premium' ? 500000 : undefined);
       setProducts(res.items);
       setTotal(res.total);
       setTotalPages(res.total_pages);
+    } catch {
+      setProducts([]);
+      setTotal(0);
+      setTotalPages(0);
     } finally {
       setLoading(false);
     }
@@ -154,9 +159,32 @@ export default function SmartStoreProductsPage() {
     }
     setPage(1);
   };
+  // 판매금액 전용 토글: order_amount desc → asc → ss_order_amount desc → asc → 해제
+  const toggleAmountSort = () => {
+    if (sortBy === 'order_amount' && sortDir === 'desc') {
+      setSortDir('asc');
+    } else if (sortBy === 'order_amount' && sortDir === 'asc') {
+      setSortBy('ss_order_amount');
+      setSortDir('desc');
+    } else if (sortBy === 'ss_order_amount' && sortDir === 'desc') {
+      setSortDir('asc');
+    } else if (sortBy === 'ss_order_amount' && sortDir === 'asc') {
+      setSortBy('');
+      setSortDir('desc');
+    } else {
+      setSortBy('order_amount');
+      setSortDir('desc');
+    }
+    setPage(1);
+  };
   const sortIcon = (col: string) => {
     if (sortBy !== col) return '';
     return sortDir === 'desc' ? ' ↓' : ' ↑';
+  };
+  const amountSortLabel = () => {
+    if (sortBy === 'order_amount') return `판매금액${sortDir === 'desc' ? ' ↓' : ' ↑'}`;
+    if (sortBy === 'ss_order_amount') return `SS판매금액${sortDir === 'desc' ? ' ↓' : ' ↑'}`;
+    return '판매금액';
   };
 
   // 체크박스 핸들러
@@ -271,9 +299,40 @@ export default function SmartStoreProductsPage() {
     loadProducts();
   };
 
+  // 관리코드 전체 복사
+  const [copyDone, setCopyDone] = useState(false);
+  const handleCopyCodes = () => {
+    const codes = products.map(p => p.seller_management_code).filter(Boolean).join('\n');
+    if (!codes) return;
+    navigator.clipboard.writeText(codes).then(() => {
+      setCopyDone(true);
+      setTimeout(() => setCopyDone(false), 1500);
+    });
+  };
+
+  // 현재 필터로 엑셀 직접 다운로드
+  const handleDirectExcel = async () => {
+    setExcelDownloading(true);
+    try {
+      await downloadProductExcel({
+        storeIds: isAllStores ? undefined : [storeId],
+        statuses: status ? [status] : undefined,
+        search: search || undefined,
+        hasOrders: filterMode === 'sold' || undefined,
+        isFocus: filterMode === 'focus' || undefined,
+        sortBy: sortBy || undefined,
+        sortDir: sortBy ? sortDir : undefined,
+      });
+    } catch {
+      alert('엑셀 다운로드 실패');
+    } finally {
+      setExcelDownloading(false);
+    }
+  };
+
   // storeId는 항상 0 이상 (0=전체, n=개별상점)
 
-  const colSpan = isAllStores ? 11 : 10;
+  const colSpan = isAllStores ? 12 : 11;
   const getStoreUrlById = (sid: number) => apiStores.find(st => st.id === sid)?.store_url || '';
 
   return (
@@ -336,10 +395,18 @@ export default function SmartStoreProductsPage() {
               {suspendLoading ? '조회 중...' : '품절처리'}
             </button>
             <button
-              className="px-4 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 font-medium"
-              onClick={() => setExcelOpen(true)}
+              className="px-4 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 font-medium"
+              onClick={handleDirectExcel}
+              disabled={excelDownloading}
             >
-              엑셀받기
+              {excelDownloading ? '다운로드중...' : '엑셀받기'}
+            </button>
+            <button
+              className="px-2 py-1.5 text-sm bg-gray-500 text-white rounded hover:bg-gray-600 font-medium"
+              onClick={() => setExcelOpen(true)}
+              title="W코드추출 / 커스텀 엑셀"
+            >
+              W코드
             </button>
             {!isAllStores && (
               <button
@@ -369,37 +436,67 @@ export default function SmartStoreProductsPage() {
 
         {/* Stats bar */}
         {stats && (
-          <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
-            <div className="bg-white dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700 px-3 py-2">
-              <div className="text-xs text-gray-400">전체</div>
-              <div className="text-lg font-bold">{stats.total.toLocaleString()}</div>
-            </div>
-            <div className="bg-white dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700 px-3 py-2">
-              <div className="text-xs text-green-500">판매중</div>
-              <div className="text-lg font-bold text-green-600">{(stats.by_status['SALE'] || 0).toLocaleString()}</div>
-            </div>
-            <div
-              className={`bg-white dark:bg-gray-800 rounded border px-3 py-2 cursor-pointer transition-colors ${
-                filterMode === 'sold'
-                  ? 'border-blue-500 dark:border-blue-400 ring-1 ring-blue-500/30'
-                  : 'border-gray-200 dark:border-gray-700 hover:border-blue-300 dark:hover:border-blue-600'
-              }`}
-              onClick={() => { setFilterMode(filterMode === 'sold' ? 'all' : 'sold'); setPage(1); }}
-              title="클릭하면 판매된 상품만 필터"
-            >
-              <div className="text-xs text-blue-500">판매된상품</div>
-              <div className="text-lg font-bold text-blue-600 dark:text-blue-400">{stats.sold_count.toLocaleString()}</div>
-            </div>
-            <div className="bg-white dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700 px-3 py-2">
-              <div className="text-xs text-yellow-500">판매중지</div>
-              <div className="text-lg font-bold text-yellow-600">{(stats.by_status['SUSPENSION'] || 0).toLocaleString()}</div>
-            </div>
-            <div className="bg-white dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700 px-3 py-2">
-              <div className="text-xs text-gray-400">기타</div>
-              <div className="text-lg font-bold">{
-                (stats.total - (stats.by_status['SALE'] || 0) - (stats.by_status['SUSPENSION'] || 0)).toLocaleString()
-              }</div>
-            </div>
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+            {/* 전체 */}
+            <StatCard
+              label="전체" labelColor="text-gray-400"
+              count={stats.total} countColor=""
+              soldCount={stats.sold_count} ssSoldCount={stats.ss_sold_count}
+              isCountActive={filterMode === 'all' && !status}
+              isSoldActive={filterMode === 'sold' && !status}
+              onCountClick={() => { setFilterMode('all'); setStatus(''); setPage(1); }}
+              onSoldClick={() => {
+                if (filterMode === 'sold' && !status) { setFilterMode('all'); } else { setFilterMode('sold'); setStatus(''); }
+                setPage(1);
+              }}
+            />
+            {/* 판매중 */}
+            <StatCard
+              label="판매중" labelColor="text-green-500"
+              count={stats.by_status['SALE'] || 0} countColor="text-green-600"
+              soldCount={stats.sold_by_status?.['SALE'] || 0} ssSoldCount={stats.ss_sold_by_status?.['SALE'] || 0}
+              isCountActive={filterMode === 'all' && status === 'SALE'}
+              isSoldActive={filterMode === 'sold' && status === 'SALE'}
+              onCountClick={() => {
+                if (filterMode === 'all' && status === 'SALE') { setStatus(''); } else { setFilterMode('all'); setStatus('SALE'); }
+                setPage(1);
+              }}
+              onSoldClick={() => {
+                if (filterMode === 'sold' && status === 'SALE') { setFilterMode('all'); setStatus(''); } else { setFilterMode('sold'); setStatus('SALE'); }
+                setPage(1);
+              }}
+            />
+            {/* 판매중지 */}
+            <StatCard
+              label="판매중지" labelColor="text-yellow-500"
+              count={stats.by_status['SUSPENSION'] || 0} countColor="text-yellow-600"
+              soldCount={stats.sold_by_status?.['SUSPENSION'] || 0} ssSoldCount={stats.ss_sold_by_status?.['SUSPENSION'] || 0}
+              isCountActive={filterMode === 'all' && status === 'SUSPENSION'}
+              isSoldActive={filterMode === 'sold' && status === 'SUSPENSION'}
+              onCountClick={() => {
+                if (filterMode === 'all' && status === 'SUSPENSION') { setStatus(''); } else { setFilterMode('all'); setStatus('SUSPENSION'); }
+                setPage(1);
+              }}
+              onSoldClick={() => {
+                if (filterMode === 'sold' && status === 'SUSPENSION') { setFilterMode('all'); setStatus(''); } else { setFilterMode('sold'); setStatus('SUSPENSION'); }
+                setPage(1);
+              }}
+            />
+            {/* 기타 */}
+            {(() => {
+              const etcCount = stats.total - (stats.by_status['SALE'] || 0) - (stats.by_status['SUSPENSION'] || 0);
+              const etcSold = stats.sold_count - (stats.sold_by_status?.['SALE'] || 0) - (stats.sold_by_status?.['SUSPENSION'] || 0);
+              const etcSsSold = stats.ss_sold_count - (stats.ss_sold_by_status?.['SALE'] || 0) - (stats.ss_sold_by_status?.['SUSPENSION'] || 0);
+              return (
+                <StatCard
+                  label="기타" labelColor="text-gray-400"
+                  count={etcCount} countColor=""
+                  soldCount={etcSold} ssSoldCount={etcSsSold}
+                  isCountActive={false} isSoldActive={false}
+                />
+              );
+            })()}
+            {/* 마지막 동기화 */}
             <div className="bg-white dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700 px-3 py-2">
               <div className="text-xs text-gray-400">마지막 동기화</div>
               <div className="text-sm font-medium truncate" title={stats.last_synced_at || ''}>
@@ -413,17 +510,21 @@ export default function SmartStoreProductsPage() {
         <div className="flex flex-wrap gap-2">
           <div className="flex rounded overflow-hidden border border-gray-300 dark:border-gray-600">
             <button
-              className={`px-3 py-1.5 text-sm font-medium transition-colors ${filterMode === 'all' ? 'bg-[#03c75a] text-white' : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700'}`}
-              onClick={() => { setFilterMode('all'); setPage(1); }}
+              className={`px-3 py-1.5 text-sm font-medium transition-colors ${filterMode === 'all' && !status ? 'bg-[#03c75a] text-white' : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700'}`}
+              onClick={() => { setFilterMode('all'); setStatus(''); setPage(1); }}
             >전체</button>
             <button
               className={`px-3 py-1.5 text-sm font-medium transition-colors ${filterMode === 'focus' ? 'bg-yellow-500 text-white' : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700'}`}
-              onClick={() => { setFilterMode('focus'); setPage(1); }}
+              onClick={() => { setFilterMode('focus'); setStatus(''); setPage(1); }}
             >★ 집중관리</button>
             <button
-              className={`px-3 py-1.5 text-sm font-medium transition-colors ${filterMode === 'sold' ? 'bg-blue-600 text-white' : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700'}`}
-              onClick={() => { setFilterMode('sold'); setPage(1); }}
-            >판매된상품{stats ? ` ${stats.sold_count.toLocaleString()}` : ''}</button>
+              className={`px-3 py-1.5 text-sm font-medium transition-colors ${filterMode === 'premium' ? 'bg-orange-500 text-white' : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700'}`}
+              onClick={() => { setFilterMode('premium'); setStatus(''); setPage(1); }}
+            >◆ 우수상품</button>
+            <button
+              className={`px-3 py-1.5 text-sm font-medium transition-colors ${filterMode === 'sold' && !status ? 'bg-blue-600 text-white' : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700'}`}
+              onClick={() => { setFilterMode(filterMode === 'sold' && !status ? 'all' : 'sold'); setStatus(''); setPage(1); }}
+            >판매된상품{stats ? ` ${stats.sold_count.toLocaleString()}` : ''}{stats && stats.ss_sold_count !== stats.sold_count ? <span className="text-[#03c75a] ml-0.5">({stats.ss_sold_count.toLocaleString()})</span> : ''}</button>
           </div>
           <select
             className="text-sm border border-gray-300 dark:border-gray-600 rounded px-2 py-1.5 bg-white dark:bg-gray-800"
@@ -439,10 +540,17 @@ export default function SmartStoreProductsPage() {
           <div className="flex">
             <input
               className="text-sm border border-gray-300 dark:border-gray-600 rounded-l px-2 py-1.5 bg-white dark:bg-gray-800 w-48"
-              placeholder="상품명 / 관리코드 검색"
+              placeholder="상품명 / 관리코드 (다수 가능)"
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+              onPaste={(e) => {
+                e.preventDefault();
+                const text = e.clipboardData.getData('text');
+                const normalized = text.replace(/[\r\n\t]+/g, ' ').trim();
+                setSearchInput(normalized);
+              }}
+              title="여러 코드를 엔터/공백/쉼표로 구분하여 붙여넣기 가능"
             />
             <button
               className="text-sm px-3 py-1.5 bg-gray-200 dark:bg-gray-700 rounded-r hover:bg-gray-300 dark:hover:bg-gray-600 border border-l-0 border-gray-300 dark:border-gray-600"
@@ -480,7 +588,11 @@ export default function SmartStoreProductsPage() {
             </div>
           )}
           <div className="ml-auto text-sm text-gray-400 self-center">
-            총 {total.toLocaleString()}개
+            {(search || status || filterMode !== 'all') && stats ? (
+              <><span className="text-blue-500 font-medium">검색 {total.toLocaleString()}개</span> / 총 {stats.total.toLocaleString()}개</>
+            ) : (
+              <>총 {total.toLocaleString()}개</>
+            )}
           </div>
         </div>
 
@@ -515,7 +627,22 @@ export default function SmartStoreProductsPage() {
                 {isAllStores && <th className="px-3 py-2 w-24">상점</th>}
                 <th className="px-3 py-2 w-16">이미지</th>
                 <th className="px-3 py-2">상품명</th>
-                <th className="px-3 py-2 w-28">관리코드</th>
+                <th className="px-3 py-2 w-28">
+                  <span className="flex items-center gap-1">
+                    <button
+                      className={`p-0.5 rounded transition-colors ${copyDone ? 'text-green-500' : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300'}`}
+                      onClick={handleCopyCodes}
+                      title="현재 페이지 관리코드 전체 복사"
+                    >
+                      {copyDone ? (
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
+                      ) : (
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
+                      )}
+                    </button>
+                    관리코드
+                  </span>
+                </th>
                 <th
                   className={`px-3 py-2 w-24 text-right cursor-pointer select-none hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors ${sortBy === 'sale_price' ? 'text-blue-600 dark:text-blue-400' : ''}`}
                   onClick={() => toggleSort('sale_price')}
@@ -527,11 +654,12 @@ export default function SmartStoreProductsPage() {
                   title="재고순 정렬"
                 >재고{sortIcon('stock')}</th>
                 <th className="px-3 py-2 w-20 text-center">상태</th>
+                <th className="px-3 py-2 w-20 text-right">주문건수</th>
                 <th
-                  className={`px-3 py-2 w-32 text-right cursor-pointer select-none hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors ${sortBy === 'order_amount' ? 'text-blue-600 dark:text-blue-400' : ''}`}
-                  onClick={() => toggleSort('order_amount')}
-                  title="판매금액순 정렬"
-                >판매금액{sortIcon('order_amount')}</th>
+                  className={`px-3 py-2 w-32 text-right cursor-pointer select-none hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors ${sortBy === 'order_amount' || sortBy === 'ss_order_amount' ? 'text-blue-600 dark:text-blue-400' : ''}`}
+                  onClick={toggleAmountSort}
+                  title="판매금액 → SS판매금액 순환 정렬"
+                >{amountSortLabel()}</th>
                 <th
                   className={`px-3 py-2 w-24 text-right cursor-pointer select-none hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors ${sortBy === 'order_qty' ? 'text-blue-600 dark:text-blue-400' : ''}`}
                   onClick={() => toggleSort('order_qty')}
@@ -638,8 +766,24 @@ export default function SmartStoreProductsPage() {
                     </span>
                   </td>
                   <td className="px-3 py-2 text-right text-xs tabular-nums">
-                    {p.all_order_amount > 0 ? (
+                    {p.all_order_count > 0 ? (
                       <div>
+                        <div className="font-medium text-gray-900 dark:text-gray-100">{p.all_order_count.toLocaleString()}</div>
+                        {p.total_order_count > 0 && p.total_order_count !== p.all_order_count && (
+                          <div className="text-[10px] text-[#03c75a] leading-tight">({p.total_order_count.toLocaleString()})</div>
+                        )}
+                      </div>
+                    ) : (
+                      <span className="text-gray-300 dark:text-gray-600">-</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 text-right text-xs tabular-nums">
+                    {p.all_order_amount > 0 ? (
+                      <div
+                        className="cursor-pointer hover:text-blue-600 dark:hover:text-blue-400 transition-colors"
+                        onClick={() => setOrderModal({ code: p.seller_management_code || '', name: p.name })}
+                        title="주문이력 보기"
+                      >
                         <div className="font-medium text-gray-900 dark:text-gray-100">{p.all_order_amount.toLocaleString()}</div>
                         {p.total_order_amount > 0 && p.total_order_amount !== p.all_order_amount && (
                           <div className="text-[10px] text-[#03c75a] leading-tight">({p.total_order_amount.toLocaleString()})</div>
@@ -715,7 +859,9 @@ export default function SmartStoreProductsPage() {
 
       {/* Excel Modal */}
       {excelOpen && (
-        <ExcelModal stores={apiStores} onClose={() => setExcelOpen(false)} />
+        <ExcelModal stores={apiStores} onClose={() => setExcelOpen(false)}
+          currentFilters={{ search, hasOrders: filterMode === 'sold', isFocus: filterMode === 'focus', sortBy, sortDir }}
+        />
       )}
 
       {/* Product Detail Modal */}
@@ -821,6 +967,44 @@ export default function SmartStoreProductsPage() {
 }
 
 
+function StatCard({ label, labelColor, count, countColor, soldCount, ssSoldCount, isCountActive, isSoldActive, onCountClick, onSoldClick }: {
+  label: string; labelColor: string; count: number; countColor: string;
+  soldCount: number; ssSoldCount?: number; isCountActive: boolean; isSoldActive: boolean;
+  onCountClick?: () => void; onSoldClick?: () => void;
+}) {
+  return (
+    <div className="bg-white dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700 px-3 py-2">
+      <div className={`text-xs ${labelColor}`}>{label}</div>
+      <div className="flex items-baseline gap-1.5 flex-wrap">
+        {onCountClick ? (
+          <button
+            className={`text-lg font-bold transition-colors ${isCountActive ? `${countColor || 'text-gray-900 dark:text-white'} underline` : `${countColor || 'text-gray-900 dark:text-white'} hover:underline`}`}
+            onClick={onCountClick}
+          >{count.toLocaleString()}</button>
+        ) : (
+          <span className={`text-lg font-bold ${countColor}`}>{count.toLocaleString()}</span>
+        )}
+        {soldCount > 0 && onSoldClick && (
+          <button
+            className={`text-xs font-bold transition-colors ${
+              isSoldActive
+                ? 'text-blue-600 dark:text-blue-400 underline'
+                : 'text-blue-400 dark:text-blue-500 hover:text-blue-600 dark:hover:text-blue-400'
+            }`}
+            onClick={onSoldClick}
+            title={`${label} 중 판매된 상품만 보기`}
+          >
+            {soldCount.toLocaleString()}
+            {ssSoldCount !== undefined && ssSoldCount !== soldCount && (
+              <span className="text-[#03c75a] ml-0.5">({ssSoldCount.toLocaleString()})</span>
+            )}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ProgressBar({ pct, label, status }: { pct: number; label: string; status: 'loading' | 'done' | 'error' }) {
   const isIndeterminate = pct < 0;
   const barColor = status === 'error' ? 'bg-red-500' : status === 'done' ? 'bg-green-500' : 'bg-blue-500';
@@ -849,7 +1033,10 @@ function ProgressBar({ pct, label, status }: { pct: number; label: string; statu
   );
 }
 
-function ExcelModal({ stores, onClose }: { stores: SmartStore[]; onClose: () => void }) {
+function ExcelModal({ stores, onClose, currentFilters }: {
+  stores: SmartStore[]; onClose: () => void;
+  currentFilters?: { search?: string; hasOrders?: boolean; isFocus?: boolean; sortBy?: string; sortDir?: string };
+}) {
   const [allStores, setAllStores] = useState(true);
   const [selectedStoreIds, setSelectedStoreIds] = useState<Set<number>>(
     () => new Set(stores.map(s => s.id)),
@@ -923,7 +1110,14 @@ function ExcelModal({ stores, onClose }: { stores: SmartStore[]; onClose: () => 
     setExcelProgress({ pct: 0, status: 'loading' });
     try {
       await downloadProductExcel(
-        { storeIds: getStoreIds(), statuses: getStatuses(), wOnly },
+        {
+          storeIds: getStoreIds(), statuses: getStatuses(), wOnly,
+          search: currentFilters?.search || undefined,
+          hasOrders: currentFilters?.hasOrders || undefined,
+          isFocus: currentFilters?.isFocus || undefined,
+          sortBy: currentFilters?.sortBy || undefined,
+          sortDir: currentFilters?.sortDir || undefined,
+        },
         (pct) => setExcelProgress({ pct, status: 'loading' }),
       );
       setExcelProgress({ pct: 100, status: 'done' });

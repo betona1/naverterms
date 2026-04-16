@@ -19,8 +19,10 @@ export interface SmartStoreProduct {
   is_focus: number;
   total_order_qty: number;
   total_order_amount: number;
+  total_order_count: number;
   all_order_qty: number;
   all_order_amount: number;
+  all_order_count: number;
   has_orders?: boolean;
   store_name?: string;
   synced_at: string;
@@ -40,6 +42,9 @@ export interface ProductStats {
   total: number;
   by_status: Record<string, number>;
   sold_count: number;
+  ss_sold_count: number;
+  sold_by_status: Record<string, number>;
+  ss_sold_by_status: Record<string, number>;
   last_synced_at: string | null;
 }
 
@@ -61,6 +66,7 @@ export async function fetchProducts(
   hasOrders?: number,
   sortBy?: string,
   sortDir?: string,
+  minSsAmount?: number,
 ): Promise<ProductListResponse> {
   const params: Record<string, string | number> = { store_id: storeId, page, per_page: perPage };
   if (status) params.status = status;
@@ -70,6 +76,12 @@ export async function fetchProducts(
   if (hasOrders !== undefined) params.has_orders = hasOrders;
   if (sortBy) params.sort_by = sortBy;
   if (sortDir) params.sort_dir = sortDir;
+  if (minSsAmount !== undefined) params.min_ss_amount = minSsAmount;
+  // 검색어가 길면 POST로 전환 (URL 길이 제한 회피)
+  if (search && search.length > 200) {
+    const { data } = await api.post<ProductListResponse>('/search/', params);
+    return data;
+  }
   const { data } = await api.get<ProductListResponse>('/', { params });
   return data;
 }
@@ -97,16 +109,29 @@ export async function fetchAllStoresStats(): Promise<Record<number, ProductStats
   return data;
 }
 
-function _buildParams(params: { storeIds?: number[]; statuses?: string[]; wOnly?: boolean }): string {
+function _buildParams(params: {
+  storeIds?: number[]; statuses?: string[]; wOnly?: boolean;
+  search?: string; hasOrders?: boolean; isFocus?: boolean;
+  sortBy?: string; sortDir?: string;
+}): string {
   const sp = new URLSearchParams();
   if (params.storeIds) params.storeIds.forEach(id => sp.append('store_ids', String(id)));
   if (params.statuses) params.statuses.forEach(s => sp.append('statuses', s));
   if (params.wOnly) sp.append('w_only', '1');
+  if (params.search) sp.append('search', params.search);
+  if (params.hasOrders) sp.append('has_orders', '1');
+  if (params.isFocus) sp.append('is_focus', '1');
+  if (params.sortBy) sp.append('sort_by', params.sortBy);
+  if (params.sortDir) sp.append('sort_dir', params.sortDir);
   return sp.toString();
 }
 
 export async function downloadProductExcel(
-  params: { storeIds?: number[]; statuses?: string[]; wOnly?: boolean },
+  params: {
+    storeIds?: number[]; statuses?: string[]; wOnly?: boolean;
+    search?: string; hasOrders?: boolean; isFocus?: boolean;
+    sortBy?: string; sortDir?: string;
+  },
   onProgress?: (pct: number) => void,
 ): Promise<void> {
   const qs = _buildParams(params);

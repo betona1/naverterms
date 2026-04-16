@@ -25,4 +25,5 @@ urlpatterns = [
     path('analytics/store/<int:store_id>/', views.SmartStoreAnalyticsStoreDetailView.as_view()),
     path('analytics/business/<str:code>/', views.SmartStoreAnalyticsBusinessDetailView.as_view()),
     path('analytics/sync-categories/', views.SmartStoreAnalyticsSyncCategoriesView.as_view()),
+    path('analytics/registration-limits/', views.SmartStoreRegistrationLimitView.as_view()),
 ]

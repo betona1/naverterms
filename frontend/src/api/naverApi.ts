@@ -52,6 +52,12 @@ export async function deleteRankTarget(id: number) {
   await api.delete(`/rank/targets/${id}/`);
 }
 
+// ── 순위추적 실행 (서버 API) ──
+export async function runRankTracking(targetIds?: number[]) {
+  const { data } = await api.post('/rank/track/', { target_ids: targetIds || null });
+  return data;
+}
+
 // ── 순위 이력 ──
 export async function getRankHistory(targetId?: number, days = 30) {
   const { data } = await api.get('/rank/history/', { params: { target_id: targetId, days } });

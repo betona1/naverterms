@@ -1,6 +1,7 @@
 import re
 import time
 import logging
+from datetime import date, timedelta
 from collections import defaultdict
 
 import requests
@@ -51,6 +52,17 @@ STATUS_NAMES = {
     'SALE': '판매중', 'OUTOFSTOCK': '품절', 'SUSPENSION': '판매중지',
     'CLOSE': '종료', 'PROHIBITION': '판매금지', 'UNADMISSION': '미승인',
 }
+
+# ── 상품등록한도 단계 (거래액, 판매건, 비중%, 한도) — 높은것부터 매칭 ──
+# 50000개: 5000만↑ or 1000건↑, 20000개: 2000만↑ or 400건↑,
+# 10000개: 1000만↑ or 200건↑, 5000개: 500만↑ or 100건↑, 1000개: 기본
+REGISTRATION_LIMIT_TIERS = [
+    (50_000_000, 1000, 3, 50000),
+    (20_000_000,  400, 3, 20000),
+    (10_000_000,  200, 3, 10000),
+    ( 5_000_000,  100, 3,  5000),
+    (         0,    0, 0,  1000),
+]
 
 
 # ── 헬퍼 ──
@@ -190,16 +202,20 @@ def get_overview(start_date=None, end_date=None):
         """, params)
         sales_by_store = {r['store_id']: r for r in _dictfetchall(cur)}
 
-    # 3) 스토어별 top 카테고리 (1차 카테고리 기준 상위 5개)
+    # 3) 스토어별 top 카테고리 (2차 소카테고리 기준 상위 4개)
     with connections['myproduct'].cursor() as cur:
         cur.execute("""
             SELECT p.store_id,
-                   SUBSTRING_INDEX(p.category_id, '>', 1) as top_cat,
+                   CASE WHEN p.category_id LIKE '%%>%%'
+                        THEN SUBSTRING_INDEX(SUBSTRING_INDEX(p.category_id, '>', 2), '>', -1)
+                        ELSE SUBSTRING_INDEX(p.category_id, '>', 1)
+                   END as sub_cat,
                    COALESCE(SUM(p.total_order_amount), 0) as amount
             FROM smartstore_product p
             JOIN smartstoreIdList s ON s.id = p.store_id AND s.is_active=1
             WHERE p.category_id IS NOT NULL AND p.category_id != ''
-            GROUP BY p.store_id, top_cat
+              AND p.total_order_amount > 0
+            GROUP BY p.store_id, sub_cat
             ORDER BY p.store_id, amount DESC
         """)
         cat_rows = _dictfetchall(cur)
@@ -207,17 +223,31 @@ def get_overview(start_date=None, end_date=None):
     store_top_cats = defaultdict(list)
     for r in cat_rows:
         sid = r['store_id']
-        if len(store_top_cats[sid]) < 5:
+        if len(store_top_cats[sid]) < 4:
             store_top_cats[sid].append({
-                'name': _cat_name(r['top_cat']),
+                'name': _cat_name(r['sub_cat']),
                 'amount': float(r['amount'] or 0),
             })
+
+    # 3-1) 스토어별 최근 13개월 판매 상품 수 (DISTINCT seller_code)
+    with connections['joacham'].cursor() as cur:
+        cur.execute("""
+            SELECT p.store_id,
+                   COUNT(DISTINCT o.product_seller_code) as recent_sold_products
+            FROM orders_order o
+            JOIN myproduct.smartstore_product p
+                ON o.product_seller_code = p.seller_management_code
+            WHERE o.order_date >= DATE_SUB(CURDATE(), INTERVAL 13 MONTH)
+              AND o.site_name = '04.스마트스토어'
+            GROUP BY p.store_id
+        """)
+        recent_sold_map = {r['store_id']: int(r['recent_sold_products'] or 0) for r in _dictfetchall(cur)}
 
     # 4) 사업자별 그룹핑 + all_stores
     biz_map = defaultdict(lambda: {
         'code': '', 'name': '', 'store_ids': [], 'store_names': [],
         'total_revenue': 0, 'total_orders': 0, 'total_profit': 0,
-        'total_products': 0, 'sold_products': 0,
+        'total_products': 0, 'sold_products': 0, 'recent_sold_products': 0,
     })
     biz_cat_agg = defaultdict(lambda: defaultdict(float))
 
@@ -239,8 +269,10 @@ def get_overview(start_date=None, end_date=None):
         ps = product_stats.get(sid, {})
         tp = int(ps.get('total_products', 0) or 0)
         sp = int(ps.get('sold_products', 0) or 0)
+        rsp = recent_sold_map.get(sid, 0)
         b['total_products'] += tp
         b['sold_products'] += sp
+        b['recent_sold_products'] += rsp
         totals['total_products'] += tp
         totals['sold_products'] += sp
 
@@ -273,6 +305,7 @@ def get_overview(start_date=None, end_date=None):
             'profit': profit,
             'total_products': tp,
             'sold_products': sp,
+            'recent_sold_products': rsp,
             'top_categories': store_top_cats.get(sid, []),
         })
 
@@ -282,12 +315,161 @@ def get_overview(start_date=None, end_date=None):
         b['top_categories'] = sorted(
             [{'name': n, 'amount': a} for n, a in cats.items()],
             key=lambda x: -x['amount'],
-        )[:5]
+        )[:4]
 
     businesses = sorted(biz_map.values(), key=lambda x: x['code'])
     all_stores.sort(key=lambda x: (x.get('memo', ''), x['id']))
 
-    return {'totals': totals, 'businesses': businesses, 'all_stores': all_stores}
+    # 4) Top 판매상품 (전체 스토어, 상위 50개)
+    all_store_ids = list(stores_map.keys())
+    top_products = _get_top_products(all_store_ids, start_date, end_date, limit=50, stores_map=stores_map)
+
+    return {'totals': totals, 'businesses': businesses, 'all_stores': all_stores, 'top_products': top_products}
+
+
+def _calc_3month_period():
+    """매월 2일 기준 직전 3개 완전월 기간 계산.
+    예: 4/16 → 1/1~3/31, 5/1 → 12/1~2/28, 5/2 → 2/1~4/30"""
+    today = date.today()
+    if today.day >= 2:
+        # 직전 3개월: (month-3)~(month-1)
+        end_last = today.replace(day=1) - timedelta(days=1)  # 전월 말일
+        start_first = date(
+            end_last.year if end_last.month > 2 else end_last.year - 1,
+            end_last.month - 2 if end_last.month > 2 else end_last.month + 10,
+            1,
+        )
+    else:
+        # 당월 2일 전: (month-4)~(month-2)
+        prev = today.replace(day=1) - timedelta(days=1)       # 전월 말일
+        end_last = prev.replace(day=1) - timedelta(days=1)    # 전전월 말일
+        start_first = date(
+            end_last.year if end_last.month > 2 else end_last.year - 1,
+            end_last.month - 2 if end_last.month > 2 else end_last.month + 10,
+            1,
+        )
+
+    start_date = start_first.strftime('%Y-%m-%d')
+    end_date = end_last.strftime('%Y-%m-%d')
+    period_label = f"{start_first.month}~{end_last.month}월"
+    return start_date, end_date, period_label
+
+
+def _determine_limit(amount, orders, ratio):
+    """거래액 OR 판매건 + 비중 조건으로 등록한도 결정"""
+    for t_amt, t_ord, t_ratio, t_limit in REGISTRATION_LIMIT_TIERS:
+        if t_ratio == 0:
+            return t_limit  # 기본 한도
+        if ratio >= t_ratio and (amount >= t_amt or orders >= t_ord):
+            return t_limit
+    return 1000
+
+
+def _next_tier(current_limit):
+    """현재 한도보다 한 단계 위 tier 반환 (없으면 None)"""
+    limits = [t[3] for t in REGISTRATION_LIMIT_TIERS]
+    limits.sort()
+    for lim in limits:
+        if lim > current_limit:
+            # 해당 한도의 tier 찾기
+            for t_amt, t_ord, t_ratio, t_limit in REGISTRATION_LIMIT_TIERS:
+                if t_limit == lim:
+                    return {'amount': t_amt, 'orders': t_ord, 'ratio': t_ratio, 'limit': t_limit}
+    return None
+
+
+def get_registration_limits():
+    """24개 스토어별 상품등록한도 지표 계산"""
+
+    stores_map = _get_stores_map()
+    start_date, end_date, period_label = _calc_3month_period()
+
+    # 1) 3개월 주문건수 + 거래액
+    where, params = _base_where()
+    _add_date_filter(where, params, start_date, end_date)
+    where_sql = ' AND '.join(where)
+
+    with connections['joacham'].cursor() as cur:
+        cur.execute(f"""
+            SELECT p.store_id,
+                   COUNT(*) as order_count,
+                   COALESCE(SUM(o.payment_price), 0) as transaction_amount
+            FROM orders_order o
+            JOIN myproduct.smartstore_product p
+                ON o.product_seller_code = p.seller_management_code
+            WHERE {where_sql}
+            GROUP BY p.store_id
+        """, params)
+        sales_3m = {r['store_id']: r for r in _dictfetchall(cur)}
+
+    # 2) 13개월 판매상품수
+    with connections['joacham'].cursor() as cur:
+        cur.execute("""
+            SELECT p.store_id,
+                   COUNT(DISTINCT o.product_seller_code) as recent_sold_products
+            FROM orders_order o
+            JOIN myproduct.smartstore_product p
+                ON o.product_seller_code = p.seller_management_code
+            WHERE o.order_date >= DATE_SUB(CURDATE(), INTERVAL 13 MONTH)
+              AND o.site_name = '04.스마트스토어'
+            GROUP BY p.store_id
+        """)
+        recent_sold_map = {r['store_id']: int(r['recent_sold_products'] or 0) for r in _dictfetchall(cur)}
+
+    # 3) 현재 상품수 (판매중/대기/품절 — 한도에 포함되는 상태)
+    with connections['myproduct'].cursor() as cur:
+        cur.execute("""
+            SELECT p.store_id,
+                   COUNT(*) as total_products
+            FROM smartstore_product p
+            JOIN smartstoreIdList s ON s.id = p.store_id AND s.is_active=1
+            GROUP BY p.store_id
+        """)
+        product_counts = {r['store_id']: int(r['total_products'] or 0) for r in _dictfetchall(cur)}
+
+    # 4) 스토어별 한도 계산
+    stores_result = []
+    for sid, info in stores_map.items():
+        s3 = sales_3m.get(sid, {})
+        amount = float(s3.get('transaction_amount', 0) or 0)
+        orders = int(s3.get('order_count', 0) or 0)
+        recent_sold = recent_sold_map.get(sid, 0)
+        total_prods = product_counts.get(sid, 0)
+
+        # 판매상품비중 (소수점 이하 버림)
+        ratio = int(recent_sold / total_prods * 100) if total_prods > 0 else 0
+
+        current_limit = _determine_limit(amount, orders, ratio)
+        nt = _next_tier(current_limit)
+
+        stores_result.append({
+            'store_id': sid,
+            'store_name': info['store_name'],
+            'transaction_amount': amount,
+            'order_count': orders,
+            'recent_sold_products': recent_sold,
+            'total_products': total_prods,
+            'sales_ratio': ratio,
+            'current_limit': current_limit,
+            'next_limit': nt['limit'] if nt else None,
+            'needed_amount': max(0, nt['amount'] - amount) if nt else None,
+            'needed_orders': max(0, nt['orders'] - orders) if nt else None,
+            'period_label': period_label,
+        })
+
+    stores_result.sort(key=lambda x: (-x['current_limit'], -x['transaction_amount']))
+
+    tiers = [
+        {'amount': t[0], 'orders': t[1], 'ratio': t[2], 'limit': t[3]}
+        for t in REGISTRATION_LIMIT_TIERS
+    ]
+
+    return {
+        'stores': stores_result,
+        'tiers': tiers,
+        'period_label': period_label,
+        'calculated_at': date.today().isoformat(),
+    }
 
 
 def get_store_detail(store_id, start_date=None, end_date=None, period='monthly'):
@@ -576,8 +758,8 @@ def _get_category_tree(store_ids):
     return _to_list(tree)
 
 
-def _get_top_products(store_ids, start_date=None, end_date=None, limit=20):
-    """Top 판매상품 + 스마트스토어 상품 URL/판매상태"""
+def _get_top_products(store_ids, start_date=None, end_date=None, limit=20, stores_map=None):
+    """Top 판매상품 + 스마트스토어 상품 URL/판매상태/스토어명"""
     where, params = _base_where()
     _add_date_filter(where, params, start_date, end_date)
     store_filter, store_params = _store_filter_sql(store_ids)
@@ -611,7 +793,8 @@ def _get_top_products(store_ids, start_date=None, end_date=None, limit=20):
                        p.channel_product_no,
                        p.status_type,
                        p.store_id,
-                       s.store_url
+                       s.store_url,
+                       s.store_name
                 FROM smartstore_product p
                 LEFT JOIN smartstoreIdList s ON s.id = p.store_id
                 WHERE p.seller_management_code IN ({ph})
@@ -627,8 +810,9 @@ def _get_top_products(store_ids, start_date=None, end_date=None, limit=20):
         r['qty'] = int(r['qty'] or 0)
         r.pop('settle', None)
 
-        # Add product URL + status
+        # Add product URL + status + store_name + channel_product_no
         pinfo = product_map.get(r.get('seller_code', ''))
+        r['channel_product_no'] = pinfo.get('channel_product_no') if pinfo else None
         if pinfo and pinfo.get('channel_product_no') and pinfo.get('store_url'):
             r['product_url'] = f"https://smartstore.naver.com/{pinfo['store_url']}/products/{pinfo['channel_product_no']}"
         else:
@@ -639,6 +823,14 @@ def _get_top_products(store_ids, start_date=None, end_date=None, limit=20):
         else:
             r['status'] = None
             r['status_type'] = None
+        # store_name
+        if pinfo and pinfo.get('store_name'):
+            r['store_name'] = pinfo['store_name']
+        elif pinfo and pinfo.get('store_id') and stores_map:
+            si = stores_map.get(pinfo['store_id'])
+            r['store_name'] = si['store_name'] if si else None
+        else:
+            r['store_name'] = None
 
     return rows
 

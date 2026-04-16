@@ -1,8 +1,16 @@
+import os
 import re
+import time
+import logging
+import urllib.parse
 from collections import Counter
+import requests as http_requests
 from .models import (
     NaverKeyword, NaverSearchSnapshot, NaverTermAnalysis,
+    NaverRankTarget, NaverRankHistory,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def calculate_order_weight(products, term1, term2, top_n=10):
@@ -202,3 +210,119 @@ def get_tag_statistics(keyword_id):
     normal.sort(key=lambda x: x['count'], reverse=True)
     special.sort(key=lambda x: x['count'], reverse=True)
     return normal + special
+
+
+# ══════════════════════════════════════════
+# 순위추적 — 네이버 쇼핑 검색 API
+# ══════════════════════════════════════════
+
+NAVER_SHOP_API = 'https://openapi.naver.com/v1/search/shop.json'
+
+
+def _naver_search(keyword, display=100, start=1):
+    """네이버 쇼핑 검색 API 호출"""
+    client_id = os.getenv('NAVER_SEARCH_CLIENT_ID', '')
+    client_secret = os.getenv('NAVER_SEARCH_CLIENT_SECRET', '')
+    if not client_id or not client_secret:
+        raise ValueError('NAVER_SEARCH_CLIENT_ID / SECRET 미설정')
+
+    resp = http_requests.get(NAVER_SHOP_API, params={
+        'query': keyword,
+        'display': display,
+        'start': start,
+        'sort': 'sim',
+    }, headers={
+        'X-Naver-Client-Id': client_id,
+        'X-Naver-Client-Secret': client_secret,
+    }, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def run_rank_tracking(target_ids=None):
+    """활성 순위추적 대상을 네이버 API로 조회하고 결과 저장.
+    target_ids: 특정 타겟만 추적 (None이면 전체 활성 타겟)
+    """
+    if target_ids:
+        targets = NaverRankTarget.objects.filter(id__in=target_ids, is_active=True)
+    else:
+        targets = NaverRankTarget.objects.filter(is_active=True)
+    targets = targets.select_related('keyword')
+
+    if not targets.exists():
+        return {'tracked': 0, 'results': []}
+
+    # 키워드별 그룹핑
+    kw_map = {}
+    for t in targets:
+        kw_map.setdefault(t.keyword.keyword, []).append(t)
+
+    results = []
+    for keyword, kw_targets in kw_map.items():
+        try:
+            # 100개씩 최대 200위까지 검색
+            all_items = []
+            for start in [1, 101]:
+                data = _naver_search(keyword, display=100, start=start)
+                items = data.get('items', [])
+                total = data.get('total', 0)
+                all_items.extend(items)
+                if len(items) < 100:
+                    break
+                time.sleep(0.15)  # rate limit 배려
+
+            logger.info(f'[순위추적] "{keyword}" {len(all_items)}개 상품 조회 (total={total})')
+
+            for target in kw_targets:
+                rank = None
+                found = None
+
+                for idx, item in enumerate(all_items):
+                    match = False
+                    if target.target_type == 'store':
+                        match = (item.get('mallName', '').strip() == target.target_value.strip())
+                    elif target.target_type == 'product_id':
+                        match = (str(item.get('productId', '')) == str(target.target_value))
+
+                    if match:
+                        rank = idx + 1
+                        found = item
+                        break
+
+                # HTML 태그 제거
+                product_name = ''
+                if found:
+                    product_name = re.sub(r'<[^>]+>', '', found.get('title', ''))
+
+                history = NaverRankHistory.objects.create(
+                    target=target,
+                    rank_position=rank,
+                    tab_type='total',
+                    total_results=total,
+                    found_product_name=product_name,
+                    found_product_price=int(found['lprice']) if found and found.get('lprice') else None,
+                    found_review_count=None,
+                )
+                results.append({
+                    'target_id': target.id,
+                    'keyword': keyword,
+                    'target_value': target.target_value,
+                    'rank': rank,
+                    'product_name': product_name,
+                })
+                logger.info(f'  [{target.target_value}] {rank or "미발견"}위')
+
+        except Exception as e:
+            logger.error(f'[순위추적] "{keyword}" 실패: {e}')
+            for target in kw_targets:
+                results.append({
+                    'target_id': target.id,
+                    'keyword': keyword,
+                    'target_value': target.target_value,
+                    'rank': None,
+                    'error': str(e),
+                })
+
+        time.sleep(0.3)  # 키워드 간 간격
+
+    return {'tracked': len(results), 'results': results}

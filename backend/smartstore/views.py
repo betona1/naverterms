@@ -183,6 +183,7 @@ class SmartStoreProductListView(APIView):
         has_orders = src.get('has_orders')
         sort_by = src.get('sort_by') or None
         sort_dir = src.get('sort_dir') or None
+        min_ss_amount = src.get('min_ss_amount')
         result = smartstore_product_service.get_products(
             int(store_id), page, per_page, status, search,
             ownerclan_soldout=int(ownerclan_soldout) if ownerclan_soldout is not None else None,
@@ -190,6 +191,7 @@ class SmartStoreProductListView(APIView):
             has_orders=int(has_orders) if has_orders is not None else None,
             sort_by=sort_by,
             sort_dir=sort_dir,
+            min_ss_amount=int(min_ss_amount) if min_ss_amount is not None else None,
         )
         return result, None
 
@@ -419,3 +421,8 @@ class SmartStoreAnalyticsSyncCategoriesView(APIView):
         result = smartstore_analytics_service.sync_category_names()
         status_code = 400 if 'error' in result else 200
         return Response(result, status=status_code)
+
+
+class SmartStoreRegistrationLimitView(APIView):
+    def get(self, request):
+        return Response(smartstore_analytics_service.get_registration_limits())

@@ -1,16 +1,18 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef, Fragment } from 'react';
 import {
   ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, Legend, BarChart, Cell,
 } from 'recharts';
 import { useTheme } from '../hooks/useTheme';
 import {
-  fetchOverview, fetchStoreDetail, fetchBusinessDetail,
+  fetchOverview, fetchStoreDetail, fetchBusinessDetail, fetchRegistrationLimits,
   type OverviewData, type BusinessDetailData, type StoreDetailData,
   type TrendRow, type CategoryNode, type TopProductRow,
   type BusinessSummary, type StoreOverviewItem, type MiniCategory,
+  type RegistrationLimitData, type RegistrationLimitStore,
 } from '../api/smartstoreAnalyticsApi';
 import { formatKRW, formatKoreanWon, formatKoreanShort } from '../utils/format';
+import ProductOrdersModal from '../components/smartstore/ProductOrdersModal';
 
 type ViewMode = 'overview' | 'business' | 'store';
 type OverviewTab = 'business' | 'store';
@@ -79,7 +81,10 @@ export default function SmartStoreAnalyticsPage() {
   const [overviewData, setOverviewData] = useState<OverviewData | null>(null);
   const [businessData, setBusinessData] = useState<BusinessDetailData | null>(null);
   const [storeData, setStoreData] = useState<StoreDetailData | null>(null);
+  const [regLimitData, setRegLimitData] = useState<RegistrationLimitData | null>(null);
   const [loading, setLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const dashboardRef = useRef<HTMLDivElement>(null);
 
   // always load overview for nav dropdowns
   useEffect(() => {
@@ -87,6 +92,11 @@ export default function SmartStoreAnalyticsPage() {
     const ed = endDate || undefined;
     fetchOverview(sd, ed).then(setOverviewData).catch(() => {});
   }, [startDate, endDate]);
+
+  // load registration limits once
+  useEffect(() => {
+    fetchRegistrationLimits().then(setRegLimitData).catch(() => {});
+  }, []);
 
   // period preset handler
   const handlePreset = useCallback((key: string) => {
@@ -198,6 +208,20 @@ export default function SmartStoreAnalyticsPage() {
     goStore(id, name || `Store ${id}`);
   };
 
+  // PDF export
+  const handleExportPdf = async () => {
+    if (!dashboardRef.current || exporting) return;
+    setExporting(true);
+    try {
+      const { exportToPdf } = await import('../utils/exportPdf');
+      await exportToPdf(dashboardRef.current, `스마트스토어_분석_${todayStr()}.pdf`);
+    } catch (e) {
+      console.error('PDF export failed:', e);
+    } finally {
+      setExporting(false);
+    }
+  };
+
   // stores available for dropdown
   const currentBizStores: { id: number; name: string }[] = [];
   if (selectedBusinessCode && overviewData) {
@@ -268,6 +292,12 @@ export default function SmartStoreAnalyticsPage() {
               ))}
             </select>
             {loading && <span className="text-[11px] text-gray-400 animate-pulse ml-2">로딩중...</span>}
+            <button onClick={handleExportPdf} disabled={exporting}
+              className={`ml-auto px-2.5 py-1 rounded text-[11px] font-bold transition-colors ${
+                exporting ? 'opacity-50 cursor-wait' : 'hover:opacity-80'
+              } ${dark ? 'bg-blue-600 text-white' : 'bg-blue-500 text-white'}`}>
+              {exporting ? '내보내기...' : 'PDF 저장'}
+            </button>
           </div>
           {/* Row 2: Filters */}
           <div className="flex items-center gap-2 flex-wrap">
@@ -320,8 +350,8 @@ export default function SmartStoreAnalyticsPage() {
         </div>
       </div>
 
-      <div className="max-w-7xl mx-auto px-4 py-4 space-y-4">
-        {view === 'overview' && overviewData && <OverviewView data={overviewData} dark={dark}
+      <div ref={dashboardRef} className="max-w-7xl mx-auto px-4 py-4 space-y-4">
+        {view === 'overview' && overviewData && <OverviewView data={overviewData} regLimitData={regLimitData} dark={dark}
           overviewTab={overviewTab} setOverviewTab={setOverviewTab}
           onBusinessClick={goBusiness} onStoreClick={goStore}
           card={card} tHead={tHead} tRow={tRow} txt={txt} txtSub={txtSub} chartGrid={chartGrid} chartTick={chartTick} tooltipBg={tooltipBg} tooltipBorder={tooltipBorder} />}
@@ -346,8 +376,9 @@ interface StyleProps {
   tooltipBg: string; tooltipBorder: string;
 }
 
-function OverviewView({ data, dark, overviewTab, setOverviewTab, onBusinessClick, onStoreClick, ...s }: StyleProps & {
+function OverviewView({ data, regLimitData, dark, overviewTab, setOverviewTab, onBusinessClick, onStoreClick, ...s }: StyleProps & {
   data: OverviewData;
+  regLimitData: RegistrationLimitData | null;
   overviewTab: OverviewTab;
   setOverviewTab: (t: OverviewTab) => void;
   onBusinessClick: (b: BusinessSummary) => void;
@@ -407,6 +438,7 @@ function OverviewView({ data, dark, overviewTab, setOverviewTab, onBusinessClick
                 <div><span className={s.txtSub}>주문</span> <span className={`font-bold ${s.txt}`}>{b.total_orders.toLocaleString()}</span></div>
                 <div><span className={s.txtSub}>수익</span> <span className={`font-bold ${b.total_profit >= 0 ? 'text-green-400' : 'text-red-400'}`}>{formatKoreanWon(b.total_profit)}</span></div>
                 <div><span className={s.txtSub}>상품</span> <span className={`font-bold ${s.txt}`}>{b.sold_products}/{b.total_products}</span></div>
+                <div><span className={s.txtSub}>13개월</span> <span className={`font-bold text-orange-400`}>{(b.recent_sold_products || 0).toLocaleString()}</span></div>
               </div>
               {b.top_categories && b.top_categories.length > 0 && (
                 <MiniCategoryChart categories={b.top_categories} dark={dark} />
@@ -428,6 +460,7 @@ function OverviewView({ data, dark, overviewTab, setOverviewTab, onBusinessClick
                 <div><span className={s.txtSub}>주문</span> <span className={`font-bold ${s.txt}`}>{st.orders.toLocaleString()}</span></div>
                 <div><span className={s.txtSub}>수익</span> <span className={`font-bold ${st.profit >= 0 ? 'text-green-400' : 'text-red-400'}`}>{formatKoreanWon(st.profit)}</span></div>
                 <div><span className={s.txtSub}>상품</span> <span className={`font-bold ${s.txt}`}>{st.sold_products}/{st.total_products}</span></div>
+                <div><span className={s.txtSub}>13개월</span> <span className={`font-bold text-orange-400`}>{(st.recent_sold_products || 0).toLocaleString()}</span></div>
               </div>
               {st.top_categories && st.top_categories.length > 0 && (
                 <MiniCategoryChart categories={st.top_categories} dark={dark} />
@@ -435,6 +468,16 @@ function OverviewView({ data, dark, overviewTab, setOverviewTab, onBusinessClick
             </button>
           ))}
         </div>
+      )}
+
+      {/* Top 판매상품 */}
+      {data.top_products && data.top_products.length > 0 && (
+        <OverviewTopProducts products={data.top_products} dark={dark} {...s} />
+      )}
+
+      {/* 상품등록한도 */}
+      {regLimitData && regLimitData.stores.length > 0 && (
+        <RegistrationLimitPanel data={regLimitData} dark={dark} {...s} />
       )}
     </>
   );
@@ -501,6 +544,192 @@ function StoreView({ data, dark, ...s }: StyleProps & { data: StoreDetailData })
 /* ════════════════════════════════════════════
    Shared Components
    ════════════════════════════════════════════ */
+
+type ProductSortKey = 'revenue' | 'qty' | 'profit' | 'order_count' | 'cost';
+type ProductSortDir = 'desc' | 'asc';
+
+function OverviewTopProducts({ products, ...s }: StyleProps & { products: TopProductRow[] }) {
+  const [tab, setTab] = useState<'all' | 'byStore'>('all');
+  const [sortKey, setSortKey] = useState<ProductSortKey>('revenue');
+  const [sortDir, setSortDir] = useState<ProductSortDir>('desc');
+  const [orderModal, setOrderModal] = useState<{ code: string; name: string } | null>(null);
+
+  const toggleSort = (key: ProductSortKey) => {
+    if (sortKey === key) {
+      setSortDir(prev => prev === 'desc' ? 'asc' : 'desc');
+    } else {
+      setSortKey(key);
+      setSortDir('desc');
+    }
+  };
+
+  const sortIcon = (key: ProductSortKey) => {
+    if (sortKey !== key) return '';
+    return sortDir === 'desc' ? ' ▼' : ' ▲';
+  };
+
+  const sorted = [...products].sort((a, b) => {
+    const av = a[sortKey] ?? 0;
+    const bv = b[sortKey] ?? 0;
+    return sortDir === 'desc' ? (bv as number) - (av as number) : (av as number) - (bv as number);
+  });
+
+  // Group by store
+  const storeGroups: Record<string, TopProductRow[]> = {};
+  if (tab === 'byStore') {
+    for (const p of sorted) {
+      const sn = p.store_name || '미지정';
+      if (!storeGroups[sn]) storeGroups[sn] = [];
+      storeGroups[sn].push(p);
+    }
+  }
+  const storeNames = Object.keys(storeGroups).sort((a, b) => {
+    const aRev = storeGroups[a].reduce((s, p) => s + p.revenue, 0);
+    const bRev = storeGroups[b].reduce((s, p) => s + p.revenue, 0);
+    return bRev - aRev;
+  });
+
+  const badges = s.dark ? STATUS_BADGE : STATUS_BADGE_LIGHT;
+
+  const headerCls = (key: ProductSortKey, label: string, w: string) => (
+    <th className={`text-right px-2 py-2 font-medium ${s.txtSub} cursor-pointer select-none hover:text-[#03c75a] transition-colors ${w}`}
+      onClick={() => toggleSort(key)}>
+      {label}{sortIcon(key)}
+    </th>
+  );
+
+  const renderRow = (p: TopProductRow, idx: number, showStore: boolean) => {
+    const margin = p.revenue > 0 ? (p.profit / p.revenue) * 100 : 0;
+    const badge = p.status_type ? badges[p.status_type] : null;
+    return (
+      <tr key={`${p.seller_code}-${idx}`} className={`border-t ${s.dark ? 'border-[#2a2a40]' : 'border-gray-100'} ${s.tRow}`}>
+        <td className={`text-center px-2 py-2 ${s.txtSub}`}>{idx + 1}</td>
+        <td className={`px-2 py-2 ${s.txt} max-w-[260px]`}>
+          {p.product_url ? (
+            <a href={p.product_url} target="_blank" rel="noopener noreferrer"
+              className="hover:text-[#03c75a] hover:underline truncate block" title={p.product_name}>
+              {p.product_name}
+            </a>
+          ) : (
+            <span className="truncate block" title={p.product_name}>{p.product_name}</span>
+          )}
+        </td>
+        {showStore && <td className={`px-2 py-2 text-[11px] ${s.txtSub} whitespace-nowrap`}>{p.store_name || '-'}</td>}
+        <td className={`px-2 py-2 text-[11px] font-mono ${s.txtSub}`}>
+          {p.channel_product_no ? (
+            p.product_url ? (
+              <a href={p.product_url} target="_blank" rel="noopener noreferrer"
+                className="hover:text-[#03c75a] hover:underline">{p.channel_product_no}</a>
+            ) : <span>{p.channel_product_no}</span>
+          ) : '-'}
+        </td>
+        <td className="text-center px-2 py-2">
+          {p.status && badge ? (
+            <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-bold ${badge.bg} ${badge.text}`}>
+              {p.status}
+            </span>
+          ) : p.status ? (
+            <span className={`text-[10px] ${s.txtSub}`}>{p.status}</span>
+          ) : null}
+        </td>
+        <td className={`text-right px-2 py-2 ${s.txt}`}>{p.qty.toLocaleString()}</td>
+        <td className={`text-right px-2 py-2 font-medium ${s.txt} cursor-pointer hover:text-[#03c75a] transition-colors`}
+          onClick={() => p.seller_code && setOrderModal({ code: p.seller_code, name: p.product_name })}
+          title="주문이력 보기">
+          {formatKoreanWon(p.revenue)}
+        </td>
+        <td className={`text-right px-2 py-2 ${s.txtSub}`}>{formatKoreanWon(p.cost)}</td>
+        <td className={`text-right px-2 py-2 font-medium ${p.profit >= 0 ? 'text-green-500' : 'text-red-400'}`}>{formatKoreanWon(p.profit)}</td>
+        <td className={`text-right px-2 py-2 ${margin >= 0 ? 'text-green-500' : 'text-red-400'}`}>{margin.toFixed(1)}%</td>
+        <td className={`text-right px-2 py-2 ${s.txt}`}>{p.order_count.toLocaleString()}</td>
+      </tr>
+    );
+  };
+
+  const showStore = tab === 'all';
+
+  return (
+    <>
+    <div className={`rounded-xl border p-4 ${s.card}`}>
+      <div className="flex items-center gap-3 mb-3">
+        <h3 className={`text-sm font-bold ${s.txt}`}>Top 판매상품</h3>
+        <div className={`flex rounded-lg overflow-hidden border ${s.dark ? 'border-[#444]' : 'border-gray-300'}`}>
+          <button onClick={() => setTab('all')}
+            className={`px-2.5 py-1 text-[11px] font-bold transition-colors ${
+              tab === 'all'
+                ? 'bg-[#03c75a] text-white'
+                : s.dark ? 'bg-[#2d2d2d] text-gray-300 hover:bg-[#3d3d3d]' : 'bg-white text-gray-600 hover:bg-gray-100'
+            }`}>
+            전체
+          </button>
+          <button onClick={() => setTab('byStore')}
+            className={`px-2.5 py-1 text-[11px] font-bold transition-colors ${
+              tab === 'byStore'
+                ? 'bg-[#03c75a] text-white'
+                : s.dark ? 'bg-[#2d2d2d] text-gray-300 hover:bg-[#3d3d3d]' : 'bg-white text-gray-600 hover:bg-gray-100'
+            }`}>
+            사이트별
+          </button>
+        </div>
+        <span className={`text-[11px] ${s.txtSub}`}>({products.length}개)</span>
+      </div>
+
+      <div className="overflow-auto max-h-[600px]">
+        <table className="w-full text-[12px]">
+          <thead className={`sticky top-0 z-[1] ${s.tHead}`}>
+            <tr>
+              <th className={`text-center px-2 py-2 font-medium ${s.txtSub} w-8`}>#</th>
+              <th className={`text-left px-2 py-2 font-medium ${s.txtSub}`}>상품명</th>
+              {showStore && <th className={`text-left px-2 py-2 font-medium ${s.txtSub} w-24`}>스토어</th>}
+              <th className={`text-left px-2 py-2 font-medium ${s.txtSub} w-28`}>상품번호</th>
+              <th className={`text-center px-2 py-2 font-medium ${s.txtSub} w-16`}>상태</th>
+              {headerCls('qty', '수량', 'w-16')}
+              {headerCls('revenue', '매출액', 'w-24')}
+              {headerCls('cost', '원가', 'w-20')}
+              {headerCls('profit', '수익', 'w-24')}
+              <th className={`text-right px-2 py-2 font-medium ${s.txtSub} w-16`}>수익률</th>
+              {headerCls('order_count', '주문수', 'w-16')}
+            </tr>
+          </thead>
+          <tbody>
+            {tab === 'all' ? (
+              sorted.map((p, i) => renderRow(p, i, showStore))
+            ) : (
+              storeNames.map(storeName => {
+                const items = storeGroups[storeName];
+                const storeRev = items.reduce((sum, p) => sum + p.revenue, 0);
+                const storeProfit = items.reduce((sum, p) => sum + p.profit, 0);
+                return (
+                  <Fragment key={storeName}>
+                    <tr className={s.dark ? 'bg-[#1a2332]' : 'bg-[#f0f3f7]'}>
+                      <td colSpan={10} className="px-2 py-2">
+                        <div className="flex items-center gap-3">
+                          <span className={`text-[12px] font-bold ${s.txt}`}>{storeName}</span>
+                          <span className={`text-[11px] ${s.txtSub}`}>{items.length}개</span>
+                          <span className={`text-[11px] font-medium ${s.txt}`}>매출 {formatKoreanWon(storeRev)}</span>
+                          <span className={`text-[11px] font-medium ${storeProfit >= 0 ? 'text-green-500' : 'text-red-400'}`}>수익 {formatKoreanWon(storeProfit)}</span>
+                        </div>
+                      </td>
+                    </tr>
+                    {items.map((p, i) => renderRow(p, i, false))}
+                  </Fragment>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    {orderModal && (
+      <ProductOrdersModal
+        code={orderModal.code}
+        productName={orderModal.name}
+        onClose={() => setOrderModal(null)}
+      />
+    )}
+    </>
+  );
+}
 
 function MiniCategoryChart({ categories, dark }: { categories: MiniCategory[]; dark: boolean }) {
   if (!categories.length) return null;
@@ -748,8 +977,10 @@ function CategoryTreeTable({ categories, selectedCatId, onCategorySelect, sortFi
 }
 
 function TopProductsTable({ products, ...s }: StyleProps & { products: TopProductRow[] }) {
+  const [orderModal, setOrderModal] = useState<{ code: string; name: string } | null>(null);
   if (!products.length) return null;
   return (
+    <>
     <div className={`rounded-xl border p-4 ${s.card}`}>
       <h3 className={`text-sm font-bold mb-3 ${s.txt}`}>Top 판매상품</h3>
       <div className="overflow-auto">
@@ -758,6 +989,7 @@ function TopProductsTable({ products, ...s }: StyleProps & { products: TopProduc
             <tr>
               <th className={`text-center px-2 py-2 font-medium ${s.txtSub} w-8`}>#</th>
               <th className={`text-left px-2 py-2 font-medium ${s.txtSub}`}>상품명</th>
+              <th className={`text-left px-2 py-2 font-medium ${s.txtSub} w-28`}>상품번호</th>
               <th className={`text-center px-2 py-2 font-medium ${s.txtSub} w-16`}>상태</th>
               <th className={`text-left px-2 py-2 font-medium ${s.txtSub} w-24`}>관리코드</th>
               <th className={`text-right px-2 py-2 font-medium ${s.txtSub} w-16`}>수량</th>
@@ -787,6 +1019,14 @@ function TopProductsTable({ products, ...s }: StyleProps & { products: TopProduc
                       <span className="truncate block" title={p.product_name}>{p.product_name}</span>
                     )}
                   </td>
+                  <td className={`px-2 py-2 font-mono text-[11px] ${s.txtSub}`}>
+                    {p.channel_product_no ? (
+                      p.product_url ? (
+                        <a href={p.product_url} target="_blank" rel="noopener noreferrer"
+                          className="hover:text-[#03c75a] hover:underline">{p.channel_product_no}</a>
+                      ) : <span>{p.channel_product_no}</span>
+                    ) : '-'}
+                  </td>
                   <td className="text-center px-2 py-2">
                     {p.status && badge ? (
                       <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-bold ${badge.bg} ${badge.text}`}>
@@ -798,7 +1038,11 @@ function TopProductsTable({ products, ...s }: StyleProps & { products: TopProduc
                   </td>
                   <td className={`px-2 py-2 font-mono text-[11px] ${s.txtSub}`}>{p.seller_code}</td>
                   <td className={`text-right px-2 py-2 ${s.txt}`}>{p.qty.toLocaleString()}</td>
-                  <td className={`text-right px-2 py-2 font-medium ${s.txt}`}>{formatKoreanWon(p.revenue)}</td>
+                  <td className={`text-right px-2 py-2 font-medium ${s.txt} cursor-pointer hover:text-[#03c75a] transition-colors`}
+                    onClick={() => p.seller_code && setOrderModal({ code: p.seller_code, name: p.product_name })}
+                    title="주문이력 보기">
+                    {formatKoreanWon(p.revenue)}
+                  </td>
                   <td className={`text-right px-2 py-2 ${s.txtSub}`}>{formatKoreanWon(p.cost)}</td>
                   <td className={`text-right px-2 py-2 font-medium ${p.profit >= 0 ? 'text-green-500' : 'text-red-400'}`}>{formatKoreanWon(p.profit)}</td>
                   <td className={`text-right px-2 py-2 ${margin >= 0 ? 'text-green-500' : 'text-red-400'}`}>{margin.toFixed(1)}%</td>
@@ -809,6 +1053,135 @@ function TopProductsTable({ products, ...s }: StyleProps & { products: TopProduc
           </tbody>
         </table>
       </div>
+    </div>
+    {orderModal && (
+      <ProductOrdersModal
+        code={orderModal.code}
+        productName={orderModal.name}
+        onClose={() => setOrderModal(null)}
+      />
+    )}
+    </>
+  );
+}
+
+/* ════════════════════════════════════════════
+   Registration Limit Panel
+   ════════════════════════════════════════════ */
+
+function RegistrationLimitPanel({ data, ...s }: StyleProps & { data: RegistrationLimitData }) {
+  const [expanded, setExpanded] = useState(true);
+
+  return (
+    <div className={`rounded-xl border p-4 ${s.card}`}>
+      <div className="flex items-center gap-3 mb-3 cursor-pointer select-none" onClick={() => setExpanded(v => !v)}>
+        <h3 className={`text-sm font-bold ${s.txt}`}>
+          {expanded ? '▼' : '▶'} 상품등록한도
+          <span className={`text-[11px] font-normal ml-2 ${s.txtSub}`}>(6/2 신정책 기준)</span>
+        </h3>
+        <span className={`text-[11px] px-2 py-0.5 rounded ${s.dark ? 'bg-[#2a2a40] text-gray-300' : 'bg-gray-100 text-gray-600'}`}>
+          산출기간: {data.period_label}
+        </span>
+        <span className={`text-[10px] ${s.txtSub}`}>
+          거래액 OR 판매건(3개월) + 판매상품비중(필수 3%)
+        </span>
+      </div>
+
+      {expanded && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
+          {data.stores.map(st => (
+            <RegLimitCard key={st.store_id} store={st} dark={s.dark} card={s.card} txt={s.txt} txtSub={s.txtSub} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RegLimitCard({ store: st, dark, txt, txtSub }: {
+  store: RegistrationLimitStore; dark: boolean; card: string; txt: string; txtSub: string;
+}) {
+  const usagePct = st.current_limit > 0 ? Math.min((st.total_products / st.current_limit) * 100, 100) : 0;
+  const overLimit = st.total_products > st.current_limit;
+  const lowRatio = st.sales_ratio < 3;
+  const isMax = st.current_limit >= 50000;
+
+  const barColor = overLimit ? 'bg-red-500' : usagePct > 80 ? 'bg-yellow-500' : 'bg-[#03c75a]';
+  const barBg = dark ? 'bg-[#2a2a40]' : 'bg-gray-200';
+
+  return (
+    <div className={`rounded-lg border p-3 ${dark ? 'bg-[#1a1a2e] border-[#2a2a40]' : 'bg-gray-50 border-gray-200'}`}>
+      {/* Header */}
+      <div className="flex items-center justify-between mb-2">
+        <span className={`text-[12px] font-bold ${txt}`}>{st.store_name}</span>
+        {isMax ? (
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/20 text-green-400 font-bold">MAX</span>
+        ) : (
+          <span className={`text-[10px] px-1.5 py-0.5 rounded ${dark ? 'bg-[#2a2a40] text-gray-300' : 'bg-gray-200 text-gray-600'}`}>
+            한도 {st.current_limit.toLocaleString()}개
+          </span>
+        )}
+      </div>
+
+      {/* Progress bar */}
+      <div className={`w-full h-2 rounded-full ${barBg} mb-1`}>
+        <div className={`h-full rounded-full ${barColor} transition-all`}
+          style={{ width: `${Math.min(usagePct, 100)}%` }} />
+      </div>
+      <div className={`text-[10px] mb-2 ${overLimit ? 'text-red-400 font-bold' : txtSub}`}>
+        {st.total_products.toLocaleString()} / {st.current_limit.toLocaleString()}
+        {overLimit && ' (초과!)'}
+        <span className="ml-1">({usagePct.toFixed(0)}%)</span>
+      </div>
+
+      {/* Low ratio warning */}
+      {lowRatio && (
+        <div className={`text-[10px] px-2 py-1 rounded mb-2 ${dark ? 'bg-red-500/10 text-red-400' : 'bg-red-50 text-red-600'}`}>
+          비중 {st.sales_ratio}% &lt; 3% → 최대 1,000개 제한
+        </div>
+      )}
+
+      {/* Metrics */}
+      <div className="grid grid-cols-1 gap-1 text-[11px] mb-2">
+        <div className="flex items-center justify-between">
+          <span className={txtSub}>거래액 (3개월)</span>
+          <span className={`font-bold ${txt}`}>{formatKoreanWon(st.transaction_amount)}</span>
+        </div>
+        <div className="flex items-center justify-between">
+          <span className={txtSub}>주문건 (3개월)</span>
+          <span className={`font-bold ${txt}`}>{st.order_count.toLocaleString()}건</span>
+        </div>
+        <div className="flex items-center justify-between">
+          <span className={txtSub}>판매상품비중</span>
+          <span className={`font-bold ${st.sales_ratio >= 3 ? 'text-green-400' : 'text-red-400'}`}>
+            {st.sales_ratio}%
+            <span className={`font-normal ml-1 ${txtSub}`}>({st.recent_sold_products}/{st.total_products})</span>
+          </span>
+        </div>
+      </div>
+
+      {/* Next tier */}
+      {st.next_limit && !lowRatio && (
+        <div className={`text-[10px] pt-2 border-t ${dark ? 'border-[#2a2a40]' : 'border-gray-200'}`}>
+          <div className={`font-bold mb-0.5 ${dark ? 'text-blue-400' : 'text-blue-600'}`}>
+            ▷ 다음 {st.next_limit.toLocaleString()}개
+          </div>
+          <div className={txtSub}>
+            {st.needed_amount != null && st.needed_amount > 0 && (
+              <span>거래액 +{formatKoreanWon(st.needed_amount)}</span>
+            )}
+            {st.needed_amount != null && st.needed_amount > 0 && st.needed_orders != null && st.needed_orders > 0 && (
+              <span> 또는 </span>
+            )}
+            {st.needed_orders != null && st.needed_orders > 0 && (
+              <span>주문건 +{st.needed_orders.toLocaleString()}건</span>
+            )}
+            {(st.needed_amount === 0 || st.needed_amount == null) && (st.needed_orders === 0 || st.needed_orders == null) && (
+              <span>비중 3% 이상 유지 필요</span>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

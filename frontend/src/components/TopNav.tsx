@@ -8,8 +8,10 @@ interface Props {
 
 const NAV_ITEMS = [
   { key: 'products', label: '스마트스토어상품', color: '#03c75a' },
+  { key: 'analytics', label: '스토어분석', color: '#10b981' },
   { key: 'terms', label: 'Term 분석', color: '#0078d7' },
   { key: 'rank', label: '순위추적', color: '#f59e0b' },
+  { key: 'ownerclan', label: '오너클랜상품', color: '#ff6b35' },
   { key: 'extension', label: '도우미프로그램', color: '#8b5cf6' },
 ] as const;
 

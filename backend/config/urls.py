@@ -5,4 +5,5 @@ from django.urls import path, include
 urlpatterns = [
     path('api/naver/', include('naver.urls')),
     path('api/smartstore/', include('smartstore.urls')),
+    path('api/ownerclan/', include('ownerclan.urls')),
 ] + static(settings.STATIC_URL, document_root=settings.STATICFILES_DIRS[0])

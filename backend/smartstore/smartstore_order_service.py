@@ -184,27 +184,29 @@ def update_product_sales_summary():
         cur.execute(f"""
             SELECT product_seller_code,
                    COALESCE(SUM(quantity), 0),
-                   COALESCE(SUM(payment_price), 0)
+                   COALESCE(SUM(payment_price), 0),
+                   COUNT(*)
             FROM orders_order
             WHERE order_status IN ({status_ph})
               AND site_name = %s
               AND product_seller_code IS NOT NULL AND product_seller_code != ''
             GROUP BY product_seller_code
         """, list(VALID_ORDER_STATUSES) + [SMARTSTORE_SITE])
-        ss_rows = {r[0]: (int(r[1]), int(r[2])) for r in cur.fetchall()}
+        ss_rows = {r[0]: (int(r[1]), int(r[2]), int(r[3])) for r in cur.fetchall()}
 
         # 전체 사이트
         cur.execute(f"""
             SELECT product_seller_code,
                    COALESCE(SUM(quantity), 0),
-                   COALESCE(SUM(payment_price), 0)
+                   COALESCE(SUM(payment_price), 0),
+                   COUNT(*)
             FROM orders_order
             WHERE order_status IN ({status_ph})
               AND site_name NOT IN ({exclude_ph})
               AND product_seller_code IS NOT NULL AND product_seller_code != ''
             GROUP BY product_seller_code
         """, list(VALID_ORDER_STATUSES) + list(EXCLUDE_SITES))
-        all_rows = {r[0]: (int(r[1]), int(r[2])) for r in cur.fetchall()}
+        all_rows = {r[0]: (int(r[1]), int(r[2]), int(r[3])) for r in cur.fetchall()}
 
     codes = set(ss_rows) | set(all_rows)
     if not codes:
@@ -212,29 +214,30 @@ def update_product_sales_summary():
 
     with connections['myproduct'].cursor() as cur:
         cur.execute(
-            "UPDATE smartstore_product SET total_order_qty=0, total_order_amount=0, "
-            "all_order_qty=0, all_order_amount=0 "
-            "WHERE total_order_qty>0 OR total_order_amount>0 OR all_order_qty>0 OR all_order_amount>0"
+            "UPDATE smartstore_product SET total_order_qty=0, total_order_amount=0, total_order_count=0, "
+            "all_order_qty=0, all_order_amount=0, all_order_count=0 "
+            "WHERE total_order_qty>0 OR total_order_amount>0 OR all_order_qty>0 OR all_order_amount>0 "
+            "OR total_order_count>0 OR all_order_count>0"
         )
         cur.execute(
             "CREATE TEMPORARY TABLE _tmp_oagg ("
-            "code VARCHAR(50) PRIMARY KEY, ss_qty INT, ss_amt INT, all_qty INT, all_amt INT)"
+            "code VARCHAR(50) PRIMARY KEY, ss_qty INT, ss_amt INT, ss_cnt INT, all_qty INT, all_amt INT, all_cnt INT)"
         )
         items = list(codes)
         batch = 1000
         for i in range(0, len(items), batch):
             chunk = items[i:i + batch]
-            vals = ','.join(['(%s,%s,%s,%s,%s)'] * len(chunk))
+            vals = ','.join(['(%s,%s,%s,%s,%s,%s,%s)'] * len(chunk))
             params = []
             for c in chunk:
-                sq, sa = ss_rows.get(c, (0, 0))
-                aq, aa = all_rows.get(c, (0, 0))
-                params.extend([c, sq, sa, aq, aa])
+                sq, sa, sc = ss_rows.get(c, (0, 0, 0))
+                aq, aa, ac = all_rows.get(c, (0, 0, 0))
+                params.extend([c, sq, sa, sc, aq, aa, ac])
             cur.execute(f"INSERT INTO _tmp_oagg VALUES {vals}", params)
         cur.execute(
             "UPDATE smartstore_product p JOIN _tmp_oagg t ON p.seller_management_code = t.code "
-            "SET p.total_order_qty=t.ss_qty, p.total_order_amount=t.ss_amt, "
-            "p.all_order_qty=t.all_qty, p.all_order_amount=t.all_amt"
+            "SET p.total_order_qty=t.ss_qty, p.total_order_amount=t.ss_amt, p.total_order_count=t.ss_cnt, "
+            "p.all_order_qty=t.all_qty, p.all_order_amount=t.all_amt, p.all_order_count=t.all_cnt"
         )
         updated = cur.rowcount
         cur.execute("DROP TEMPORARY TABLE _tmp_oagg")

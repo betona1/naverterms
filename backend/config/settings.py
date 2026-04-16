@@ -16,6 +16,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'naver',
     'smartstore',
+    'ownerclan',
 ]
 
 MIDDLEWARE = [
@@ -61,6 +62,15 @@ DATABASES = {
         'PORT': int(os.getenv('MYPRODUCT_DB_PORT', 3306)),
         'USER': os.getenv('MYPRODUCT_DB_USER', 'root'),
         'PASSWORD': os.getenv('MYPRODUCT_DB_PASSWORD', '').strip("'"),
+        'OPTIONS': {'charset': 'utf8mb4'},
+    },
+    'ads': {
+        'ENGINE': 'django.db.backends.mysql',
+        'NAME': os.getenv('ADS_DB_NAME', 'ads'),
+        'HOST': os.getenv('ADS_DB_HOST', '192.168.219.200'),
+        'PORT': int(os.getenv('ADS_DB_PORT', 3306)),
+        'USER': os.getenv('ADS_DB_USER', 'root'),
+        'PASSWORD': os.getenv('ADS_DB_PASSWORD', os.getenv('MYPRODUCT_DB_PASSWORD', '')).strip("'"),
         'OPTIONS': {'charset': 'utf8mb4'},
     },
 }

@@ -3,8 +3,6 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContai
 import { useTheme } from '../hooks/useTheme';
 import * as naverApi from '../api/naverApi';
 import { fetchStores, type SmartStore } from '../api/smartstoreApi';
-import { useNaverExtension } from '../components/naver/useNaverExtension';
-import ExtensionStatus from '../components/naver/ExtensionStatus';
 import { NaverLogo, RankIcon } from '../components/naver/NaverIcon';
 
 interface RankSummary {
@@ -45,7 +43,8 @@ export default function NaverRankPage() {
   const [newTargetValue, setNewTargetValue] = useState('');
   const [newDisplayName, setNewDisplayName] = useState('');
 
-  const { extStatus, progress, captcha, startRankTracking, cancel, onProgress } = useNaverExtension();
+  const [tracking, setTracking] = useState(false);
+  const [trackResult, setTrackResult] = useState<{ tracked: number; results: any[] } | null>(null);
 
   const loadSummary = useCallback(async () => {
     try { setSummary(await naverApi.getRankSummary()); } catch (e) { console.error(e); }
@@ -58,15 +57,6 @@ export default function NaverRankPage() {
   useEffect(() => { loadSummary(); }, [loadSummary]);
   useEffect(() => { loadHistory(); }, [loadHistory]);
   useEffect(() => { fetchStores().then(setStores).catch(console.error); }, []);
-
-  useEffect(() => {
-    return onProgress((e) => {
-      if (e.type === 'NAVER_RANK_COMPLETE' || (e.type === 'NAVER_QUEUE_STATUS' && e.status === 'complete')) {
-        loadSummary();
-        loadHistory();
-      }
-    });
-  }, [onProgress, loadSummary, loadHistory]);
 
   const handleAddTarget = async () => {
     if (!newKeyword || !newTargetValue) return;
@@ -85,12 +75,20 @@ export default function NaverRankPage() {
     await loadSummary();
   };
 
-  const handleStartTracking = () => {
-    const targets = summary.map(s => ({
-      keyword: s.keyword, target_id: s.id,
-      target_type: s.target_type, target_value: s.target_value,
-    }));
-    startRankTracking(targets);
+  const handleStartTracking = async () => {
+    if (tracking) return;
+    setTracking(true);
+    setTrackResult(null);
+    try {
+      const result = await naverApi.runRankTracking();
+      setTrackResult(result);
+      await loadSummary();
+      await loadHistory();
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setTracking(false);
+    }
   };
 
   const chartData = (() => {
@@ -154,9 +152,16 @@ export default function NaverRankPage() {
             <p className={`text-[12px] ${txtSub}`}>키워드별 상품/스토어 순위 변동 모니터링</p>
           </div>
           <div className="ml-auto flex items-center gap-3">
-            <ExtensionStatus dark={dark} connected={extStatus.connected} version={extStatus.version} progress={progress} captcha={captcha} />
-            {progress && (
-              <button onClick={cancel} className="px-3 py-1.5 bg-red-500 text-white text-[11px] font-bold rounded-md hover:bg-red-600 transition">중단</button>
+            {tracking && (
+              <div className="flex items-center gap-2">
+                <div className="w-2 h-2 rounded-full bg-[#03c75a] animate-pulse" />
+                <span className={`text-[11px] font-bold ${txtSub}`}>순위 조회 중...</span>
+              </div>
+            )}
+            {trackResult && !tracking && (
+              <span className={`text-[11px] font-bold ${txtSub}`}>
+                {trackResult.tracked}개 조회 완료
+              </span>
             )}
           </div>
         </div>
@@ -210,10 +215,13 @@ export default function NaverRankPage() {
               className="px-5 py-2 bg-[#03c75a] text-white text-[12px] font-bold rounded-lg hover:bg-[#02b350] active:scale-[0.97] transition disabled:opacity-50 shrink-0">
               추가
             </button>
-            <button onClick={handleStartTracking}
-              className="px-5 py-2 bg-[#03c75a] text-white text-[12px] font-bold rounded-lg hover:bg-[#02b350] active:scale-[0.97] transition flex items-center gap-1.5 shrink-0">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M15.5 14H14.71L14.43 13.73C15.41 12.59 16 11.11 16 9.5C16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16C11.11 16 12.59 15.41 13.73 14.43L14 14.71V15.5L19 20.49L20.49 19L15.5 14ZM9.5 14C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14Z" fill="white"/></svg>
-              추적시작
+            <button onClick={handleStartTracking} disabled={tracking || summary.length === 0}
+              className="px-5 py-2 bg-[#03c75a] text-white text-[12px] font-bold rounded-lg hover:bg-[#02b350] active:scale-[0.97] transition flex items-center gap-1.5 shrink-0 disabled:opacity-50">
+              {tracking ? (
+                <><div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" /> 조회중...</>
+              ) : (
+                <><svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M15.5 14H14.71L14.43 13.73C15.41 12.59 16 11.11 16 9.5C16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16C11.11 16 12.59 15.41 13.73 14.43L14 14.71V15.5L19 20.49L20.49 19L15.5 14ZM9.5 14C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14Z" fill="white"/></svg> 순위조회</>
+              )}
             </button>
             <button onClick={() => naverApi.downloadRankExcel(days)}
               className={`px-5 py-2 text-[12px] font-bold rounded-lg transition shrink-0 ${dark ? 'bg-[#1a3a5c] text-blue-300 hover:bg-[#1f4570]' : 'bg-blue-50 text-blue-600 hover:bg-blue-100'}`}>

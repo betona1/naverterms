@@ -1,18 +1,20 @@
-// background.js v2.0.0 — 통합 서비스 워커
-// 네이버 Term 분석 + 로하스 수집 + 지마켓 순위추적
+// background.js v2.1.0 — 통합 서비스 워커
+// 네이버 Term 분석 + 순위추적 + 로하스 수집 + 지마켓 순위추적
 'use strict';
 
 // 로하스 / 지마켓 모듈 로드
 importScripts('bg_lohas.js', 'bg_gmarket.js');
 
 // ══════════════════════════════════════════
-// 네이버 Term 분석
+// 네이버 Term 분석 + 순위추적
 // ══════════════════════════════════════════
 
-const API = 'http://192.168.219.100:8003/api/cpc/naver';
+const API = 'http://192.168.219.100:8901/api/naver';
 const TAB_ORDER = ['total', 'model', 'checkout'];
+const RANK_TAB_ORDER = ['total'];
 const TAB_NAME = { total: '전체', model: '가격비교', checkout: '네이버페이' };
 
+let mode = 'term'; // 'term' | 'rank'
 let queue = [];
 let qIdx = -1;
 let processing = false;
@@ -45,6 +47,10 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
     case 'NAVER_GET_STATUS':
       reply(getStatus(msg.logSince || 0));
       return false;
+    case 'NAVER_START_RANK_TRACKING':
+      startRankTracking(msg.targets || []);
+      reply({ ok: true, count: (msg.targets || []).length });
+      return false;
     case 'NAVER_SHOPPING_DATA':
       onData(msg);
       reply({ ok: true });
@@ -74,11 +80,35 @@ function start(keywords) {
   cancel();
   logs.length = 0;
   logSeq = 0;
+  mode = 'term';
   queue = keywords.map(kw => ({
     keyword: kw, tabsDone: [], tabIdx: 0, status: 'pending',
   }));
   qIdx = -1;
   log(`── ${keywords.length}개 키워드 시작 ──`);
+  chrome.alarms.create('crawlKeepAlive', { periodInMinutes: 0.5 });
+  nextKeyword();
+}
+
+function startRankTracking(targets) {
+  cancel();
+  logs.length = 0;
+  logSeq = 0;
+  mode = 'rank';
+
+  // 키워드별로 타겟 그룹핑
+  const kwMap = {};
+  for (const t of targets) {
+    if (!kwMap[t.keyword]) kwMap[t.keyword] = [];
+    kwMap[t.keyword].push(t);
+  }
+
+  queue = Object.keys(kwMap).map(kw => ({
+    keyword: kw, tabsDone: [], tabIdx: 0, status: 'pending',
+    targets: kwMap[kw],
+  }));
+  qIdx = -1;
+  log(`── 순위추적 시작: ${targets.length}개 대상 (${queue.length}개 키워드) ──`);
   chrome.alarms.create('crawlKeepAlive', { periodInMinutes: 0.5 });
   nextKeyword();
 }
@@ -91,6 +121,7 @@ function nextKeyword() {
     log('★ 전체 완료!');
     chrome.alarms.clear('crawlKeepAlive');
     processing = false;
+    notifyComplete();
     return;
   }
   processing = true;
@@ -104,11 +135,12 @@ function nextKeyword() {
 // ── ★ 핵심: URL 이동으로 탭별 데이터 수집 ──
 function navigateToTab() {
   const item = queue[qIdx];
-  if (!item || item.tabIdx >= TAB_ORDER.length) {
+  const tabs = mode === 'rank' ? RANK_TAB_ORDER : TAB_ORDER;
+  if (!item || item.tabIdx >= tabs.length) {
     finishKeyword();
     return;
   }
-  const tabKey = TAB_ORDER[item.tabIdx];
+  const tabKey = tabs[item.tabIdx];
   const url = `https://search.shopping.naver.com/search/all?query=${encodeURIComponent(item.keyword)}&sort=rel&productSet=${tabKey}`;
 
   log(`  [${TAB_NAME[tabKey]}] 페이지 이동`);
@@ -153,25 +185,30 @@ async function onData(msg) {
   clr();
 
   if (!item.tabsDone.includes(dataTab)) item.tabsDone.push(dataTab);
-  log(`  ★ [${TAB_NAME[dataTab]}] ${products.length}개 total=${msg.total || 0} terms=${(msg.terms||[]).length}`);
 
-  // Django 저장
-  try {
-    const r = await fetch(`${API}/ext/search-result/`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        keyword: msg.query || item.keyword,
-        tab_type: dataTab,
-        products: products.slice(0, 40),
-        total: msg.total || 0,
-        terms: msg.terms || [],
-        term_count: msg.termCount || 0,
-      })
-    });
-    log(`  [${TAB_NAME[dataTab]}] ${r.ok ? '저장OK' : 'Django실패 ' + r.status}`);
-  } catch (e) {
-    log(`  [${TAB_NAME[dataTab]}] Django실패`);
+  if (mode === 'rank') {
+    log(`  ★ [${TAB_NAME[dataTab]}] ${products.length}개 — 순위 검색`);
+    await processRankResults(item, products, dataTab, msg.total || 0);
+  } else {
+    log(`  ★ [${TAB_NAME[dataTab]}] ${products.length}개 total=${msg.total || 0} terms=${(msg.terms||[]).length}`);
+    // Django 저장
+    try {
+      const r = await fetch(`${API}/ext/search-result/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          keyword: msg.query || item.keyword,
+          tab_type: dataTab,
+          products: products.slice(0, 40),
+          total: msg.total || 0,
+          terms: msg.terms || [],
+          term_count: msg.termCount || 0,
+        })
+      });
+      log(`  [${TAB_NAME[dataTab]}] ${r.ok ? '저장OK' : 'Django실패 ' + r.status}`);
+    } catch (e) {
+      log(`  [${TAB_NAME[dataTab]}] Django실패`);
+    }
   }
 
   // 다음 탭
@@ -180,10 +217,69 @@ async function onData(msg) {
   setTimeout(() => navigateToTab(), delay);
 }
 
+// ── ★ 순위추적: 상품 매칭 + Django 저장 ──
+async function processRankResults(item, products, tabType, totalResults) {
+  const targets = item.targets || [];
+  for (const target of targets) {
+    let rank = null;
+    let foundProduct = null;
+
+    for (let i = 0; i < products.length; i++) {
+      const p = products[i];
+      let match = false;
+      if (target.target_type === 'store') {
+        match = (p.mallName || '').trim() === target.target_value.trim();
+      } else if (target.target_type === 'product_id') {
+        match = String(p.nvMid || p.id || '') === String(target.target_value);
+      }
+      if (match) {
+        rank = i + 1;
+        foundProduct = p;
+        break;
+      }
+    }
+
+    log(`  📊 [${target.target_value}] ${rank ? rank + '위' : '미발견 (40위 밖)'}`);
+
+    // 앱 탭에 진행상황 전달
+    if (appTab) {
+      chrome.tabs.sendMessage(appTab, {
+        type: 'NAVER_TRACKING_PROGRESS',
+        keyword: item.keyword,
+        target_value: target.target_value,
+        rank: rank,
+        current: qIdx + 1,
+        total: queue.length,
+      }).catch(() => {});
+    }
+
+    // Django 저장
+    try {
+      const r = await fetch(`${API}/ext/rank-result/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          target_id: target.target_id,
+          rank_position: rank,
+          tab_type: tabType,
+          total_results: totalResults,
+          found_product_name: foundProduct?.productName || foundProduct?.productTitle || '',
+          found_product_price: foundProduct ? parseInt(foundProduct.lowPrice || foundProduct.price || '0', 10) || null : null,
+          found_review_count: foundProduct ? (foundProduct.reviewCount || 0) : null,
+        })
+      });
+      log(`  [${target.target_value}] ${r.ok ? '저장OK' : 'Django실패 ' + r.status}`);
+    } catch (e) {
+      log(`  [${target.target_value}] Django실패`);
+    }
+  }
+}
+
 function skipTab() {
   if (qIdx < 0 || qIdx >= queue.length) return;
   const item = queue[qIdx];
-  const tabKey = TAB_ORDER[item.tabIdx];
+  const tabs = mode === 'rank' ? RANK_TAB_ORDER : TAB_ORDER;
+  const tabKey = tabs[item.tabIdx];
   log(`  [${TAB_NAME[tabKey] || tabKey}] 스킵`);
   waitingData = false;
   clr();
@@ -202,6 +298,17 @@ function finishKeyword() {
   setTimeout(() => nextKeyword(), delay);
 }
 
+function notifyComplete() {
+  const msgType = mode === 'rank' ? 'NAVER_RANK_COMPLETE' : 'NAVER_SEARCH_COMPLETE';
+  if (appTab) {
+    chrome.tabs.sendMessage(appTab, {
+      type: msgType,
+      total: queue.length,
+      done: queue.filter(q => q.status === 'done').length,
+    }).catch(() => {});
+  }
+}
+
 // ══════════════════════════════════════════
 // 타이머
 // ══════════════════════════════════════════
@@ -210,7 +317,8 @@ function setTimer(ms) {
   timer = setTimeout(() => {
     if (!waitingData || qIdx < 0) return;
     const item = queue[qIdx];
-    const tabKey = TAB_ORDER[item.tabIdx];
+    const tabs = mode === 'rank' ? RANK_TAB_ORDER : TAB_ORDER;
+    const tabKey = tabs[item.tabIdx];
 
     if (retryCount < 1) {
       retryCount++;
@@ -252,6 +360,7 @@ function cancel() {
   waitingData = false;
   captchaPaused = false;
   retryCount = 0;
+  mode = 'term';
   clr();
   if (naverTab) { chrome.tabs.remove(naverTab).catch(() => {}); naverTab = null; }
   chrome.alarms.clear('crawlKeepAlive');
@@ -262,15 +371,17 @@ function cancel() {
 // ══════════════════════════════════════════
 function getStatus(since) {
   let steps = 0;
+  const tabCount = mode === 'rank' ? 1 : 3;
   for (const q of queue) {
     steps += q.tabsDone.length;
   }
   const cur = qIdx >= 0 && qIdx < queue.length ? queue[qIdx] : null;
   return {
     running: processing,
+    mode,
     total: queue.length,
     done: queue.filter(q => q.status === 'done').length,
-    steps, totalSteps: queue.length * 3,
+    steps, totalSteps: queue.length * tabCount,
     keyword: cur?.keyword || null,
     kwIdx: qIdx >= 0 ? qIdx + 1 : 0,
     captchaPaused,
@@ -312,4 +423,4 @@ chrome.alarms.onAlarm.addListener(alarm => {
 
 // 초기화
 fetch(`${API}/keywords/`).then(r => log('Django ' + (r.ok ? 'OK' : r.status))).catch(() => log('Django 연결실패'));
-log('background.js v2.0.0 (통합)');
+log('background.js v2.1.0 (통합+순위추적)');

@@ -6,6 +6,8 @@ import NaverTermsPage from './pages/NaverTermsPage';
 import NaverRankPage from './pages/NaverRankPage';
 import NaverExtDownloadPage from './pages/NaverExtDownloadPage';
 import SmartStoreProductsPage from './pages/SmartStoreProductsPage';
+import OwnerClanProductsPage from './pages/OwnerClanProductsPage';
+import SmartStoreAnalyticsPage from './pages/SmartStoreAnalyticsPage';
 
 const PAGE_KEY = 'nt-page';
 
@@ -14,6 +16,8 @@ const HASH_MAP: Record<string, string> = {
   '#rank': 'rank',
   '#products': 'products',
   '#extension': 'extension',
+  '#ownerclan': 'ownerclan',
+  '#analytics': 'analytics',
 };
 
 export default function App() {
@@ -34,7 +38,7 @@ export default function App() {
   useEffect(() => {
     const onHash = () => {
       const h = window.location.hash.replace('#', '');
-      if (h && ['terms', 'rank', 'products', 'extension'].includes(h)) {
+      if (h && ['terms', 'rank', 'products', 'extension', 'ownerclan', 'analytics'].includes(h)) {
         setPage(h);
         try { localStorage.setItem(PAGE_KEY, h); } catch { /* */ }
       }
@@ -60,6 +64,8 @@ export default function App() {
           {page === 'rank' && <NaverRankPage />}
           {page === 'products' && <SmartStoreProductsPage />}
           {page === 'extension' && <NaverExtDownloadPage />}
+          {page === 'ownerclan' && <OwnerClanProductsPage />}
+          {page === 'analytics' && <SmartStoreAnalyticsPage />}
         </main>
       </div>
       {showStoreSettings && (

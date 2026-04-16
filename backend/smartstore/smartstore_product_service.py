@@ -169,12 +169,13 @@ SORT_COLUMNS = {
     'stock': 'p.stock_quantity',
     'order_amount': 'p.all_order_amount',
     'order_qty': 'p.all_order_qty',
+    'ss_order_amount': 'p.total_order_amount',
 }
 
 
 def get_products(store_pk, page=1, per_page=50, status=None, search=None,
                  ownerclan_soldout=None, is_focus=None, has_orders=None,
-                 sort_by=None, sort_dir=None):
+                 sort_by=None, sort_dir=None, min_ss_amount=None):
     """DB에서 상품 목록 조회 (페이지네이션, 필터, 정렬). store_pk=0이면 전체상점."""
     from . import smartstore_order_service
     sold_codes = smartstore_order_service.get_sold_seller_codes()
@@ -190,9 +191,17 @@ def get_products(store_pk, page=1, per_page=50, status=None, search=None,
         where.append('p.status_type = %s')
         params.append(status)
     if search:
-        where.append('(p.name LIKE %s OR p.seller_management_code LIKE %s)')
-        like = f'%{search}%'
-        params.extend([like, like])
+        # 여러 ���드 입력 지원: 엔터/공백/쉼표 구분
+        import re
+        tokens = [t.strip() for t in re.split(r'[\s,\n\r]+', search) if t.strip()]
+        if len(tokens) > 1:
+            ph = ','.join(['%s'] * len(tokens))
+            where.append(f'p.seller_management_code IN ({ph})')
+            params.extend(tokens)
+        else:
+            where.append('(p.name LIKE %s OR p.seller_management_code LIKE %s)')
+            like = f'%{search}%'
+            params.extend([like, like])
     if ownerclan_soldout is not None:
         where.append('p.ownerclan_soldout = %s')
         params.append(int(ownerclan_soldout))
@@ -206,6 +215,9 @@ def get_products(store_pk, page=1, per_page=50, status=None, search=None,
         sold_ph = ','.join(['%s'] * len(sold_list))
         where.append(f'p.seller_management_code IN ({sold_ph})')
         params.extend(sold_list)
+    if min_ss_amount is not None:
+        where.append('p.total_order_amount >= %s')
+        params.append(int(min_ss_amount))
 
     where_sql = ' AND '.join(where) if where else '1=1'
     offset = (page - 1) * per_page
@@ -216,7 +228,13 @@ def get_products(store_pk, page=1, per_page=50, status=None, search=None,
     order_sql = f'{col} {direction}, p.origin_product_no DESC' if col else 'p.origin_product_no DESC'
 
     with connections['myproduct'].cursor() as cur:
-        cur.execute(f"SELECT COUNT(*) FROM smartstore_product p WHERE {where_sql}", params)
+        if all_stores:
+            cur.execute(
+                f"SELECT COUNT(*) FROM smartstore_product p "
+                f"JOIN smartstoreIdList s ON s.id = p.store_id "
+                f"WHERE {where_sql}", params)
+        else:
+            cur.execute(f"SELECT COUNT(*) FROM smartstore_product p WHERE {where_sql}", params)
         total = cur.fetchone()[0]
 
         if all_stores:
@@ -249,54 +267,69 @@ def get_products(store_pk, page=1, per_page=50, status=None, search=None,
 
 
 def get_product_stats(store_pk):
-    """상태별 개수 통계. store_pk=0이면 전체상점 통합."""
-    from . import smartstore_order_service
-    sold_codes = smartstore_order_service.get_sold_seller_codes()
-
+    """상태별 개수 통계. store_pk=0이면 전체상점 통합 (smartstoreIdList에 존재하는 상점만)."""
     with connections['myproduct'].cursor() as cur:
         if store_pk:
             cur.execute(
-                "SELECT status_type, COUNT(*) as cnt "
-                "FROM smartstore_product WHERE store_id=%s GROUP BY status_type",
+                "SELECT p.status_type, COUNT(*) as cnt "
+                "FROM smartstore_product p WHERE p.store_id=%s GROUP BY p.status_type",
                 [store_pk],
             )
         else:
             cur.execute(
-                "SELECT status_type, COUNT(*) as cnt "
-                "FROM smartstore_product GROUP BY status_type"
+                "SELECT p.status_type, COUNT(*) as cnt "
+                "FROM smartstore_product p "
+                "JOIN smartstoreIdList s ON s.id = p.store_id "
+                "GROUP BY p.status_type"
             )
         status_rows = _dictfetchall(cur)
 
         if store_pk:
             cur.execute(
-                "SELECT MAX(synced_at) as last_synced FROM smartstore_product WHERE store_id=%s",
+                "SELECT MAX(p.synced_at) as last_synced FROM smartstore_product p WHERE p.store_id=%s",
                 [store_pk],
             )
         else:
             cur.execute(
-                "SELECT MAX(synced_at) as last_synced FROM smartstore_product"
+                "SELECT MAX(p.synced_at) as last_synced "
+                "FROM smartstore_product p "
+                "JOIN smartstoreIdList s ON s.id = p.store_id"
             )
         synced_row = _dictfetchall(cur)
         last_synced = synced_row[0]['last_synced'] if synced_row else None
 
-        # 판매된 상품 수 (주문 1건 이상)
-        sold_count = 0
-        if sold_codes:
-            sold_list = list(sold_codes)
-            sold_ph = ','.join(['%s'] * len(sold_list))
-            if store_pk:
-                cur.execute(
-                    f"SELECT COUNT(*) FROM smartstore_product "
-                    f"WHERE store_id = %s AND seller_management_code IN ({sold_ph})",
-                    [store_pk] + sold_list,
-                )
-            else:
-                cur.execute(
-                    f"SELECT COUNT(*) FROM smartstore_product "
-                    f"WHERE seller_management_code IN ({sold_ph})",
-                    sold_list,
-                )
-            sold_count = cur.fetchone()[0]
+        # 전체사이트 판매된 상품 (all_order_count > 0) — 상태별
+        if store_pk:
+            store_where = 'p.store_id = %s AND '
+            store_params = [store_pk]
+            sold_from = 'smartstore_product p'
+        else:
+            store_where = ''
+            store_params = []
+            sold_from = 'smartstore_product p JOIN smartstoreIdList s ON s.id = p.store_id'
+
+        cur.execute(
+            f"SELECT COALESCE(p.status_type,'UNKNOWN') as st, COUNT(*) FROM {sold_from} "
+            f"WHERE {store_where}p.all_order_count > 0 GROUP BY st",
+            store_params,
+        )
+        all_sold_by_status = {}
+        all_sold_count = 0
+        for row in cur.fetchall():
+            all_sold_by_status[row[0]] = row[1]
+            all_sold_count += row[1]
+
+        # 스마트스토어만 판매된 상품 (total_order_count > 0) — 상태별
+        cur.execute(
+            f"SELECT COALESCE(p.status_type,'UNKNOWN') as st, COUNT(*) FROM {sold_from} "
+            f"WHERE {store_where}p.total_order_count > 0 GROUP BY st",
+            store_params,
+        )
+        ss_sold_by_status = {}
+        ss_sold_count = 0
+        for row in cur.fetchall():
+            ss_sold_by_status[row[0]] = row[1]
+            ss_sold_count += row[1]
 
     stats = {}
     total = 0
@@ -308,13 +341,18 @@ def get_product_stats(store_pk):
     result = {
         'total': total,
         'by_status': stats,
-        'sold_count': sold_count,
+        'sold_count': all_sold_count,
+        'ss_sold_count': ss_sold_count,
+        'sold_by_status': all_sold_by_status,
+        'ss_sold_by_status': ss_sold_by_status,
         'last_synced_at': last_synced.isoformat() if last_synced and isinstance(last_synced, datetime) else (last_synced or None),
     }
     return result
 
 
-def get_products_for_export(store_ids=None, statuses=None, w_only=False):
+def get_products_for_export(store_ids=None, statuses=None, w_only=False,
+                            search=None, has_orders=False, is_focus=False,
+                            sort_by=None, sort_dir=None):
     """엑셀 내보내기용 전체 상품 조회 (상점명 JOIN, 페이지네이션 없음)"""
     where = ['1=1']
     params = []
@@ -332,18 +370,49 @@ def get_products_for_export(store_ids=None, statuses=None, w_only=False):
     if w_only:
         where.append("p.seller_management_code LIKE 'W%%'")
 
+    if search:
+        import re
+        tokens = [t.strip() for t in re.split(r'[\s,\n\r]+', search) if t.strip()]
+        if len(tokens) > 1:
+            ph = ','.join(['%s'] * len(tokens))
+            where.append(f'p.seller_management_code IN ({ph})')
+            params.extend(tokens)
+        else:
+            where.append('(p.name LIKE %s OR p.seller_management_code LIKE %s)')
+            like = f'%{search}%'
+            params.extend([like, like])
+
+    if has_orders:
+        from . import smartstore_order_service
+        sold_codes = smartstore_order_service.get_sold_seller_codes()
+        if not sold_codes:
+            return []
+        sold_list = list(sold_codes)
+        sold_ph = ','.join(['%s'] * len(sold_list))
+        where.append(f'p.seller_management_code IN ({sold_ph})')
+        params.extend(sold_list)
+
+    if is_focus:
+        where.append('p.is_focus = 1')
+
     where_sql = ' AND '.join(where)
+
+    col = SORT_COLUMNS.get(sort_by or '')
+    direction = 'ASC' if sort_dir == 'asc' else 'DESC'
+    order_sql = f'{col} {direction}, p.origin_product_no DESC' if col else 's.store_name, p.origin_product_no DESC'
 
     with connections['myproduct'].cursor() as cur:
         cur.execute(
             f"SELECT s.store_name, p.origin_product_no, p.channel_product_no, "
             f"p.name, p.sale_price, p.stock_quantity, p.status_type, "
             f"p.channel_product_display_status_type, p.seller_management_code, "
-            f"p.category_id, p.synced_at "
+            f"p.category_id, p.all_order_count, p.total_order_count, "
+            f"p.all_order_amount, p.total_order_amount, "
+            f"p.all_order_qty, p.total_order_qty, p.synced_at "
             f"FROM smartstore_product p "
             f"JOIN smartstoreIdList s ON s.id = p.store_id "
             f"WHERE {where_sql} "
-            f"ORDER BY s.store_name, p.origin_product_no DESC",
+            f"ORDER BY {order_sql}",
             params,
         )
         return _dictfetchall(cur)
