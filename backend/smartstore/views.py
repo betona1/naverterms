@@ -8,6 +8,7 @@ from rest_framework.response import Response
 from . import smartstore_service
 from . import smartstore_product_service
 from . import smartstore_order_service
+from . import smartstore_analytics_service
 
 
 # ── 스마트스토어 상점 관리 ──
@@ -169,19 +170,19 @@ class SmartStoreStoreDetailView(APIView):
 # ── 스마트스토어 상품 관리 ──
 
 class SmartStoreProductListView(APIView):
-    def get(self, request):
-        store_id = request.query_params.get('store_id')
-        if not store_id:
-            return Response({'error': 'store_id required'}, status=400)
-        page = int(request.query_params.get('page', 1))
-        per_page = int(request.query_params.get('per_page', 50))
-        status = request.query_params.get('status') or None
-        search = request.query_params.get('search') or None
-        ownerclan_soldout = request.query_params.get('ownerclan_soldout')
-        is_focus = request.query_params.get('is_focus')
-        has_orders = request.query_params.get('has_orders')
-        sort_by = request.query_params.get('sort_by') or None
-        sort_dir = request.query_params.get('sort_dir') or None
+    def _parse_params(self, src):
+        store_id = src.get('store_id')
+        if store_id is None:
+            return None, Response({'error': 'store_id required'}, status=400)
+        page = int(src.get('page', 1))
+        per_page = int(src.get('per_page', 50))
+        status = src.get('status') or None
+        search = src.get('search') or None
+        ownerclan_soldout = src.get('ownerclan_soldout')
+        is_focus = src.get('is_focus')
+        has_orders = src.get('has_orders')
+        sort_by = src.get('sort_by') or None
+        sort_dir = src.get('sort_dir') or None
         result = smartstore_product_service.get_products(
             int(store_id), page, per_page, status, search,
             ownerclan_soldout=int(ownerclan_soldout) if ownerclan_soldout is not None else None,
@@ -190,7 +191,18 @@ class SmartStoreProductListView(APIView):
             sort_by=sort_by,
             sort_dir=sort_dir,
         )
-        return Response(result)
+        return result, None
+
+    def get(self, request):
+        result, err = self._parse_params(request.query_params)
+        return err or Response(result)
+
+
+class SmartStoreProductSearchView(APIView):
+    """POST 검색 — 다수 코드 검색 시 URL 길이 제한 회피"""
+    def post(self, request):
+        result, err = SmartStoreProductListView()._parse_params(request.data)
+        return err or Response(result)
 
 
 class SmartStoreProductSyncView(APIView):
@@ -222,19 +234,30 @@ class SmartStoreProductExcelView(APIView):
         store_ids = request.query_params.getlist('store_ids')
         statuses = request.query_params.getlist('statuses')
         w_only = request.query_params.get('w_only') == '1'
+        search = request.query_params.get('search') or None
+        has_orders = request.query_params.get('has_orders') == '1'
+        is_focus = request.query_params.get('is_focus') == '1'
+        sort_by = request.query_params.get('sort_by') or None
+        sort_dir = request.query_params.get('sort_dir') or None
 
         store_ids = [int(s) for s in store_ids] if store_ids else None
         statuses = statuses if statuses else None
 
-        rows = smartstore_product_service.get_products_for_export(store_ids, statuses, w_only)
+        rows = smartstore_product_service.get_products_for_export(
+            store_ids, statuses, w_only,
+            search=search, has_orders=has_orders, is_focus=is_focus,
+            sort_by=sort_by, sort_dir=sort_dir,
+        )
 
         wb = Workbook()
         ws = wb.active
         ws.title = '상품목록'
 
         headers = ['상점명', '상품번호', '채널상품번호', '상품명', '판매가',
-                    '재고', '상태', '노출상태', '관리코드', '카테고리ID', '동기화일시']
-        col_widths = [15, 14, 14, 40, 12, 8, 10, 10, 18, 14, 20]
+                    '재고', '상태', '노출상태', '관리코드', '카테고리ID',
+                    '주문건수', '스마트주문건수', '판매금액', '스마트판매금액',
+                    '판매수량', '스마트판매수량', '동기화일시']
+        col_widths = [15, 14, 14, 40, 12, 8, 10, 10, 18, 14, 10, 12, 14, 14, 10, 12, 20]
 
         header_font = Font(bold=True, size=10)
         header_fill = PatternFill('solid', fgColor='F0F0F0')
@@ -266,10 +289,28 @@ class SmartStoreProductExcelView(APIView):
             ws.cell(row=i, column=8, value=r['channel_product_display_status_type'] or '').border = thin_border
             ws.cell(row=i, column=9, value=r['seller_management_code'] or '').border = thin_border
             ws.cell(row=i, column=10, value=r['category_id'] or '').border = thin_border
+            c = ws.cell(row=i, column=11, value=r.get('all_order_count', 0))
+            c.number_format = '#,##0'
+            c.border = thin_border
+            c = ws.cell(row=i, column=12, value=r.get('total_order_count', 0))
+            c.number_format = '#,##0'
+            c.border = thin_border
+            c = ws.cell(row=i, column=13, value=r.get('all_order_amount', 0))
+            c.number_format = money_fmt
+            c.border = thin_border
+            c = ws.cell(row=i, column=14, value=r.get('total_order_amount', 0))
+            c.number_format = money_fmt
+            c.border = thin_border
+            c = ws.cell(row=i, column=15, value=r.get('all_order_qty', 0))
+            c.number_format = '#,##0'
+            c.border = thin_border
+            c = ws.cell(row=i, column=16, value=r.get('total_order_qty', 0))
+            c.number_format = '#,##0'
+            c.border = thin_border
             synced = r['synced_at']
             if hasattr(synced, 'strftime'):
                 synced = synced.strftime('%Y-%m-%d %H:%M:%S')
-            ws.cell(row=i, column=11, value=synced or '').border = thin_border
+            ws.cell(row=i, column=17, value=synced or '').border = thin_border
 
         for j, w in enumerate(col_widths):
             ws.column_dimensions[chr(65 + j)].width = w
@@ -342,3 +383,39 @@ class SmartStoreProductOrdersView(APIView):
             end_date=end_date or None,
         )
         return Response(result)
+
+
+# ── 스마트스토어 분석 ──
+
+class SmartStoreAnalyticsOverviewView(APIView):
+    def get(self, request):
+        start_date = request.query_params.get('start_date') or None
+        end_date = request.query_params.get('end_date') or None
+        return Response(smartstore_analytics_service.get_overview(start_date, end_date))
+
+
+class SmartStoreAnalyticsStoreDetailView(APIView):
+    def get(self, request, store_id):
+        start_date = request.query_params.get('start_date') or None
+        end_date = request.query_params.get('end_date') or None
+        period = request.query_params.get('period', 'monthly')
+        return Response(smartstore_analytics_service.get_store_detail(
+            store_id, start_date, end_date, period,
+        ))
+
+
+class SmartStoreAnalyticsBusinessDetailView(APIView):
+    def get(self, request, code):
+        start_date = request.query_params.get('start_date') or None
+        end_date = request.query_params.get('end_date') or None
+        period = request.query_params.get('period', 'monthly')
+        return Response(smartstore_analytics_service.get_business_detail(
+            code, start_date, end_date, period,
+        ))
+
+
+class SmartStoreAnalyticsSyncCategoriesView(APIView):
+    def post(self, request):
+        result = smartstore_analytics_service.sync_category_names()
+        status_code = 400 if 'error' in result else 200
+        return Response(result, status=status_code)
