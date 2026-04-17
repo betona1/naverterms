@@ -106,6 +106,52 @@ export async function getRelatedKeywords(keyword: string) {
   return data;
 }
 
+// ── 카테고리키워드 (데이터랩) ──
+export interface DatalabCategory {
+  cid: string;
+  pid: string;
+  name: string;
+}
+export interface CategoryKeywordRank {
+  rank: number;
+  keyword: string;
+  linkId: string;
+}
+export interface EnrichData {
+  monthlyPcQcCnt?: number;
+  monthlyMobileQcCnt?: number;
+  compIdx?: string;
+  productCount?: number;
+  category?: string;
+}
+export async function getDatalabCategories(parentCid = '0'): Promise<DatalabCategory[]> {
+  const { data } = await api.get('/datalab/categories/', { params: { cid: parentCid } });
+  return data;
+}
+export async function getCategoryKeywordRank(params: {
+  cid: string; startDate: string; endDate: string;
+  age?: string; gender?: string; device?: string;
+}): Promise<{ ranks: CategoryKeywordRank[]; cached?: boolean; cached_at?: string }> {
+  const { data } = await api.get('/datalab/category-keywords/', { params });
+  return data;
+}
+export async function enrichKeywords(keywords: string[]): Promise<{ data: Record<string, EnrichData> }> {
+  const { data } = await api.post('/datalab/enrich-keywords/', { keywords });
+  return data;
+}
+
+// ── 키워드 자동매칭 ──
+export async function autoMatchKeywords(productName: string, keywords: string[]): Promise<{ matches: string[] }> {
+  const { data } = await api.post('/datalab/auto-match/', { product_name: productName, keywords });
+  return data;
+}
+
+// ── 카테고리 이름 조회 ──
+export async function getCategoryNames(cids: string[]): Promise<Record<string, string>> {
+  const { data } = await api.get('/datalab/category-names/', { params: { cids: cids.join(',') } });
+  return data;
+}
+
 // ── 엑셀 다운로드 ──
 export function downloadTermsExcel() {
   window.open('/api/naver/export/terms/', '_blank');

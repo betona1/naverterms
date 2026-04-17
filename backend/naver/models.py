@@ -108,3 +108,36 @@ class NaverTrackingSchedule(models.Model):
 
     class Meta:
         db_table = 'naver_tracking_schedule'
+
+
+# ══════════════════════════════════════════
+# 카테고리키워드 캐시
+# ══════════════════════════════════════════
+
+class CategoryKeywordCache(models.Model):
+    """카테고리별 TOP 500 키워드 캐시 (DataLab 결과)"""
+    cid = models.CharField(max_length=20)
+    filter_key = models.CharField(max_length=50, default='__')  # "{age}_{gender}_{device}"
+    ranks_json = models.JSONField(default=list)
+    cached_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'naver_cat_keyword_cache'
+        unique_together = [('cid', 'filter_key')]
+        indexes = [
+            models.Index(fields=['cid', 'filter_key']),
+        ]
+
+
+class KeywordEnrichCache(models.Model):
+    """키워드별 검색량/상품수 캐시"""
+    keyword = models.CharField(max_length=200, unique=True, db_index=True)
+    monthly_pc_qc = models.IntegerField(default=0)
+    monthly_mobile_qc = models.IntegerField(default=0)
+    comp_idx = models.CharField(max_length=20, default='')
+    product_count = models.IntegerField(default=0)
+    category_name = models.CharField(max_length=500, default='')
+    cached_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'naver_keyword_enrich_cache'

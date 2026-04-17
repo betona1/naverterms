@@ -33,6 +33,13 @@ urlpatterns = [
     # 연관키워드
     path('related-keywords/', views.RelatedKeywordView.as_view()),
 
+    # 카테고리키워드 (데이터랩)
+    path('datalab/categories/', views.DatalabCategoryView.as_view()),
+    path('datalab/category-keywords/', views.DatalabCategoryKeywordRankView.as_view()),
+    path('datalab/enrich-keywords/', views.KeywordEnrichView.as_view()),
+    path('datalab/category-names/', views.CategoryNameLookupView.as_view()),
+    path('datalab/auto-match/', views.KeywordAutoMatchView.as_view()),
+
     # UC 크롤러
     path('uc/start/', views.UCStartView.as_view()),
     path('uc/status/', views.UCStatusView.as_view()),

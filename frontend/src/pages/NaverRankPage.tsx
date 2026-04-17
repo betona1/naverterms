@@ -29,6 +29,213 @@ interface RankHistory {
   tracked_at: string;
 }
 
+// ── 타상품조회 입력 모달 ──
+function parseTargetInput(input: string): { type: string; value: string; display: string } {
+  const trimmed = input.trim();
+  const ssMatch = trimmed.match(/smartstore\.naver\.com\/([^\/\?]+)/);
+  if (ssMatch) return { type: 'store', value: ssMatch[1], display: ssMatch[1] };
+  const spMatch = trimmed.match(/shopping\.naver\.com\/product[s]?\/(\d+)/);
+  if (spMatch) return { type: 'product_id', value: spMatch[1], display: `상품#${spMatch[1]}` };
+  const midMatch = trimmed.match(/nvMid=(\d+)/);
+  if (midMatch) return { type: 'product_id', value: midMatch[1], display: `상품#${midMatch[1]}` };
+  if (/^\d{5,}$/.test(trimmed)) return { type: 'product_id', value: trimmed, display: `상품#${trimmed}` };
+  return { type: 'store', value: trimmed, display: trimmed };
+}
+
+function ExternalRankModal({ onClose, onSubmitted, dark }: {
+  onClose: () => void;
+  onSubmitted: (addedIds: number[]) => void;
+  dark: boolean;
+}) {
+  const [keywords, setKeywords] = useState('');
+  const [target, setTarget] = useState('');
+  const [displayName, setDisplayName] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const inputCls = dark
+    ? 'bg-[#1c1c2e] border-[#333] text-white placeholder-gray-500 focus:ring-[#03c75a]/50'
+    : 'bg-white border-gray-300 text-gray-900 placeholder-gray-400 focus:ring-[#03c75a]/50';
+  const txt = dark ? 'text-gray-100' : 'text-gray-900';
+  const txtSub = dark ? 'text-gray-400' : 'text-gray-500';
+  const card = dark ? 'bg-[#1c1c2e] border-[#2a2a40]' : 'bg-white border-gray-200';
+
+  const handleSubmit = async () => {
+    const kwLines = keywords.split('\n').map(l => l.trim()).filter(Boolean);
+    if (!kwLines.length || !target.trim()) return;
+    setBusy(true);
+    const parsed = parseTargetInput(target);
+    const addedIds: number[] = [];
+    try {
+      for (const kw of kwLines) {
+        const res = await naverApi.addRankTarget({
+          keyword: kw,
+          target_type: parsed.type,
+          target_value: parsed.value,
+          display_name: displayName || parsed.display,
+        });
+        if (res.id) addedIds.push(res.id);
+      }
+    } catch (e) { console.error(e); }
+    setBusy(false);
+    onSubmitted(addedIds);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
+      <div className={`${card} border rounded-xl shadow-2xl w-full max-w-md mx-4 flex flex-col`} onClick={e => e.stopPropagation()}>
+        <div className={`flex items-center justify-between px-5 py-3 border-b ${dark ? 'border-[#2a2a40]' : 'border-gray-200'}`}>
+          <h3 className={`text-[14px] font-extrabold ${txt}`}>타상품 순위조회</h3>
+          <button className="text-gray-400 hover:text-gray-600 text-lg" onClick={onClose}>&times;</button>
+        </div>
+        <div className="px-5 py-4 space-y-3">
+          <div>
+            <label className={`text-[11px] font-bold block mb-1 ${txtSub}`}>키워드 (여러개시 줄바꿈)</label>
+            <textarea value={keywords} onChange={e => setKeywords(e.target.value)} rows={3}
+              className={`w-full rounded-lg border px-3 py-2 text-[12px] focus:outline-none focus:ring-2 transition resize-none ${inputCls}`}
+              placeholder="맥세이프그립톡&#10;그립톡 맥세이프" />
+          </div>
+          <div>
+            <label className={`text-[11px] font-bold block mb-1 ${txtSub}`}>스토어명 / 상품URL / 상품ID</label>
+            <input value={target} onChange={e => setTarget(e.target.value)}
+              className={`w-full rounded-lg border px-3 py-2 text-[12px] focus:outline-none focus:ring-2 transition ${inputCls}`}
+              placeholder="스토어명, 상품URL, 또는 nvMid" />
+            {target.trim() && (
+              <div className={`text-[10px] mt-1 ${txtSub}`}>
+                {(() => { const p = parseTargetInput(target); return `→ ${p.type === 'store' ? '스토어' : '상품ID'}: ${p.value}`; })()}
+              </div>
+            )}
+          </div>
+          <div>
+            <label className={`text-[11px] font-bold block mb-1 ${txtSub}`}>표시이름 (선택)</label>
+            <input value={displayName} onChange={e => setDisplayName(e.target.value)}
+              className={`w-full rounded-lg border px-3 py-2 text-[12px] focus:outline-none focus:ring-2 transition ${inputCls}`}
+              placeholder="자동설정" />
+          </div>
+        </div>
+        <div className={`px-5 py-3 border-t flex gap-2 ${dark ? 'border-[#2a2a40]' : 'border-gray-200'}`}>
+          <button onClick={onClose} className={`flex-1 px-4 py-2.5 text-[12px] font-bold rounded-lg transition ${dark ? 'bg-[#2a2a40] text-gray-300 hover:bg-[#333]' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>
+            취소
+          </button>
+          <button onClick={handleSubmit} disabled={busy || !keywords.trim() || !target.trim()}
+            className="flex-1 px-4 py-2.5 text-[12px] font-bold rounded-lg bg-[#03c75a] text-white hover:bg-[#02b350] transition disabled:opacity-50 flex items-center justify-center gap-1.5">
+            {busy ? <><div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" /> 추가중...</> : '추가 및 순위조회'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── 키워드 클릭 → 날짜별 히스토리 모달 ──
+function RankHistoryModal({ target, history, dark, onClose }: {
+  target: RankSummary;
+  history: RankHistory[];
+  dark: boolean;
+  onClose: () => void;
+}) {
+  const txt = dark ? 'text-gray-100' : 'text-gray-900';
+  const txtSub = dark ? 'text-gray-400' : 'text-gray-500';
+  const txtMuted = dark ? 'text-gray-500' : 'text-gray-400';
+  const card = dark ? 'bg-[#1c1c2e] border-[#2a2a40]' : 'bg-white border-gray-200';
+  const tHead = dark ? 'bg-[#1a2332]' : 'bg-[#f0f3f7]';
+  const tRow = dark ? 'border-[#2a2a40] hover:bg-[#222240]' : 'border-gray-100 hover:bg-[#f8fafb]';
+  const chartGrid = dark ? '#2a2a40' : '#e5e7eb';
+  const chartTick = dark ? '#888' : '#6b7280';
+  const tooltipBg = dark ? '#1c1c2e' : '#ffffff';
+  const tooltipBorder = dark ? '#2a2a40' : '#e5e7eb';
+
+  const sorted = [...history].sort((a, b) => b.tracked_at.localeCompare(a.tracked_at));
+  const chartData = [...history]
+    .sort((a, b) => a.tracked_at.localeCompare(b.tracked_at))
+    .map(h => ({
+      date: h.tracked_at.slice(5, 16).replace('T', ' '),
+      rank: h.rank_position,
+    }));
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
+      <div className={`${card} border rounded-xl shadow-2xl w-full max-w-2xl mx-4 max-h-[85vh] flex flex-col`} onClick={e => e.stopPropagation()}>
+        <div className={`flex items-center justify-between px-5 py-3 border-b ${dark ? 'border-[#2a2a40]' : 'border-gray-200'} shrink-0`}>
+          <div>
+            <h3 className={`text-[14px] font-extrabold ${txt}`}>
+              {target.keyword} <span className="text-[#03c75a]">— {target.display_name || target.target_value}</span>
+            </h3>
+            <span className={`text-[11px] ${txtSub}`}>
+              {target.target_type === 'store' ? '스토어' : '상품ID'} · 총 {sorted.length}건 이력
+            </span>
+          </div>
+          <button className="text-gray-400 hover:text-gray-600 text-lg" onClick={onClose}>&times;</button>
+        </div>
+
+        <div className="overflow-y-auto flex-1">
+          {/* 미니 차트 */}
+          {chartData.length > 1 && (
+            <div className="px-5 pt-4 pb-2">
+              <ResponsiveContainer width="100%" height={180}>
+                <LineChart data={chartData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={chartGrid} />
+                  <XAxis dataKey="date" tick={{ fill: chartTick, fontSize: 10 }} />
+                  <YAxis reversed tick={{ fill: chartTick, fontSize: 10 }} domain={[1, 'auto']} />
+                  <Tooltip
+                    contentStyle={{ background: tooltipBg, border: `1px solid ${tooltipBorder}`, fontSize: 11, borderRadius: 8 }}
+                    formatter={(val: number | null) => val !== null ? [`${val}위`, '순위'] : ['미발견', '순위']}
+                  />
+                  <Line dataKey="rank" stroke="#03c75a" strokeWidth={2} dot={{ r: 3 }} connectNulls />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+
+          {/* 이력 테이블 */}
+          <div className="overflow-x-auto">
+            <table className="w-full text-[12px]">
+              <thead>
+                <tr className={tHead}>
+                  <th className={`px-4 py-2.5 text-left font-bold ${txtSub}`}>날짜시간</th>
+                  <th className={`px-4 py-2.5 text-right font-bold ${txtSub}`}>순위</th>
+                  <th className={`px-4 py-2.5 text-right font-bold ${txtSub}`}>변동</th>
+                  <th className={`px-4 py-2.5 text-left font-bold ${txtSub}`}>상품명</th>
+                  <th className={`px-4 py-2.5 text-right font-bold ${txtSub}`}>가격</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sorted.map((h, i) => {
+                  const prev = sorted[i + 1];
+                  const change = (h.rank_position !== null && prev?.rank_position !== null)
+                    ? (prev.rank_position! - h.rank_position!) : null;
+                  return (
+                    <tr key={h.id} className={`border-t transition-colors ${tRow}`}>
+                      <td className={`px-4 py-2 ${txtMuted} text-[11px]`}>{new Date(h.tracked_at).toLocaleString('ko-KR')}</td>
+                      <td className={`px-4 py-2 text-right font-extrabold ${
+                        h.rank_position === null ? 'text-red-400' : h.rank_position <= 10 ? 'text-[#03c75a]' : txt
+                      }`}>
+                        {h.rank_position !== null ? `${h.rank_position}위` : '미발견'}
+                      </td>
+                      <td className={`px-4 py-2 text-right font-bold ${
+                        change === null ? txtMuted : change > 0 ? 'text-green-500' : change < 0 ? 'text-red-500' : txtMuted
+                      }`}>
+                        {change === null ? '' : change > 0 ? `↑${change}` : change < 0 ? `↓${Math.abs(change)}` : '-'}
+                      </td>
+                      <td className={`px-4 py-2 ${txtSub} max-w-[250px] truncate`}>{h.found_product_name || '-'}</td>
+                      <td className={`px-4 py-2 text-right font-medium ${txt}`}>
+                        {h.found_product_price ? `${h.found_product_price.toLocaleString()}원` : ''}
+                      </td>
+                    </tr>
+                  );
+                })}
+                {sorted.length === 0 && (
+                  <tr><td colSpan={5} className={`text-center py-12 ${txtMuted}`}>이력이 없습니다</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── 메인 페이지 ──
 export default function NaverRankPage() {
   const { dark } = useTheme();
   const [summary, setSummary] = useState<RankSummary[]>([]);
@@ -45,6 +252,9 @@ export default function NaverRankPage() {
 
   const [tracking, setTracking] = useState(false);
   const [trackResult, setTrackResult] = useState<{ tracked: number; results: any[] } | null>(null);
+  const [showExtModal, setShowExtModal] = useState(false);
+  const [historyModal, setHistoryModal] = useState<RankSummary | null>(null);
+  const [historyModalData, setHistoryModalData] = useState<RankHistory[]>([]);
 
   const loadSummary = useCallback(async () => {
     try { setSummary(await naverApi.getRankSummary()); } catch (e) { console.error(e); }
@@ -84,11 +294,33 @@ export default function NaverRankPage() {
       setTrackResult(result);
       await loadSummary();
       await loadHistory();
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setTracking(false);
+    } catch (e) { console.error(e); } finally { setTracking(false); }
+  };
+
+  // 타상품조회 모달 → 추가 후 즉시 순위조회
+  const handleExtSubmitted = async (addedIds: number[]) => {
+    setShowExtModal(false);
+    if (addedIds.length > 0) {
+      setTracking(true);
+      setTrackResult(null);
+      try {
+        const result = await naverApi.runRankTracking(addedIds);
+        setTrackResult(result);
+        await loadSummary();
+        await loadHistory();
+      } catch (e) { console.error(e); } finally { setTracking(false); }
+    } else {
+      await loadSummary();
     }
+  };
+
+  // 키워드 클릭 → 히스토리 모달
+  const openHistoryModal = async (s: RankSummary) => {
+    setHistoryModal(s);
+    try {
+      const data = await naverApi.getRankHistory(s.id, 90);
+      setHistoryModalData(data);
+    } catch { setHistoryModalData([]); }
   };
 
   const chartData = (() => {
@@ -108,8 +340,8 @@ export default function NaverRankPage() {
 
   const changeArrow = (change: number | null) => {
     if (change === null) return '';
-    if (change > 0) return `\u2191${change}`;
-    if (change < 0) return `\u2193${Math.abs(change)}`;
+    if (change > 0) return `↑${change}`;
+    if (change < 0) return `↓${Math.abs(change)}`;
     return '-';
   };
 
@@ -120,7 +352,7 @@ export default function NaverRankPage() {
     return txtMuted;
   };
 
-  // 스타일 변수
+  // 스타일
   const bg = dark ? 'bg-[#0f0f1a]' : 'bg-[#f7f8fa]';
   const card = dark ? 'bg-[#1c1c2e] border-[#2a2a40]' : 'bg-white border-gray-200 shadow-sm';
   const tHead = dark ? 'bg-[#1a2332]' : 'bg-[#f0f3f7]';
@@ -227,6 +459,10 @@ export default function NaverRankPage() {
               className={`px-5 py-2 text-[12px] font-bold rounded-lg transition shrink-0 ${dark ? 'bg-[#1a3a5c] text-blue-300 hover:bg-[#1f4570]' : 'bg-blue-50 text-blue-600 hover:bg-blue-100'}`}>
               엑셀다운로드
             </button>
+            <button onClick={() => setShowExtModal(true)}
+              className={`px-5 py-2 text-[12px] font-bold rounded-lg transition shrink-0 ${dark ? 'bg-[#7c3aed] text-white hover:bg-[#6d28d9]' : 'bg-purple-500 text-white hover:bg-purple-600'}`}>
+              타상품조회
+            </button>
           </div>
         </div>
 
@@ -249,7 +485,7 @@ export default function NaverRankPage() {
                 {summary.map(s => (
                   <tr key={s.id}
                     className={`border-t cursor-pointer transition-colors ${tRow} ${selectedTarget === s.id ? tSelected : ''}`}
-                    onClick={() => setSelectedTarget(selectedTarget === s.id ? null : s.id)}>
+                    onClick={() => openHistoryModal(s)}>
                     <td className={`px-3 py-2.5 font-bold ${txt}`}>{s.keyword}</td>
                     <td className="px-3 py-2.5 text-[#03c75a] font-semibold">{s.display_name || s.target_value}</td>
                     <td className={`px-3 py-2.5 ${txtSub}`}>
@@ -284,7 +520,7 @@ export default function NaverRankPage() {
                   <tr><td colSpan={7} className={`text-center py-16 ${txtMuted}`}>
                     <RankIcon size={40} />
                     <p className="mt-3 text-[14px]">추적 대상을 추가하세요</p>
-                    <p className="text-[12px] mt-1">상단 입력란에 키워드와 스토어명/상품ID를 입력</p>
+                    <p className="text-[12px] mt-1">상단 입력란에 키워드와 스토어명/상품ID를 입력하거나 타상품조회 사용</p>
                   </td></tr>
                 )}
               </tbody>
@@ -406,6 +642,16 @@ export default function NaverRankPage() {
           </div>
         </div>
       </div>
+
+      {/* 타상품조회 모달 */}
+      {showExtModal && (
+        <ExternalRankModal dark={dark} onClose={() => setShowExtModal(false)} onSubmitted={handleExtSubmitted} />
+      )}
+
+      {/* 키워드 클릭 → 히스토리 모달 */}
+      {historyModal && (
+        <RankHistoryModal dark={dark} target={historyModal} history={historyModalData} onClose={() => setHistoryModal(null)} />
+      )}
     </div>
   );
 }

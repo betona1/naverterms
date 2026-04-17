@@ -7,7 +7,9 @@ import base64
 import logging
 import urllib.parse
 from collections import Counter
+from datetime import timedelta
 import requests as http_requests
+from django.utils import timezone
 from .models import (
     NaverKeyword, NaverSearchSnapshot, NaverTermAnalysis,
     NaverRankTarget, NaverRankHistory,
@@ -378,3 +380,237 @@ def run_rank_tracking(target_ids=None):
         time.sleep(0.3)  # 키워드 간 간격
 
     return {'tracked': len(results), 'results': results}
+
+
+# ══════════════════════════════════════════
+# 카테고리키워드 — 네이버 데이터랩 API
+# ══════════════════════════════════════════
+
+_DATALAB_CATEGORY_URL = 'https://datalab.naver.com/shoppingInsight/getCategory.naver'
+_DATALAB_KEYWORD_RANK_URL = 'https://datalab.naver.com/shoppingInsight/getCategoryKeywordRank.naver'
+_DATALAB_HEADERS = {
+    'Referer': 'https://datalab.naver.com/shoppingInsight/sCategory.naver',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+}
+
+
+def get_datalab_categories(parent_cid='0'):
+    """네이버 데이터랩 카테고리 목록 조회 → [{cid, pid, name}, ...]"""
+    resp = http_requests.get(
+        _DATALAB_CATEGORY_URL,
+        params={'cid': parent_cid},
+        headers=_DATALAB_HEADERS,
+        timeout=10,
+    )
+    if resp.status_code == 200:
+        data = resp.json()
+        children = data.get('childList', [])
+        return [{'cid': str(c['cid']), 'pid': str(c['pid']), 'name': c['name']} for c in children]
+    raise Exception(f'DataLab category API error: {resp.status_code}')
+
+
+def _fetch_category_keyword_rank_live(cid, start_date, end_date, age='', gender='', device='', max_count=500):
+    """DataLab API 라이브 호출 (캐시 없이)"""
+    all_ranks = []
+    page_num = 1
+    max_pages = (max_count + 19) // 20
+
+    post_headers = {
+        **_DATALAB_HEADERS,
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        'X-Requested-With': 'XMLHttpRequest',
+    }
+
+    while page_num <= max_pages:
+        for attempt in range(3):
+            resp = http_requests.post(
+                _DATALAB_KEYWORD_RANK_URL,
+                headers=post_headers,
+                data={
+                    'cid': cid, 'timeUnit': 'date',
+                    'startDate': start_date, 'endDate': end_date,
+                    'age': age, 'gender': gender, 'device': device,
+                    'page': page_num, 'count': 20,
+                },
+                timeout=15,
+            )
+            if resp.status_code == 429:
+                time.sleep(1 * (attempt + 1))
+                continue
+            break
+        if resp.status_code != 200:
+            raise Exception(f'DataLab keyword rank API error: {resp.status_code}')
+
+        data = resp.json()
+        ranks = data.get('ranks', [])
+        all_ranks.extend(ranks)
+
+        if len(ranks) < 20:
+            break
+        page_num += 1
+        time.sleep(0.2)
+
+    return all_ranks[:max_count]
+
+
+def get_category_keyword_rank(cid, start_date, end_date, age='', gender='', device='', max_count=500):
+    """캐시 우선 조회 → 없으면 라이브 → 캐시 저장"""
+    from .models import CategoryKeywordCache
+    filter_key = f'{age}_{gender}_{device}'
+    cache_hours = 24
+
+    try:
+        cached = CategoryKeywordCache.objects.get(cid=cid, filter_key=filter_key)
+        age_hours = (timezone.now() - cached.cached_at).total_seconds() / 3600
+        if age_hours < cache_hours:
+            return {'ranks': cached.ranks_json, 'cached': True, 'cached_at': cached.cached_at.isoformat()}
+    except CategoryKeywordCache.DoesNotExist:
+        pass
+
+    ranks = _fetch_category_keyword_rank_live(cid, start_date, end_date, age, gender, device, max_count)
+
+    CategoryKeywordCache.objects.update_or_create(
+        cid=cid, filter_key=filter_key,
+        defaults={'ranks_json': ranks},
+    )
+
+    return {'ranks': ranks}
+
+
+def _safe_int(v):
+    """검색광고 API 값 안전 변환 (예: '< 10' → 0)"""
+    if isinstance(v, (int, float)):
+        return int(v)
+    if isinstance(v, str):
+        v = v.strip().replace(',', '')
+        if v.startswith('<') or v == '':
+            return 0
+        try:
+            return int(float(v))
+        except Exception:
+            return 0
+    return 0
+
+
+def enrich_keywords(keywords):
+    """캐시 우선 → 미캐시 키워드만 API 호출 → 캐시 저장"""
+    from .models import KeywordEnrichCache
+    result = {}
+    cache_hours = 24
+    cutoff = timezone.now() - timedelta(hours=cache_hours)
+
+    # ── 캐시에서 조회 ──
+    cached_qs = KeywordEnrichCache.objects.filter(keyword__in=keywords, cached_at__gte=cutoff)
+    for c in cached_qs:
+        result[c.keyword] = {
+            'monthlyPcQcCnt': c.monthly_pc_qc,
+            'monthlyMobileQcCnt': c.monthly_mobile_qc,
+            'compIdx': c.comp_idx,
+            'productCount': c.product_count,
+            'category': c.category_name,
+        }
+
+    uncached = [kw for kw in keywords if kw not in result]
+    if not uncached:
+        return result
+
+    # ── 미캐시 키워드: 라이브 API 호출 ──
+    live = _enrich_keywords_live(uncached)
+    result.update(live)
+
+    # ── 결과 캐시 저장 ──
+    for kw, data in live.items():
+        KeywordEnrichCache.objects.update_or_create(
+            keyword=kw,
+            defaults={
+                'monthly_pc_qc': data.get('monthlyPcQcCnt', 0),
+                'monthly_mobile_qc': data.get('monthlyMobileQcCnt', 0),
+                'comp_idx': data.get('compIdx', ''),
+                'product_count': data.get('productCount', 0),
+                'category_name': data.get('category', ''),
+            },
+        )
+
+    return result
+
+
+def _enrich_keywords_live(keywords):
+    """검색광고 API + 쇼핑 API 라이브 호출 (캐시 없이)"""
+    result = {}
+    kw_set = set(keywords)
+
+    # ── 1) 검색광고 API — 5개씩 배치 ──
+    customer_id = os.getenv('NAVER_AD_CUSTOMER_ID', '')
+    access_key = os.getenv('NAVER_AD_ACCESS_KEY', '')
+    if customer_id and access_key:
+        for i in range(0, len(keywords), 5):
+            batch = keywords[i:i + 5]
+            try:
+                kw_list = search_related_keywords(','.join(batch))
+                for item in kw_list:
+                    kw = item.get('relKeyword', '')
+                    if kw in kw_set and kw not in result:
+                        result[kw] = {
+                            'monthlyPcQcCnt': _safe_int(item.get('monthlyPcQcCnt', 0)),
+                            'monthlyMobileQcCnt': _safe_int(item.get('monthlyMobileQcCnt', 0)),
+                            'compIdx': item.get('compIdx', ''),
+                        }
+            except Exception:
+                pass
+            time.sleep(0.1)
+
+    # ── 2) 쇼핑 API — 상품수 + 카테고리 ──
+    client_id = os.getenv('NAVER_SEARCH_CLIENT_ID', '')
+    client_secret = os.getenv('NAVER_SEARCH_CLIENT_SECRET', '')
+    if client_id and client_secret:
+        for kw in keywords:
+            if kw not in result:
+                result[kw] = {}
+            try:
+                data = _naver_search(kw, display=1, start=1)
+                result[kw]['productCount'] = data.get('total', 0)
+                items = data.get('items', [])
+                if items:
+                    cats = [items[0].get(f'category{i}', '') for i in range(1, 5)]
+                    result[kw]['category'] = ' > '.join(c for c in cats if c)
+                else:
+                    result[kw]['category'] = ''
+            except Exception:
+                result[kw].setdefault('productCount', 0)
+                result[kw].setdefault('category', '')
+            time.sleep(0.1)
+
+    return result
+
+
+def match_keywords_for_product(product_name, keywords):
+    """상품명 기반 키워드 연관도 매칭 — score > 0 키워드 반환"""
+    # 상품명 정규화: 괄호/특수문자 제거, 소문자
+    clean = re.sub(r'[(\[{<][^)}\]>]*[)\]}>]', ' ', product_name)
+    clean = re.sub(r'[^가-힣a-zA-Z0-9\s]', ' ', clean)
+    name_lower = clean.lower().strip()
+    name_no_space = re.sub(r'\s+', '', name_lower)
+
+    # 토큰 추출 (2글자 이상)
+    tokens = [t for t in name_lower.split() if len(t) >= 2]
+
+    scored = []
+    for kw in keywords:
+        kw_lower = kw.lower()
+        kw_no_space = re.sub(r'\s+', '', kw_lower)
+        score = 0
+
+        # 키워드가 상품명에 substring으로 존재
+        if kw_no_space in name_no_space:
+            score += 3
+
+        # 상품명 토큰이 키워드에 포함
+        for token in tokens:
+            if token in kw_lower:
+                score += 1
+
+        if score > 0:
+            scored.append((kw, score))
+
+    scored.sort(key=lambda x: -x[1])
+    return [kw for kw, _ in scored]

@@ -402,6 +402,86 @@ class RelatedKeywordView(APIView):
             return Response({'error': str(e)}, status=500)
 
 
+# ──── 카테고리키워드 (데이터랩) ────
+
+class DatalabCategoryView(APIView):
+    def get(self, request):
+        parent_cid = request.query_params.get('cid', '0')
+        try:
+            categories = services.get_datalab_categories(parent_cid)
+            return Response(categories)
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
+
+
+class DatalabCategoryKeywordRankView(APIView):
+    def get(self, request):
+        cid = request.query_params.get('cid', '').strip()
+        start_date = request.query_params.get('startDate', '').strip()
+        end_date = request.query_params.get('endDate', '').strip()
+        age = request.query_params.get('age', '')
+        gender = request.query_params.get('gender', '')
+        device = request.query_params.get('device', '')
+
+        if not cid:
+            return Response({'error': '카테고리를 선택하세요'}, status=400)
+        if not start_date or not end_date:
+            return Response({'error': '날짜 범위를 입력하세요'}, status=400)
+
+        try:
+            result = services.get_category_keyword_rank(
+                cid, start_date, end_date, age, gender, device,
+            )
+            return Response(result)
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
+
+
+class KeywordEnrichView(APIView):
+    """키워드 목록에 대해 검색량/상품수/카테고리 데이터 보강"""
+    def post(self, request):
+        keywords = request.data.get('keywords', [])
+        if not keywords or not isinstance(keywords, list):
+            return Response({'error': '키워드 목록이 필요합니다'}, status=400)
+        keywords = keywords[:50]  # 1회 최대 50개
+        try:
+            data = services.enrich_keywords(keywords)
+            return Response({'data': data})
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
+
+
+class KeywordAutoMatchView(APIView):
+    """상품명 기반 키워드 자동매칭"""
+    def post(self, request):
+        product_name = request.data.get('product_name', '').strip()
+        keywords = request.data.get('keywords', [])
+        if not product_name or not keywords:
+            return Response({'error': 'product_name, keywords 필요'}, status=400)
+        matches = services.match_keywords_for_product(product_name, keywords[:500])
+        return Response({'matches': matches})
+
+
+class CategoryNameLookupView(APIView):
+    """카테고리 CID → 이름 조회 (naver_category DB)"""
+    def get(self, request):
+        cids = request.query_params.get('cids', '').strip()
+        if not cids:
+            return Response({'error': 'cids 필요'}, status=400)
+        cid_list = [c.strip() for c in cids.split(',') if c.strip()]
+        from django.db import connections
+        result = {}
+        try:
+            with connections['myproduct'].cursor() as c:
+                placeholders = ','.join(['%s'] * len(cid_list))
+                c.execute(f'SELECT category_id, name FROM naver_category WHERE category_id IN ({placeholders})', cid_list)
+                for row in c.fetchall():
+                    result[str(row[0])] = row[1]
+        except Exception:
+            pass
+        return Response(result)
+
+
 class UCStartView(APIView):
     def post(self, request):
         keywords = request.data.get('keywords', [])

@@ -1,6 +1,7 @@
 class NaverDbRouter:
     NAVER_MODELS = {'naverkeyword', 'naversearchsnapshot', 'navertermanalysis',
-                    'naverranktarget', 'naverrankhistory', 'navertrackingschedule'}
+                    'naverranktarget', 'naverrankhistory', 'navertrackingschedule',
+                    'categorykeywordcache', 'keywordenrichcache'}
 
     def db_for_read(self, model, **hints):
         if model._meta.model_name in self.NAVER_MODELS:

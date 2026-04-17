@@ -1339,6 +1339,98 @@ function SSProductDetailModal({ product: p, storeUrl, onClose, onRankTrack }: {
     ? `https://smartstore.naver.com/${storeUrl}/products/${p.channel_product_no}`
     : null;
 
+  // ── 카테고리키워드 ──
+  const [showCatKw, setShowCatKw] = useState(false);
+  const [catKwLoading, setCatKwLoading] = useState(false);
+  const [catKwList, setCatKwList] = useState<{ rank: number; keyword: string }[]>([]);
+  const [catKwFilter, setCatKwFilter] = useState('');
+  const [catPath, setCatPath] = useState('');
+  const [catKwChecked, setCatKwChecked] = useState<Set<string>>(new Set());
+  const [copied, setCopied] = useState(false);
+
+  // ── Enrich 데이터 ──
+  const [enrichData, setEnrichData] = useState<Record<string, naverApi.EnrichData>>({});
+  const [enriching, setEnriching] = useState(false);
+  const [enrichProgress, setEnrichProgress] = useState({ done: 0, total: 0 });
+
+  // ── 자동체크 ──
+  const [autoChecking, setAutoChecking] = useState(false);
+  const [autoCheckCount, setAutoCheckCount] = useState<number | null>(null);
+
+  const catCids = (p.category_id || '').split('>').filter(Boolean);
+  const deepestCid = catCids[catCids.length - 1] || '';
+
+  const loadCatKeywords = async () => {
+    if (!deepestCid) return;
+    setShowCatKw(true);
+    setCatKwLoading(true);
+    setCatKwList([]);
+    setCatKwChecked(new Set());
+    setEnrichData({});
+    setAutoCheckCount(null);
+    try {
+      const names = await naverApi.getCategoryNames(catCids);
+      setCatPath(catCids.map(c => names[c] || c).join(' > '));
+      const now = new Date();
+      const end = now.toISOString().split('T')[0];
+      const start = new Date(now.getTime() - 30 * 86400000).toISOString().split('T')[0];
+      const data = await naverApi.getCategoryKeywordRank({ cid: deepestCid, startDate: start, endDate: end });
+      const ranks = data.ranks || [];
+      setCatKwList(ranks);
+      // enrich 자동 시작
+      if (ranks.length > 0) {
+        setEnriching(true);
+        setEnrichProgress({ done: 0, total: ranks.length });
+        const allKws = ranks.map(r => r.keyword);
+        const batchSize = 50;
+        const merged: Record<string, naverApi.EnrichData> = {};
+        for (let i = 0; i < allKws.length; i += batchSize) {
+          const batch = allKws.slice(i, i + batchSize);
+          try {
+            const res = await naverApi.enrichKeywords(batch);
+            Object.assign(merged, res.data);
+          } catch { /* skip batch */ }
+          setEnrichData({ ...merged });
+          setEnrichProgress({ done: Math.min(i + batchSize, allKws.length), total: allKws.length });
+        }
+        setEnriching(false);
+      }
+    } catch { /* ignore */ }
+    setCatKwLoading(false);
+  };
+
+  const filteredCatKw = catKwFilter ? catKwList.filter(r => r.keyword.includes(catKwFilter)) : catKwList;
+
+  const handleCopyCatKw = () => {
+    const selected = catKwList.filter(r => catKwChecked.has(r.keyword)).map(r => r.keyword);
+    if (!selected.length) return;
+    const text = selected.join('\n');
+    if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text);
+    else { const ta = document.createElement('textarea'); ta.value = text; ta.style.position = 'fixed'; ta.style.left = '-9999px'; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta); }
+    setCopied(true); setTimeout(() => setCopied(false), 1200);
+  };
+
+  const handleAutoCheck = async () => {
+    if (catKwList.length === 0) return;
+    setAutoChecking(true);
+    setAutoCheckCount(null);
+    try {
+      const res = await naverApi.autoMatchKeywords(p.name, catKwList.map(r => r.keyword));
+      const matches = new Set(res.matches || []);
+      setCatKwChecked(matches);
+      setAutoCheckCount(matches.size);
+    } catch { /* ignore */ }
+    setAutoChecking(false);
+  };
+
+  const compColor = (idx?: string) => {
+    if (!idx) return 'text-gray-400';
+    if (idx === '높음') return 'text-red-500 dark:text-red-400';
+    if (idx === '중간') return 'text-yellow-500 dark:text-yellow-400';
+    if (idx === '낮음') return 'text-green-500 dark:text-green-400';
+    return 'text-gray-500 dark:text-gray-400';
+  };
+
   const fields: { label: string; value: string | number | null }[] = [
     { label: '상품번호', value: p.origin_product_no },
     { label: '채널상품번호', value: p.channel_product_no },
@@ -1348,16 +1440,18 @@ function SSProductDetailModal({ product: p, storeUrl, onClose, onRankTrack }: {
     { label: '판매상태', value: STATUS_LABELS[p.status_type || ''] || p.status_type || '-' },
     { label: '노출상태', value: p.channel_product_display_status_type || '-' },
     { label: '관리코드', value: p.seller_management_code || '-' },
-    { label: '카테고리ID', value: p.category_id || '-' },
+    { label: '카테고리', value: catPath || p.category_id || '-' },
     { label: '동기화일시', value: p.synced_at ? new Date(p.synced_at).toLocaleString('ko-KR') : '-' },
     { label: '등록일', value: p.created_at ? new Date(p.created_at).toLocaleString('ko-KR') : '-' },
     { label: '수정일', value: p.updated_at ? new Date(p.updated_at).toLocaleString('ko-KR') : '-' },
   ];
 
+  const inputCls = 'bg-white dark:bg-gray-700 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-white';
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
       <div
-        className="bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-lg mx-4 max-h-[90vh] flex flex-col"
+        className={`bg-white dark:bg-gray-800 rounded-lg shadow-xl mx-4 max-h-[90vh] flex flex-col transition-all ${showCatKw ? 'w-full max-w-7xl' : 'w-full max-w-lg'}`}
         onClick={e => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-700 shrink-0">
@@ -1372,43 +1466,180 @@ function SSProductDetailModal({ product: p, storeUrl, onClose, onRankTrack }: {
           <button className="text-gray-400 hover:text-gray-600 text-lg" onClick={onClose}>&times;</button>
         </div>
 
-        <div className="overflow-y-auto flex-1 px-4 py-3">
-          {p.product_image_url && (
-            <div className="flex justify-center mb-4">
-              <img src={p.product_image_url} alt="" className="w-48 h-48 object-contain rounded-lg border border-gray-200 dark:border-gray-600" />
-            </div>
-          )}
-
-          {/* 순위추적 + 상세페이지 버튼 */}
-          <div className="mb-4 flex gap-2">
-            <button
-              onClick={() => onRankTrack(p)}
-              className="flex-1 px-4 py-2.5 text-sm font-medium bg-[#03c75a] text-white rounded-lg hover:bg-[#02b351] transition-colors"
-            >
-              순위추적에 추가
-            </button>
-            {detailUrl && (
-              <a
-                href={detailUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="px-4 py-2.5 text-sm font-medium bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors"
-              >
-                상세페이지
-              </a>
+        <div className={`overflow-y-auto flex-1 ${showCatKw ? 'flex gap-0' : ''}`}>
+          {/* 왼쪽: 상품 정보 */}
+          <div className={`px-4 py-3 ${showCatKw ? 'w-[35%] border-r border-gray-200 dark:border-gray-700 overflow-y-auto' : ''}`}>
+            {p.product_image_url && (
+              <div className="flex justify-center mb-4">
+                <img src={p.product_image_url} alt="" className="w-48 h-48 object-contain rounded-lg border border-gray-200 dark:border-gray-600" />
+              </div>
             )}
+
+            {/* 버튼 */}
+            <div className="mb-4 flex flex-wrap gap-2">
+              <button
+                onClick={() => onRankTrack(p)}
+                className="flex-1 px-4 py-2.5 text-sm font-medium bg-[#03c75a] text-white rounded-lg hover:bg-[#02b351] transition-colors"
+              >
+                순위추적에 추가
+              </button>
+              {deepestCid && (
+                <button
+                  onClick={loadCatKeywords}
+                  disabled={catKwLoading}
+                  className="flex-1 px-4 py-2.5 text-sm font-medium bg-[#e879f9] text-white rounded-lg hover:bg-[#d946ef] transition-colors disabled:opacity-50"
+                >
+                  {catKwLoading ? '로딩...' : '카테고리키워드'}
+                </button>
+              )}
+              {detailUrl && (
+                <a
+                  href={detailUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-4 py-2.5 text-sm font-medium bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors"
+                >
+                  상세페이지
+                </a>
+              )}
+            </div>
+
+            <table className="w-full text-sm">
+              <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+                {fields.map(f => (
+                  <tr key={f.label}>
+                    <td className="px-2 py-2 text-xs font-medium text-gray-500 dark:text-gray-400 w-28">{f.label}</td>
+                    <td className="px-2 py-2 text-xs break-all">{f.value ?? '-'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
 
-          <table className="w-full text-sm">
-            <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
-              {fields.map(f => (
-                <tr key={f.label}>
-                  <td className="px-2 py-2 text-xs font-medium text-gray-500 dark:text-gray-400 w-28">{f.label}</td>
-                  <td className="px-2 py-2 text-xs break-all">{f.value ?? '-'}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          {/* 오른쪽: 카테고리키워드 패널 */}
+          {showCatKw && (
+            <div className="w-[65%] flex flex-col overflow-hidden">
+              <div className="px-3 py-2 bg-[#e879f9]/10 dark:bg-[#e879f9]/5 border-b border-gray-200 dark:border-gray-700 shrink-0">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-[11px] font-bold text-[#e879f9] truncate">{catPath}</div>
+                    <div className="text-[10px] text-gray-400">TOP {catKwList.length}개 키워드</div>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {catKwList.length > 0 && !catKwLoading && (
+                      <button
+                        onClick={handleAutoCheck}
+                        disabled={autoChecking}
+                        className="text-[10px] font-bold px-2.5 py-1 rounded transition-colors bg-blue-500 text-white hover:bg-blue-600 disabled:opacity-50"
+                      >
+                        {autoChecking ? '분석중...' : autoCheckCount !== null ? `자동체크 (${autoCheckCount}개)` : '자동체크'}
+                      </button>
+                    )}
+                    {catKwChecked.size > 0 && (
+                      <button
+                        onClick={handleCopyCatKw}
+                        className={`text-[10px] font-bold px-2 py-1 rounded transition-colors ${
+                          copied ? 'bg-green-500 text-white' : 'bg-[#e879f9] text-white hover:bg-[#d946ef]'
+                        }`}
+                      >
+                        {copied ? '복사됨!' : `${catKwChecked.size}개 복사`}
+                      </button>
+                    )}
+                    <button onClick={() => setShowCatKw(false)} className="text-gray-400 hover:text-gray-600 text-sm">&times;</button>
+                  </div>
+                </div>
+                {/* enrich 프로그레스 바 */}
+                {enriching && (
+                  <div className="mt-1.5">
+                    <div className="flex items-center gap-2 text-[10px] text-gray-400">
+                      <span>검색량 로딩중... {enrichProgress.done}/{enrichProgress.total}</span>
+                    </div>
+                    <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-1 mt-0.5">
+                      <div
+                        className="bg-[#e879f9] h-1 rounded-full transition-all"
+                        style={{ width: enrichProgress.total > 0 ? `${(enrichProgress.done / enrichProgress.total) * 100}%` : '0%' }}
+                      />
+                    </div>
+                  </div>
+                )}
+                <input
+                  className={`w-full mt-1.5 rounded border px-2 py-1 text-[11px] focus:outline-none focus:ring-1 focus:ring-[#e879f9]/50 ${inputCls}`}
+                  placeholder="키워드 필터"
+                  value={catKwFilter}
+                  onChange={e => setCatKwFilter(e.target.value)}
+                />
+              </div>
+              <div className="flex-1 overflow-y-auto">
+                {catKwLoading ? (
+                  <div className="text-center py-8 text-[11px] text-gray-400 animate-pulse">카테고리 키워드 로딩중...</div>
+                ) : filteredCatKw.length === 0 ? (
+                  <div className="text-center py-8 text-[11px] text-gray-400">결과 없음</div>
+                ) : (
+                  <table className="w-full text-[11px]">
+                    <thead>
+                      <tr className="bg-gray-50 dark:bg-gray-700/50 text-gray-500 dark:text-gray-400 sticky top-0">
+                        <th className="px-1.5 py-1.5 text-center w-7">
+                          <input
+                            type="checkbox"
+                            checked={filteredCatKw.length > 0 && filteredCatKw.every(r => catKwChecked.has(r.keyword))}
+                            onChange={() => {
+                              const allChecked = filteredCatKw.every(r => catKwChecked.has(r.keyword));
+                              if (allChecked) setCatKwChecked(new Set());
+                              else setCatKwChecked(new Set(filteredCatKw.map(r => r.keyword)));
+                            }}
+                            className="accent-[#e879f9] w-3 h-3"
+                          />
+                        </th>
+                        <th className="px-1.5 py-1.5 text-center w-10">순위</th>
+                        <th className="px-1.5 py-1.5 text-left">키워드</th>
+                        <th className="px-1.5 py-1.5 text-right w-16">총검색수</th>
+                        <th className="px-1.5 py-1.5 text-right w-14">상품수</th>
+                        <th className="px-1.5 py-1.5 text-center w-14">경쟁강도</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredCatKw.map(r => {
+                        const ed = enrichData[r.keyword];
+                        const totalSearch = ed ? ((ed.monthlyPcQcCnt || 0) + (ed.monthlyMobileQcCnt || 0)) : null;
+                        return (
+                          <tr
+                            key={r.keyword}
+                            className={`border-b border-gray-100 dark:border-gray-700/50 cursor-pointer transition-colors
+                              ${catKwChecked.has(r.keyword)
+                                ? 'bg-[#e879f9]/10 dark:bg-[#e879f9]/5'
+                                : 'hover:bg-gray-50 dark:hover:bg-gray-700/30'
+                              }`}
+                            onClick={() => setCatKwChecked(prev => {
+                              const n = new Set(prev);
+                              if (n.has(r.keyword)) n.delete(r.keyword); else n.add(r.keyword);
+                              return n;
+                            })}
+                          >
+                            <td className="px-1.5 py-1 text-center">
+                              <input type="checkbox" checked={catKwChecked.has(r.keyword)} readOnly className="accent-[#e879f9] w-3 h-3 pointer-events-none" />
+                            </td>
+                            <td className={`px-1.5 py-1 text-center tabular-nums font-medium ${
+                              r.rank <= 10 ? 'text-[#e879f9]' : r.rank <= 50 ? 'text-blue-500' : 'text-gray-500 dark:text-gray-400'
+                            }`}>{r.rank}</td>
+                            <td className="px-1.5 py-1 text-gray-900 dark:text-white">{r.keyword}</td>
+                            <td className="px-1.5 py-1 text-right tabular-nums text-gray-700 dark:text-gray-300">
+                              {ed ? (totalSearch !== null ? totalSearch.toLocaleString() : '-') : (enriching ? <span className="text-gray-400">...</span> : '-')}
+                            </td>
+                            <td className="px-1.5 py-1 text-right tabular-nums text-gray-700 dark:text-gray-300">
+                              {ed ? (ed.productCount?.toLocaleString() ?? '-') : (enriching ? <span className="text-gray-400">...</span> : '-')}
+                            </td>
+                            <td className={`px-1.5 py-1 text-center font-medium ${ed ? compColor(ed.compIdx) : 'text-gray-400'}`}>
+                              {ed ? (ed.compIdx || '-') : (enriching ? '...' : '-')}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -1430,6 +1661,53 @@ function RankTrackingModal({ product: p, stores, onClose }: {
   const [tracking, setTracking] = useState(false);
   const [results, setResults] = useState<{ keyword: string; rank: number | null; product_name?: string; error?: string }[] | null>(null);
   const [step, setStep] = useState<string>('');
+
+  // ── 카테고리키워드 패널 ──
+  const [showCatKw, setShowCatKw] = useState(false);
+  const [catKwLoading, setCatKwLoading] = useState(false);
+  const [catKwList, setCatKwList] = useState<{ rank: number; keyword: string }[]>([]);
+  const [catKwFilter, setCatKwFilter] = useState('');
+  const [catPath, setCatPath] = useState('');
+  const [catKwChecked, setCatKwChecked] = useState<Set<string>>(new Set());
+
+  // category_id: "50000008>50000158>50001044>50003597"
+  const catCids = (p.category_id || '').split('>').filter(Boolean);
+  const deepestCid = catCids[catCids.length - 1] || '';
+
+  const loadCatKeywords = async () => {
+    if (!deepestCid) return;
+    setShowCatKw(true);
+    setCatKwLoading(true);
+    setCatKwList([]);
+    setCatKwChecked(new Set());
+    try {
+      // 카테고리 이름 조회
+      const names = await naverApi.getCategoryNames(catCids);
+      setCatPath(catCids.map(c => names[c] || c).join(' > '));
+      // TOP 500 키워드 조회
+      const now = new Date();
+      const end = now.toISOString().split('T')[0];
+      const start = new Date(now.getTime() - 30 * 86400000).toISOString().split('T')[0];
+      const data = await naverApi.getCategoryKeywordRank({ cid: deepestCid, startDate: start, endDate: end });
+      setCatKwList(data.ranks || []);
+    } catch { /* ignore */ }
+    setCatKwLoading(false);
+  };
+
+  const filteredCatKw = catKwFilter
+    ? catKwList.filter(r => r.keyword.includes(catKwFilter))
+    : catKwList;
+
+  const addCatKwToKeywords = () => {
+    const selected = catKwList.filter(r => catKwChecked.has(r.keyword)).map(r => r.keyword);
+    if (!selected.length) return;
+    const existing = new Set(keywords.split('\n').map(k => k.trim()).filter(Boolean));
+    const toAdd = selected.filter(kw => !existing.has(kw));
+    if (toAdd.length > 0) {
+      setKeywords(prev => (prev.trim() ? prev.trim() + '\n' : '') + toAdd.join('\n'));
+    }
+    setCatKwChecked(new Set());
+  };
 
   const handleTrack = async () => {
     const kwList = keywords.split('\n').map(k => k.trim()).filter(Boolean);
@@ -1525,10 +1803,105 @@ function RankTrackingModal({ product: p, stores, onClose }: {
               placeholder="키워드를 줄 단위로 입력"
               disabled={tracking}
             />
-            <div className="text-[10px] text-gray-400 mt-1">
-              {keywords.split('\n').filter(k => k.trim()).length}개 키워드
+            <div className="flex items-center justify-between mt-1">
+              <div className="text-[10px] text-gray-400">
+                {keywords.split('\n').filter(k => k.trim()).length}개 키워드
+              </div>
+              {deepestCid && (
+                <button
+                  onClick={loadCatKeywords}
+                  disabled={catKwLoading}
+                  className="text-[10px] font-bold text-[#e879f9] hover:text-[#d946ef] transition-colors disabled:opacity-50"
+                >
+                  {catKwLoading ? '로딩중...' : showCatKw ? '카테고리키워드 새로고침' : '카테고리키워드 보기'}
+                </button>
+              )}
             </div>
           </div>
+
+          {/* 카테고리키워드 패널 */}
+          {showCatKw && (
+            <div className="border border-[#e879f9]/30 rounded-lg overflow-hidden">
+              <div className="px-3 py-2 bg-[#e879f9]/10 dark:bg-[#e879f9]/5 flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="text-[10px] font-bold text-[#e879f9] truncate">{catPath || '카테고리'}</div>
+                  <div className="text-[9px] text-gray-400">{catKwList.length}개 키워드</div>
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {catKwChecked.size > 0 && (
+                    <button
+                      onClick={addCatKwToKeywords}
+                      className="text-[10px] font-bold px-2 py-1 bg-[#e879f9] text-white rounded hover:bg-[#d946ef] transition-colors"
+                    >
+                      {catKwChecked.size}개 추가
+                    </button>
+                  )}
+                  <button onClick={() => setShowCatKw(false)} className="text-gray-400 hover:text-gray-600 text-sm">&times;</button>
+                </div>
+              </div>
+              <div className="px-3 py-1.5 border-b border-gray-200 dark:border-gray-700">
+                <input
+                  className={`w-full rounded border px-2 py-1 text-[11px] focus:outline-none focus:ring-1 focus:ring-[#e879f9]/50 ${inputCls}`}
+                  placeholder="키워드 필터"
+                  value={catKwFilter}
+                  onChange={e => setCatKwFilter(e.target.value)}
+                />
+              </div>
+              <div className="max-h-[200px] overflow-y-auto">
+                {catKwLoading ? (
+                  <div className="text-center py-4 text-[11px] text-gray-400 animate-pulse">로딩중...</div>
+                ) : filteredCatKw.length === 0 ? (
+                  <div className="text-center py-4 text-[11px] text-gray-400">결과 없음</div>
+                ) : (
+                  <table className="w-full text-[11px]">
+                    <thead>
+                      <tr className="bg-gray-50 dark:bg-gray-700/50 text-gray-500 dark:text-gray-400 sticky top-0">
+                        <th className="px-2 py-1 text-center w-8">
+                          <input
+                            type="checkbox"
+                            checked={filteredCatKw.length > 0 && filteredCatKw.every(r => catKwChecked.has(r.keyword))}
+                            onChange={() => {
+                              const allChecked = filteredCatKw.every(r => catKwChecked.has(r.keyword));
+                              if (allChecked) setCatKwChecked(new Set());
+                              else setCatKwChecked(new Set(filteredCatKw.map(r => r.keyword)));
+                            }}
+                            className="accent-[#e879f9] w-3 h-3"
+                          />
+                        </th>
+                        <th className="px-2 py-1 text-center w-10">순위</th>
+                        <th className="px-2 py-1 text-left">키워드</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredCatKw.map(r => (
+                        <tr
+                          key={r.keyword}
+                          className={`border-b border-gray-100 dark:border-gray-700/50 cursor-pointer transition-colors
+                            ${catKwChecked.has(r.keyword)
+                              ? 'bg-[#e879f9]/10 dark:bg-[#e879f9]/5'
+                              : 'hover:bg-gray-50 dark:hover:bg-gray-700/30'
+                            }`}
+                          onClick={() => setCatKwChecked(prev => {
+                            const n = new Set(prev);
+                            if (n.has(r.keyword)) n.delete(r.keyword); else n.add(r.keyword);
+                            return n;
+                          })}
+                        >
+                          <td className="px-2 py-1 text-center">
+                            <input type="checkbox" checked={catKwChecked.has(r.keyword)} readOnly className="accent-[#e879f9] w-3 h-3 pointer-events-none" />
+                          </td>
+                          <td className={`px-2 py-1 text-center tabular-nums font-medium ${
+                            r.rank <= 10 ? 'text-[#e879f9]' : r.rank <= 50 ? 'text-blue-500' : 'text-gray-500 dark:text-gray-400'
+                          }`}>{r.rank}</td>
+                          <td className="px-2 py-1 text-gray-900 dark:text-white">{r.keyword}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* 대상 설정 */}
           <div className="flex gap-3">
