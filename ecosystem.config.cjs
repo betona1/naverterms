@@ -2,9 +2,9 @@ module.exports = {
   apps: [
     {
       name: 'naverterms-backend',
-      cwd: '/home/joacham/projects/naverterms/backend',
-      script: 'python3',
-      args: 'manage.py runserver 0.0.0.0:8901',
+      cwd: '/home/mueres/naver/backend',
+      script: '/home/mueres/naver/venv/bin/python',
+      args: 'manage.py runserver 0.0.0.0:8900',
       interpreter: 'none',
       autorestart: true,
       watch: false,
@@ -15,10 +15,10 @@ module.exports = {
     },
     {
       name: 'naverterms-frontend',
-      cwd: '/home/joacham/projects/naverterms/frontend',
-      script: 'npx',
-      args: 'vite --host 0.0.0.0 --port 8900',
-      interpreter: 'none',
+      cwd: '/home/mueres/naver/frontend',
+      script: '/home/mueres/naver/start-frontend.sh',
+      args: '',
+      interpreter: '/bin/bash',
       autorestart: true,
       watch: false,
       max_restarts: 10,

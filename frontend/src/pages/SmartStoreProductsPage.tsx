@@ -728,17 +728,7 @@ export default function SmartStoreProductsPage() {
                     {p.seller_management_code ? (
                       <div>
                         <span className="flex items-center gap-1">
-                          {p.seller_management_code.startsWith('W') ? (
-                            <a
-                              href={`https://ownerclan.com/V2/product/view.php?selfcode=${p.seller_management_code}`}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="text-orange-600 dark:text-orange-400 hover:underline"
-                              onClick={e => e.stopPropagation()}
-                            >{p.seller_management_code}</a>
-                          ) : (
-                            <span className="text-gray-500">{p.seller_management_code}</span>
-                          )}
+                          <span className="text-gray-500">{p.seller_management_code}</span>
                           {p.has_orders && (
                             <button
                               className="text-[10px] px-1 py-0.5 rounded bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900/50 whitespace-nowrap"

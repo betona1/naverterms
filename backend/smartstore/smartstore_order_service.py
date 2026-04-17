@@ -75,7 +75,7 @@ def get_product_orders(seller_code=None, product_name=None, start_date=None, end
             order_date DESC, id DESC
     """
 
-    with connections['joacham'].cursor() as cur:
+    with connections['myproduct'].cursor() as cur:
         cur.execute(sql, params + [SMARTSTORE_SITE])
         rows = _dictfetchall(cur)
 
@@ -164,7 +164,7 @@ def get_sold_seller_codes():
           AND product_seller_code != ''
     """
     params = list(VALID_ORDER_STATUSES) + [SMARTSTORE_SITE]
-    with connections['joacham'].cursor() as cur:
+    with connections['myproduct'].cursor() as cur:
         cur.execute(sql, params)
         codes = set(r[0] for r in cur.fetchall())
 
@@ -179,7 +179,7 @@ def update_product_sales_summary():
     status_ph = ','.join(['%s'] * len(VALID_ORDER_STATUSES))
     exclude_ph = ','.join(['%s'] * len(EXCLUDE_SITES))
 
-    with connections['joacham'].cursor() as cur:
+    with connections['myproduct'].cursor() as cur:
         # 스마트스토어만
         cur.execute(f"""
             SELECT product_seller_code,

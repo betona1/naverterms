@@ -16,7 +16,6 @@ INSTALLED_APPS = [
     'rest_framework',
     'naver',
     'smartstore',
-    'ownerclan',
 ]
 
 MIDDLEWARE = [
@@ -27,52 +26,28 @@ MIDDLEWARE = [
 ROOT_URLCONF = 'config.urls'
 WSGI_APPLICATION = 'config.wsgi.application'
 
+_DB_HOST = os.getenv('DB_HOST', 'localhost')
+_DB_PORT = int(os.getenv('DB_PORT', 3306))
+_DB_USER = os.getenv('DB_USER', 'mueres')
+_DB_PASS = os.getenv('DB_PASSWORD', 'mueres').strip("'")
+
+def _db(name):
+    return {
+        'ENGINE': 'django.db.backends.mysql',
+        'NAME': name,
+        'HOST': _DB_HOST,
+        'PORT': _DB_PORT,
+        'USER': _DB_USER,
+        'PASSWORD': _DB_PASS,
+        'OPTIONS': {'charset': 'utf8mb4'},
+    }
+
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.mysql',
-        'NAME': os.getenv('NAVER_DB_NAME', 'naverdb'),
-        'HOST': os.getenv('NAVER_DB_HOST', '192.168.219.200'),
-        'PORT': int(os.getenv('NAVER_DB_PORT', 3306)),
-        'USER': os.getenv('NAVER_DB_USER', 'root'),
-        'PASSWORD': os.getenv('NAVER_DB_PASSWORD', '').strip("'"),
-        'OPTIONS': {'charset': 'utf8mb4'},
-    },
-    'naverdb': {
-        'ENGINE': 'django.db.backends.mysql',
-        'NAME': os.getenv('NAVER_DB_NAME', 'naverdb'),
-        'HOST': os.getenv('NAVER_DB_HOST', '192.168.219.200'),
-        'PORT': int(os.getenv('NAVER_DB_PORT', 3306)),
-        'USER': os.getenv('NAVER_DB_USER', 'root'),
-        'PASSWORD': os.getenv('NAVER_DB_PASSWORD', '').strip("'"),
-        'OPTIONS': {'charset': 'utf8mb4'},
-    },
-    'myproduct': {
-        'ENGINE': 'django.db.backends.mysql',
-        'NAME': os.getenv('MYPRODUCT_DB_NAME', 'myproduct'),
-        'HOST': os.getenv('MYPRODUCT_DB_HOST', '192.168.219.200'),
-        'PORT': int(os.getenv('MYPRODUCT_DB_PORT', 3306)),
-        'USER': os.getenv('MYPRODUCT_DB_USER', 'root'),
-        'PASSWORD': os.getenv('MYPRODUCT_DB_PASSWORD', '').strip("'"),
-        'OPTIONS': {'charset': 'utf8mb4'},
-    },
-    'joacham': {
-        'ENGINE': 'django.db.backends.mysql',
-        'NAME': 'joacham',
-        'HOST': os.getenv('MYPRODUCT_DB_HOST', '192.168.219.200'),
-        'PORT': int(os.getenv('MYPRODUCT_DB_PORT', 3306)),
-        'USER': os.getenv('MYPRODUCT_DB_USER', 'root'),
-        'PASSWORD': os.getenv('MYPRODUCT_DB_PASSWORD', '').strip("'"),
-        'OPTIONS': {'charset': 'utf8mb4'},
-    },
-    'ads': {
-        'ENGINE': 'django.db.backends.mysql',
-        'NAME': os.getenv('ADS_DB_NAME', 'ads'),
-        'HOST': os.getenv('ADS_DB_HOST', '192.168.219.200'),
-        'PORT': int(os.getenv('ADS_DB_PORT', 3306)),
-        'USER': os.getenv('ADS_DB_USER', 'root'),
-        'PASSWORD': os.getenv('ADS_DB_PASSWORD', os.getenv('MYPRODUCT_DB_PASSWORD', '')).strip("'"),
-        'OPTIONS': {'charset': 'utf8mb4'},
-    },
+    'default':   _db(os.getenv('NAVER_DB_NAME', 'naver')),
+    'naverdb':   _db(os.getenv('NAVER_DB_NAME', 'naver')),
+    'myproduct': _db(os.getenv('MYPRODUCT_DB_NAME', 'myproduct')),
+    'joacham':   _db(os.getenv('MYPRODUCT_DB_NAME', 'myproduct')),
+    'ads':       _db(os.getenv('NAVER_DB_NAME', 'naver')),
 }
 
 DATABASE_ROUTERS = ['config.db_router.NaverDbRouter']

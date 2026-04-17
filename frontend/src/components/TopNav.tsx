@@ -13,8 +13,8 @@ const NAV_ITEMS = [
   { key: 'rank', label: '순위추적', color: '#f59e0b' },
   { key: 'keywords', label: '연관키워드', color: '#06b6d4' },
   { key: 'catkeywords', label: '카테고리키워드', color: '#e879f9' },
-  { key: 'ownerclan', label: '오너클랜상품', color: '#ff6b35' },
   { key: 'extension', label: '도우미프로그램', color: '#8b5cf6' },
+  { key: 'apisettings', label: 'API 설정', color: '#f43f5e' },
 ] as const;
 
 export default function TopNav({ page, onPageChange, onStoreSettings, dark, onToggleTheme }: Props) {
@@ -31,7 +31,7 @@ export default function TopNav({ page, onPageChange, onStoreSettings, dark, onTo
         </div>
 
         {/* Tab Buttons */}
-        <nav className="flex items-center gap-0.5 overflow-x-auto scrollbar-hide">
+        <nav className="flex items-center gap-0.5 overflow-x-auto scrollbar-hide flex-1 min-w-0">
           {NAV_ITEMS.map(item => {
             const active = page === item.key;
             return (

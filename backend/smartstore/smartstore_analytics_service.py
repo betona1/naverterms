@@ -186,7 +186,7 @@ def get_overview(start_date=None, end_date=None):
     _add_date_filter(where, params, start_date, end_date)
     where_sql = ' AND '.join(where)
 
-    with connections['joacham'].cursor() as cur:
+    with connections['myproduct'].cursor() as cur:
         cur.execute(f"""
             SELECT p.store_id,
                    COUNT(*) as order_count,
@@ -230,7 +230,7 @@ def get_overview(start_date=None, end_date=None):
             })
 
     # 3-1) 스토어별 최근 13개월 판매 상품 수 (DISTINCT seller_code)
-    with connections['joacham'].cursor() as cur:
+    with connections['myproduct'].cursor() as cur:
         cur.execute("""
             SELECT p.store_id,
                    COUNT(DISTINCT o.product_seller_code) as recent_sold_products
@@ -389,7 +389,7 @@ def get_registration_limits():
     _add_date_filter(where, params, start_date, end_date)
     where_sql = ' AND '.join(where)
 
-    with connections['joacham'].cursor() as cur:
+    with connections['myproduct'].cursor() as cur:
         cur.execute(f"""
             SELECT p.store_id,
                    COUNT(*) as order_count,
@@ -403,7 +403,7 @@ def get_registration_limits():
         sales_3m = {r['store_id']: r for r in _dictfetchall(cur)}
 
     # 2) 13개월 판매상품수
-    with connections['joacham'].cursor() as cur:
+    with connections['myproduct'].cursor() as cur:
         cur.execute("""
             SELECT p.store_id,
                    COUNT(DISTINCT o.product_seller_code) as recent_sold_products
@@ -485,7 +485,7 @@ def get_store_detail(store_id, start_date=None, end_date=None, period='monthly')
     _add_date_filter(where, params, start_date, end_date)
     where_sql = ' AND '.join(where)
 
-    with connections['joacham'].cursor() as cur:
+    with connections['myproduct'].cursor() as cur:
         cur.execute(f"""
             SELECT COUNT(*) as order_count,
                    COALESCE(SUM(o.quantity), 0) as qty,
@@ -520,7 +520,7 @@ def get_store_detail(store_id, start_date=None, end_date=None, period='monthly')
     where_sql = ' AND '.join(where)
     pe = _period_expr(period)
 
-    with connections['joacham'].cursor() as cur:
+    with connections['myproduct'].cursor() as cur:
         cur.execute(f"""
             SELECT {pe} as period,
                    COUNT(*) as order_count,
@@ -576,7 +576,7 @@ def get_business_detail(code, start_date=None, end_date=None, period='monthly'):
     _add_date_filter(where, params, start_date, end_date)
     where_sql = ' AND '.join(where)
 
-    with connections['joacham'].cursor() as cur:
+    with connections['myproduct'].cursor() as cur:
         cur.execute(f"""
             SELECT p.store_id,
                    COUNT(*) as order_count,
@@ -614,7 +614,7 @@ def get_business_detail(code, start_date=None, end_date=None, period='monthly'):
     where_sql = ' AND '.join(where)
     pe = _period_expr(period)
 
-    with connections['joacham'].cursor() as cur:
+    with connections['myproduct'].cursor() as cur:
         cur.execute(f"""
             SELECT {pe} as period,
                    COUNT(*) as order_count,
@@ -765,7 +765,7 @@ def _get_top_products(store_ids, start_date=None, end_date=None, limit=20, store
     store_filter, store_params = _store_filter_sql(store_ids)
     where_sql = ' AND '.join(where)
 
-    with connections['joacham'].cursor() as cur:
+    with connections['myproduct'].cursor() as cur:
         cur.execute(f"""
             SELECT o.product_seller_code as seller_code,
                    MAX(o.product_name) as product_name,
