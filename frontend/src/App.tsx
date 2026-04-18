@@ -10,6 +10,7 @@ import SmartStoreAnalyticsPage from './pages/SmartStoreAnalyticsPage';
 import NaverKeywordPage from './pages/NaverKeywordPage';
 import NaverCategoryKeywordPage from './pages/NaverCategoryKeywordPage';
 import ApiSettingsPage from './pages/ApiSettingsPage';
+import CompetitorPage from './pages/CompetitorPage';
 
 const PAGE_KEY = 'nt-page';
 
@@ -22,6 +23,7 @@ const HASH_MAP: Record<string, string> = {
   '#catkeywords': 'catkeywords',
   '#analytics': 'analytics',
   '#apisettings': 'apisettings',
+  '#competitor': 'competitor',
 };
 
 export default function App() {
@@ -42,7 +44,7 @@ export default function App() {
   useEffect(() => {
     const onHash = () => {
       const h = window.location.hash.replace('#', '');
-      if (h && ['terms', 'rank', 'products', 'extension', 'analytics', 'keywords', 'catkeywords', 'apisettings'].includes(h)) {
+      if (h && ['terms', 'rank', 'products', 'extension', 'analytics', 'keywords', 'catkeywords', 'apisettings', 'competitor'].includes(h)) {
         setPage(h);
         try { localStorage.setItem(PAGE_KEY, h); } catch { /* */ }
       }
@@ -72,6 +74,7 @@ export default function App() {
           {page === 'catkeywords' && <NaverCategoryKeywordPage />}
           {page === 'analytics' && <SmartStoreAnalyticsPage />}
           {page === 'apisettings' && <ApiSettingsPage />}
+          {page === 'competitor' && <CompetitorPage />}
         </main>
       </div>
       {showStoreSettings && (

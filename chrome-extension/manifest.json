@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "쇼핑 통합 도우미",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "네이버쇼핑 Term 분석 + 순위추적 + 로하스 상품수집 + 지마켓 순위추적",
   "permissions": [
     "tabs",
@@ -12,11 +12,13 @@
   ],
   "host_permissions": [
     "https://search.shopping.naver.com/*",
+    "https://smartstore.naver.com/*",
     "https://www.gmarket.co.kr/*",
     "http://com.exponet.co.kr/*",
     "http://localhost:*/*",
     "http://192.168.219.100:*/*",
-    "http://192.168.219.200:*/*"
+    "http://192.168.219.200:*/*",
+    "http://192.168.0.150:*/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -34,8 +36,13 @@
       "run_at": "document_start"
     },
     {
-      "matches": ["http://localhost:*/*", "http://192.168.219.100:*/*", "http://192.168.219.200:*/*"],
+      "matches": ["http://localhost:*/*", "http://192.168.219.100:*/*", "http://192.168.219.200:*/*", "http://192.168.0.150:*/*"],
       "js": ["content_app.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://smartstore.naver.com/*/products/*"],
+      "js": ["content_smartstore.js"],
       "run_at": "document_idle"
     }
   ],

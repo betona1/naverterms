@@ -10,6 +10,7 @@ importScripts('bg_lohas.js', 'bg_gmarket.js');
 // ══════════════════════════════════════════
 
 const API = 'http://192.168.219.100:8901/api/naver';
+const COMPETITOR_API = 'http://192.168.0.150:8900/api/competitor';
 const TAB_ORDER = ['total', 'model', 'checkout'];
 const RANK_TAB_ORDER = ['total'];
 const TAB_NAME = { total: '전체', model: '가격비교', checkout: '네이버페이' };
@@ -69,9 +70,42 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
       resumeAfterCaptcha();
       reply({ ok: true });
       return false;
+    case 'SMARTSTORE_STOCK_DATA':
+      sendCompetitorStock(msg);
+      reply({ ok: true });
+      return false;
   }
   // 네이버 메시지가 아니면 다음 리스너로 전달
 });
+
+// ══════════════════════════════════════════
+// 타사 상품 재고 전송
+// ══════════════════════════════════════════
+function sendCompetitorStock(msg) {
+  fetch(`${COMPETITOR_API}/ext/stock/`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      url: msg.url,
+      price: msg.price,
+      options: msg.options,
+      productName: msg.productName,
+      purchaseCount: msg.purchaseCount,
+      recentPurchaseCount: msg.recentPurchaseCount,
+      reviewCount: msg.reviewCount,
+    }),
+  })
+    .then(r => r.json())
+    .then(d => {
+      if (d.ok) {
+        const pcInfo = d.purchase_count != null ? ` 누적구매${d.purchase_count}` : '';
+        log(`[타사재고] ${msg.url.split('/').slice(-1)[0]} — 추정판매+${d.estimated_sales}${pcInfo}`);
+      } else {
+        // 등록되지 않은 상품은 무시 (404)
+      }
+    })
+    .catch(() => {}); // 서버 미연결 시 무시
+}
 
 // ══════════════════════════════════════════
 // 크롤링 흐름

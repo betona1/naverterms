@@ -23,5 +23,31 @@ module.exports = {
       watch: false,
       max_restarts: 10,
     },
+    {
+      name: 'competitor-crawl-morning',
+      cwd: '/home/mueres/naver/backend',
+      script: '/home/mueres/naver/venv/bin/python',
+      args: 'manage.py crawl_competitors',
+      interpreter: 'none',
+      autorestart: false,
+      cron_restart: '0 11 * * *',
+      watch: false,
+      env: {
+        DJANGO_SETTINGS_MODULE: 'config.settings',
+      },
+    },
+    {
+      name: 'competitor-crawl-night',
+      cwd: '/home/mueres/naver/backend',
+      script: '/home/mueres/naver/venv/bin/python',
+      args: 'manage.py crawl_competitors',
+      interpreter: 'none',
+      autorestart: false,
+      cron_restart: '50 23 * * *',
+      watch: false,
+      env: {
+        DJANGO_SETTINGS_MODULE: 'config.settings',
+      },
+    },
   ],
 };
