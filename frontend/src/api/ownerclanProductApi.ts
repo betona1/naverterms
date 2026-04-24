@@ -28,6 +28,7 @@ export interface OwnerClanProductItem {
   uploaded_at: string | null;
   synced_at: string | null;
   created_at: string;
+  has_changes: number;
 }
 
 export interface ProductListResponse {
@@ -80,7 +81,7 @@ export interface UploadTaskStatus {
 export async function fetchProducts(
   page = 1,
   perPage = 50,
-  saleStatus?: number,
+  saleStatus?: number | string,
   isSynced?: number,
   search?: string,
   changedField?: string,
@@ -226,6 +227,26 @@ export async function downloadSampleExcel(): Promise<void> {
   window.URL.revokeObjectURL(url);
 }
 
+export interface SoldoutSyncStatus {
+  exists: boolean;
+  synced_at?: string;
+  period?: string;
+  elapsed?: number;
+  total_changes?: number;
+  status_changes?: number;
+  transitions?: Record<string, number>;
+  db_result?: {
+    ownerclan_updated: number;
+    smartstore_soldout: number;
+    smartstore_cleared: number;
+  };
+}
+
+export async function fetchSoldoutSyncStatus(): Promise<SoldoutSyncStatus> {
+  const { data } = await api.get<SoldoutSyncStatus>('/soldout-sync-status/');
+  return data;
+}
+
 export async function fetchWCodes(
   p: ExportParams,
   onProgress?: (pct: number) => void,
@@ -243,4 +264,87 @@ export async function fetchWCodes(
     },
   });
   return data.codes;
+}
+
+// 상태 동기화
+export interface SyncStatusPreview {
+  to_soldout: number;
+  to_discontinued: number;
+  to_activate_total: number;
+  to_activate_suspension: number;
+  to_activate_outofstock: number;
+  price_changed: number;
+  field_changes: Record<string, number>;
+  total_sync: number;
+}
+export async function fetchSyncStatusPreview(): Promise<SyncStatusPreview> {
+  const { data } = await api.get<SyncStatusPreview>('/sync-status/');
+  return data;
+}
+export async function executeSyncStatus(mode: 'all' | 'activate' | 'suspend' = 'all'): Promise<{ success: number; fail: number; skipped: number; errors: any[]; skipped_items: any[]; detail: { suspend_targets: number; activate_targets: number; skipped?: number } }> {
+  const { data } = await api.post('/sync-status/execute/', { mode });
+  return data;
+}
+
+// 변경사항 로그
+export interface ChangeLogGroup {
+  group: string;
+  label: string;
+  count: number;
+  product_count: number;
+}
+export interface ChangeLogItem {
+  id: number;
+  product_code: string;
+  change_group: string;
+  field_name: string;
+  old_value: string;
+  new_value: string;
+  detected_at: string;
+  group_label: string;
+  is_applied?: number;
+  applied_at?: string;
+}
+export interface SoldoutSyncLog {
+  sync_date: string;
+  total_changes: number;
+  status_changes: number;
+  transitions: Record<string, number>;
+  db_result: {
+    ownerclan_updated: number;
+    smartstore_soldout: number;
+    smartstore_cleared: number;
+    reactivated?: number;
+    reactivate_fail?: number;
+  };
+  elapsed: number;
+}
+export interface ChangeLogSummary {
+  date: string;
+  field_changes: {
+    groups: ChangeLogGroup[];
+    total: number;
+    items: ChangeLogItem[];
+  };
+  soldout_sync: SoldoutSyncLog | null;
+  pagination: { page: number; per_page: number; total_pages: number };
+}
+export interface ChangeLogDateEntry {
+  date: string;
+  field_changes: number;
+  soldout_changes: number;
+}
+export async function fetchChangeLogSummary(date?: string, page = 1, perPage = 50): Promise<ChangeLogSummary> {
+  const params: Record<string, string | number> = { page, per_page: perPage };
+  if (date) params.date = date;
+  const { data } = await api.get<ChangeLogSummary>('/change-log/', { params });
+  return data;
+}
+export async function fetchChangeLogDates(): Promise<{ dates: ChangeLogDateEntry[] }> {
+  const { data } = await api.get<{ dates: ChangeLogDateEntry[] }>('/change-log/dates/');
+  return data;
+}
+export async function fetchProductChangeLog(productId: number): Promise<ChangeLogItem[]> {
+  const { data } = await api.get<ChangeLogItem[]>(`/${productId}/change-log/`);
+  return data;
 }

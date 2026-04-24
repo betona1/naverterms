@@ -1,3 +1,4 @@
+import os
 from io import BytesIO
 from urllib.parse import quote
 
@@ -9,6 +10,7 @@ from . import smartstore_service
 from . import smartstore_product_service
 from . import smartstore_order_service
 from . import smartstore_analytics_service
+from . import product_audit_service
 
 
 # ── 스마트스토어 상점 관리 ──
@@ -184,6 +186,10 @@ class SmartStoreProductListView(APIView):
         sort_by = src.get('sort_by') or None
         sort_dir = src.get('sort_dir') or None
         min_ss_amount = src.get('min_ss_amount')
+        has_changes = src.get('has_changes')
+        reverse_margin = src.get('reverse_margin')
+        restock_unchecked = src.get('restock_unchecked')
+        no_master = src.get('no_master')
         result = smartstore_product_service.get_products(
             int(store_id), page, per_page, status, search,
             ownerclan_soldout=int(ownerclan_soldout) if ownerclan_soldout is not None else None,
@@ -192,6 +198,10 @@ class SmartStoreProductListView(APIView):
             sort_by=sort_by,
             sort_dir=sort_dir,
             min_ss_amount=int(min_ss_amount) if min_ss_amount is not None else None,
+            has_changes=int(has_changes) if has_changes is not None else None,
+            reverse_margin=int(reverse_margin) if reverse_margin is not None else None,
+            restock_unchecked=int(restock_unchecked) if restock_unchecked is not None else None,
+            no_master=int(no_master) if no_master is not None else None,
         )
         return result, None
 
@@ -216,6 +226,41 @@ class SmartStoreProductSyncView(APIView):
         if 'error' in result:
             return Response(result, status=400)
         return Response(result)
+
+
+class SmartStoreRefreshTrackingView(APIView):
+    def post(self, request):
+        from . import smartstore_order_service
+        store_id = int(request.data.get('store_id', 0))
+        count = smartstore_product_service.refresh_master_tracking(store_id)
+        order_count = smartstore_order_service.update_product_sales_summary()
+        return Response({'refreshed': count, 'orders_updated': order_count})
+
+
+class SmartStoreSalesSnapshotView(APIView):
+    def post(self, request):
+        from . import smartstore_order_service
+        saved = smartstore_order_service.save_daily_snapshot()
+        return Response({'saved': saved})
+
+    def get(self, request):
+        from . import smartstore_order_service
+        store_id = int(request.query_params.get('store_id', 0))
+        delta = smartstore_order_service.get_sales_delta(store_id)
+        return Response(delta or {})
+
+
+class SmartStoreSyncLogView(APIView):
+    def get(self, request):
+        store_id = int(request.query_params.get('store_id', 0))
+        limit = int(request.query_params.get('limit', 50))
+        return Response(smartstore_product_service.get_sync_logs(store_id, limit))
+
+
+class SmartStoreSyncLogDetailView(APIView):
+    def get(self, request, pk):
+        limit = int(request.query_params.get('limit', 500))
+        return Response(smartstore_product_service.get_sync_log_changes(pk, limit))
 
 
 class SmartStoreProductStatsView(APIView):
@@ -330,6 +375,38 @@ class SmartStoreProductExcelView(APIView):
         return resp
 
 
+class SmartStoreProductCountView(APIView):
+    def get(self, request):
+        store_ids = request.query_params.getlist('store_ids')
+        statuses = request.query_params.getlist('statuses')
+        w_only = request.query_params.get('w_only') == '1'
+
+        store_ids = [int(s) for s in store_ids] if store_ids else None
+        statuses = statuses if statuses else None
+
+        from django.db import connections
+        where = ['1=1']
+        params = []
+        if store_ids:
+            ph = ','.join(['%s'] * len(store_ids))
+            where.append(f'p.store_id IN ({ph})')
+            params.extend(store_ids)
+        if statuses:
+            ph = ','.join(['%s'] * len(statuses))
+            where.append(f'p.status_type IN ({ph})')
+            params.extend(statuses)
+        if w_only:
+            where.append("p.seller_management_code LIKE 'W%%'")
+
+        with connections['myproduct'].cursor() as cur:
+            cur.execute(
+                f"SELECT COUNT(*) FROM smartstore_product p "
+                f"JOIN smartstoreIdList s ON s.id = p.store_id "
+                f"WHERE {' AND '.join(where)}", params)
+            count = cur.fetchone()[0]
+        return Response({'count': count})
+
+
 class SmartStoreProductWCodesView(APIView):
     def get(self, request):
         store_ids = request.query_params.getlist('store_ids')
@@ -368,6 +445,24 @@ class SmartStoreProductFocusView(APIView):
             return Response({'error': 'product_ids required'}, status=400)
         result = smartstore_product_service.toggle_focus(product_ids, is_focus)
         return Response(result)
+
+
+class SmartStoreProductRestockCheckView(APIView):
+    def post(self, request):
+        product_ids = request.data.get('product_ids', [])
+        checked = request.data.get('checked', 1)
+        if not product_ids:
+            return Response({'error': 'product_ids required'}, status=400)
+        result = smartstore_product_service.toggle_restock_checked(product_ids, checked)
+        return Response(result)
+
+
+class SmartStoreProductOrphanWCodesView(APIView):
+    def get(self, request):
+        store_ids = request.query_params.getlist('store_ids')
+        store_ids = [int(s) for s in store_ids] if store_ids else None
+        codes = smartstore_product_service.get_orphan_w_codes(store_ids)
+        return Response({'codes': codes, 'count': len(codes)})
 
 
 class SmartStoreProductOrdersView(APIView):
@@ -426,3 +521,221 @@ class SmartStoreAnalyticsSyncCategoriesView(APIView):
 class SmartStoreRegistrationLimitView(APIView):
     def get(self, request):
         return Response(smartstore_analytics_service.get_registration_limits())
+
+
+# ── 스토어 상품수집 (브라우저 자동화) ──
+
+from . import store_collector
+
+
+class StoreCollectStartView(APIView):
+    def post(self, request):
+        store_ids = request.data.get('store_ids')
+        if store_ids is not None and not isinstance(store_ids, list):
+            store_ids = [int(store_ids)]
+        ok, msg = store_collector.start(store_ids)
+        if not ok:
+            return Response({'ok': False, 'message': msg}, status=409)
+        return Response({'ok': True, 'message': msg})
+
+
+class StoreCollectStatusView(APIView):
+    def get(self, request):
+        since = int(request.query_params.get('logSince', 0))
+        st = store_collector.get_status()
+        if since > 0:
+            st['logs'] = [l for i, l in enumerate(st['logs']) if i >= since]
+        return Response(st)
+
+
+class StoreCollectStopView(APIView):
+    def post(self, request):
+        store_collector.stop()
+        return Response({'ok': True})
+
+
+class StoreCollectCsvView(APIView):
+    def get(self, request):
+        # store_name 또는 log_id로 CSV 다운로드
+        store_name = request.query_params.get('store_name', '')
+        log_id = request.query_params.get('log_id')
+
+        file_path = None
+        if log_id:
+            # DB에서 파일 경로 조회
+            logs = store_collector.get_collect_logs(limit=100)
+            for log in logs:
+                if str(log['id']) == str(log_id):
+                    file_path = log.get('csv_file_path')
+                    break
+        elif store_name:
+            file_path = store_collector.get_csv_file(store_name)
+
+        if not file_path or not os.path.exists(file_path):
+            return Response({'error': 'CSV 파일이 없습니다.'}, status=404)
+        with open(file_path, 'rb') as f:
+            response = HttpResponse(f.read(), content_type='text/csv; charset=utf-8-sig')
+            fname = quote(os.path.basename(file_path))
+            response['Content-Disposition'] = f"attachment; filename*=UTF-8''{fname}"
+            return response
+
+
+class StoreCollectLogsView(APIView):
+    def get(self, request):
+        limit = int(request.query_params.get('limit', 20))
+        logs = store_collector.get_collect_logs(limit=limit)
+        # datetime 직렬화
+        for log in logs:
+            if log.get('completed_at'):
+                log['completed_at'] = str(log['completed_at'])
+        return Response(logs)
+
+    def delete(self, request):
+        """실패 로그 삭제"""
+        from django.db import connections
+        with connections['myproduct'].cursor() as cur:
+            cur.execute("DELETE FROM store_collect_log WHERE status = 'error'")
+            deleted = cur.rowcount
+        return Response({'deleted': deleted})
+
+
+# ── 전상품 API 검증 ──
+
+class ProductAuditStartView(APIView):
+    def post(self, request):
+        source = request.data.get('source', 'api')
+        result = product_audit_service.start_audit(source=source)
+        status = 200 if result['ok'] else 409
+        return Response(result, status=status)
+
+
+class ProductAuditStatusView(APIView):
+    def get(self, request):
+        return Response(product_audit_service.get_audit_status())
+
+
+class ProductAuditStopView(APIView):
+    def post(self, request):
+        product_audit_service.stop_audit()
+        return Response({'ok': True})
+
+
+class ProductAuditLogsView(APIView):
+    def get(self, request):
+        limit = int(request.query_params.get('limit', 20))
+        return Response(product_audit_service.get_audit_logs(limit=limit))
+
+
+class ProductAuditLogDetailView(APIView):
+    def get(self, request, pk):
+        return Response(product_audit_service.get_audit_log_detail(pk))
+
+
+# ── 상세페이지 크롤링 ──
+
+class DetailCrawlStartView(APIView):
+    def post(self, request):
+        from smartstore.smartstore_product_service import start_detail_crawl
+        batch_size = int(request.data.get('batch_size', 0))
+        result = start_detail_crawl(batch_size=batch_size)
+        status = 200 if result['ok'] else 409
+        return Response(result, status=status)
+
+
+class DetailCrawlStatusView(APIView):
+    def get(self, request):
+        from smartstore.smartstore_product_service import get_detail_crawl_status
+        return Response(get_detail_crawl_status())
+
+
+class DetailCrawlStopView(APIView):
+    def post(self, request):
+        from smartstore.smartstore_product_service import stop_detail_crawl
+        stop_detail_crawl()
+        return Response({'ok': True})
+
+
+# ── 상품 편집 ──
+
+class ProductFullDetailView(APIView):
+    """상품 편집용 전체 상세 조회 (네이버 API v2 실시간)"""
+    def get(self, request, opno):
+        store_id = request.query_params.get('store_id')
+        if not store_id:
+            return Response({'error': 'store_id required'}, status=400)
+        try:
+            result = smartstore_product_service.get_product_full_detail(int(opno), int(store_id))
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
+        if 'error' in result:
+            return Response(result, status=400)
+        return Response(result)
+
+
+class ProductUpdateView(APIView):
+    """상품 필드 수정 (GET→modify→PUT)"""
+    def put(self, request, opno):
+        store_id = request.data.get('store_id')
+        if not store_id:
+            return Response({'error': 'store_id required'}, status=400)
+        updates = request.data.get('updates', {})
+        if not updates:
+            return Response({'error': 'updates required'}, status=400)
+        try:
+            result = smartstore_product_service.update_product_fields(int(opno), int(store_id), updates)
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
+        if 'error' in result:
+            return Response(result, status=400)
+        return Response(result)
+
+
+class ProductImageUploadView(APIView):
+    """상품 이미지 네이버 CDN 업로드"""
+    def post(self, request):
+        store_id = request.data.get('store_id')
+        if not store_id:
+            return Response({'error': 'store_id required'}, status=400)
+        image_file = request.FILES.get('image')
+        if not image_file:
+            return Response({'error': 'image file required'}, status=400)
+        try:
+            result = smartstore_product_service.upload_product_image(int(store_id), image_file)
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
+        if 'error' in result:
+            return Response(result, status=400)
+        return Response(result)
+
+
+class ZeroMarginPreviewView(APIView):
+    """역마진 상품 0마진 가격 미리보기"""
+    def get(self, request):
+        store_id = request.query_params.get('store_id', 0)
+        result = smartstore_product_service.zero_margin_preview(int(store_id))
+        return Response(result)
+
+
+class ZeroMarginUpdateView(APIView):
+    """역마진 상품 가격을 0마진으로 일괄 수정"""
+    def post(self, request):
+        store_id = request.data.get('store_id', 0)
+        try:
+            result = smartstore_product_service.zero_margin_update(int(store_id))
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
+        return Response(result)
+
+
+class ZeroMarginLogsView(APIView):
+    """0마진 처리 이력"""
+    def get(self, request):
+        limit = int(request.query_params.get('limit', 20))
+        return Response(smartstore_product_service.zero_margin_logs(limit))
+
+
+class ZeroMarginLogDetailView(APIView):
+    """0마진 처리 상세"""
+    def get(self, request, pk):
+        items = smartstore_product_service.zero_margin_log_detail(pk)
+        return Response({'items': items})

@@ -5,7 +5,7 @@
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      width: 360px;
+      width: 380px;
       font-family: 'Malgun Gothic', -apple-system, sans-serif;
       font-size: 12px;
       background: #111;
@@ -20,6 +20,19 @@
     }
     .hdr b { font-size: 13px; }
     .hdr .v { margin-left: auto; font-size: 9px; opacity: 0.6; }
+
+    /* 모드 탭 */
+    .mode-bar {
+      display: flex; border-bottom: 1px solid #222;
+    }
+    .mode-btn {
+      flex: 1; padding: 8px 0; border: none;
+      font-size: 11px; font-weight: 700; cursor: pointer;
+      background: #1a1a1a; color: #555;
+      transition: all 0.15s;
+    }
+    .mode-btn.active { background: #222; color: #03c75a; border-bottom: 2px solid #03c75a; }
+    .mode-btn:hover:not(.active) { color: #888; }
 
     .row {
       padding: 8px 14px;
@@ -71,7 +84,6 @@
     .log-hdr .arrow { font-size: 8px; color: #555; transition: transform 0.2s; }
     .log-hdr .arrow.open { transform: rotate(90deg); }
     .log-hdr span { font-size: 10px; color: #666; }
-    .log-hdr .cnt { margin-left: auto; font-size: 9px; color: #444; }
     .log-last { font-size: 10px; color: #888; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .log-box {
       max-height: 0; overflow-y: auto; transition: max-height 0.2s;
@@ -82,6 +94,15 @@
     .ll { padding: 2px 14px; border-bottom: 1px solid #1a1a1a; white-space: nowrap; }
     .g { color: #03c75a; } .r { color: #ef4444; } .b { color: #60a5fa; }
     .y { color: #f59e0b; } .w { color: #888; }
+
+    /* 저장 건수 */
+    .stat-row {
+      padding: 6px 14px;
+      border-bottom: 1px solid #222;
+      font-size: 10px; color: #666;
+      display: flex; align-items: center; gap: 6px;
+    }
+    .stat-row .cnt { color: #03c75a; font-weight: 700; font-size: 12px; }
 
     .footer {
       padding: 8px 14px;
@@ -96,15 +117,24 @@
     .fb-d { background: #03c75a; color: #fff; }
     .fb-r { background: #2a1a1a; color: #f87171; }
     .fb-s { background: #1a1a1a; color: #666; }
+    .fb-csv { background: #1a3a1a; color: #4ade80; }
+    .hidden { display: none !important; }
   </style>
 </head>
 <body>
   <div class="hdr">
-    <b>쇼핑 통합 도우미</b>
+    <b>Term 수집기</b>
     <span class="v" id="ver">v-</span>
   </div>
 
-  <div class="row">
+  <!-- 모드 선택 -->
+  <div class="mode-bar">
+    <button class="mode-btn active" id="modeExt" data-mode="external">외부용</button>
+    <button class="mode-btn" id="modeInt" data-mode="internal">내부용</button>
+  </div>
+
+  <!-- Django 상태 (내부용만) -->
+  <div class="row hidden" id="djRow">
     <div class="dot dot-off" id="djDot"></div>
     <span class="lbl">Django</span>
     <span class="val" id="djVal">-</span>
@@ -112,6 +142,13 @@
     <div class="dot dot-off" id="crDot"></div>
     <span class="lbl">크롤링</span>
     <span class="val" id="crVal">대기</span>
+  </div>
+
+  <!-- 크롤링 상태 (외부용) -->
+  <div class="row" id="extRow">
+    <div class="dot dot-off" id="crDot2"></div>
+    <span class="lbl">크롤링</span>
+    <span class="val" id="crVal2">대기</span>
   </div>
 
   <div class="input-row">
@@ -136,11 +173,25 @@
   </div>
   <div class="log-box" id="logBox"></div>
 
-  <div class="footer">
+  <!-- 로컬 저장 건수 (외부용) -->
+  <div class="stat-row" id="statRow">
+    저장된 키워드: <span class="cnt" id="localCnt">0</span>개
+  </div>
+
+  <!-- 외부용 버튼 -->
+  <div class="footer" id="extFooter">
+    <button class="fb fb-d" id="btnResults">결과보기</button>
+    <button class="fb fb-csv" id="btnCsv">CSV</button>
+    <button class="fb fb-r" id="btnClear">초기화</button>
+    <button class="fb fb-s" id="btnExt">설정</button>
+  </div>
+
+  <!-- 내부용 버튼 -->
+  <div class="footer hidden" id="intFooter">
     <button class="fb fb-t" id="btnTest">연결</button>
     <button class="fb fb-d" id="btnDash">대시보드</button>
     <button class="fb fb-r" id="btnReset">초기화</button>
-    <button class="fb fb-s" id="btnExt">설정</button>
+    <button class="fb fb-s" id="btnExt2">설정</button>
   </div>
 
   <script src="popup.js"></script>

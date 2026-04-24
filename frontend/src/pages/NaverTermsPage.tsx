@@ -38,7 +38,7 @@ interface CrawlLog {
 
 interface CrawlState {
   active: boolean;
-  mode: 'chrome' | 'uc';
+  mode: 'chrome' | 'uc' | 'smart' | 'api';
   keywords: string[];
   currentKeyword: string;
   currentKeywordIdx: number;
@@ -362,11 +362,114 @@ export default function NaverTermsPage() {
     return () => stopUCPoll();
   }, [stopUCPoll]);
 
+  // ── 스마트 검색 (HTTP + auto fallback) ──
+  const handleSmartSearch = async (method: 'auto' | 'api' = 'auto') => {
+    const target = getTargetKeywords();
+    if (!target.length) return;
+
+    const modeLabel = method === 'api' ? 'API' : 'Smart';
+    const mode = method === 'api' ? 'api' as const : 'smart' as const;
+
+    setCrawl({
+      active: true,
+      mode,
+      keywords: target,
+      currentKeyword: target[0],
+      currentKeywordIdx: 0,
+      currentTab: '',
+      completedSteps: 0,
+      totalSteps: method === 'api' ? target.length : target.length * 3,
+      tabs: method === 'api' ? [] : TABS_ORDER.map(t => ({ ...t, done: false })),
+      logs: [{ time: timestamp(), type: 'info', message: `[${modeLabel}] 수집 시작 — ${target.length}개 키워드: [${target.join(', ')}]` }],
+      lastLogIdx: 0,
+    });
+
+    try {
+      const result = await naverApi.smartCollect(target, method);
+
+      // HTTP 차단 → Chrome 확장 자동 전환
+      if (result.blocked && method !== 'api' && extStatus.connected) {
+        setCrawl(prev => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            active: true,
+            mode: 'chrome',
+            totalSteps: target.length * 3,
+            completedSteps: 0,
+            tabs: TABS_ORDER.map(t => ({ ...t, done: false })),
+            logs: [
+              ...prev.logs,
+              { time: timestamp(), type: 'error', message: `HTTP 차단 감지 (418)` },
+              { time: timestamp(), type: 'progress', message: `Chrome 확장 프로그램으로 자동 전환합니다...` },
+              { time: timestamp(), type: 'info', message: `[Chrome] 크롤링 시작 — ${target.length}개 키워드 (속성/리뷰/등록일 포함)` },
+            ],
+          };
+        });
+        startTermSearch(target);
+        return;
+      }
+
+      setCrawl(prev => {
+        if (!prev) return prev;
+        const newLogs = [...prev.logs];
+
+        // 결과 로그
+        for (const r of result.results || []) {
+          if (r.error) {
+            newLogs.push({ time: timestamp(), type: 'error', message: `"${r.keyword}" 오류: ${r.error}` });
+          } else {
+            const termsTag = r.has_terms ? ' [terms OK]' : ' [terms 없음]';
+            newLogs.push({ time: timestamp(), type: 'success', message: `"${r.keyword}" [${r.tab || 'total'}] ${r.count}개 저장 (total=${r.total})${termsTag}` });
+          }
+        }
+
+        // API fallback 결과
+        if (result.api_results) {
+          newLogs.push({ time: timestamp(), type: 'progress', message: `IP 차단 감지 → API 모드로 전환` });
+          for (const r of result.api_results) {
+            if (r.error) {
+              newLogs.push({ time: timestamp(), type: 'error', message: `"${r.keyword}" API 오류: ${r.error}` });
+            } else {
+              newLogs.push({ time: timestamp(), type: 'success', message: `"${r.keyword}" [API] ${r.count}개 저장` });
+            }
+          }
+        }
+
+        if (result.blocked) {
+          if (!extStatus.connected) {
+            newLogs.push({ time: timestamp(), type: 'error', message: `HTTP 차단됨. Chrome 확장 프로그램을 설치하면 속성/리뷰/등록일 + 가격비교/네이버페이 탭을 수집할 수 있습니다.` });
+          }
+          if (method === 'http') {
+            newLogs.push({ time: timestamp(), type: 'error', message: `IP 차단 감지 — HTTP 수집 중단됨` });
+          }
+        }
+
+        const total = (result.results?.length || 0) + (result.api_results?.length || 0);
+        newLogs.push({ time: timestamp(), type: 'success', message: `★ 수집 완료 — ${total}개 키워드 처리 (${result.method_used} 모드)` });
+
+        return {
+          ...prev,
+          active: false,
+          completedSteps: prev.totalSteps,
+          logs: newLogs,
+        };
+      });
+      loadKeywords();
+    } catch (e: any) {
+      setCrawl(prev => prev ? {
+        ...prev,
+        active: false,
+        logs: [...prev.logs, { time: timestamp(), type: 'error', message: `${modeLabel} 수집 실패: ${e.message}` }],
+      } : null);
+    }
+  };
+
   const handleCancelCrawl = async () => {
     if (crawl?.mode === 'uc') {
       try { await naverApi.ucStop(); } catch {}
       stopUCPoll();
-    } else {
+    } else if (crawl?.mode === 'chrome') {
       cancel();
     }
     setCrawl(prev => prev ? {
@@ -497,7 +600,14 @@ export default function NaverTermsPage() {
                       onClick={() => toggleRow(idx)}
                       onDoubleClick={() => setPopup({ keywordId: row.keyword.id, keyword: row.keyword.keyword, terms })}>
                       <td className={`px-3 py-2.5 ${txtMuted}`}>{idx + 1}</td>
-                      <td className={`px-3 py-2.5 font-bold ${txt}`}>{row.keyword.keyword}</td>
+                      <td className={`px-3 py-2.5 font-bold ${txt}`}>
+                        <span className="flex items-center gap-1.5">
+                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                            terms.length > 0 ? 'bg-[#03c75a]' : 'bg-[#f59e0b]'
+                          }`} title={terms.length > 0 ? 'terms 수집됨' : 'terms 미수집 (API 분석 제한)'} />
+                          {row.keyword.keyword}
+                        </span>
+                      </td>
                       {[0, 1, 2, 3].map(i => (
                         <td key={i} className="px-3 py-2.5 text-[#03c75a] font-semibold">{terms[i] || ''}</td>
                       ))}
@@ -525,6 +635,17 @@ export default function NaverTermsPage() {
 
         {/* ── 분석 버튼 바 ── */}
         <div className={`rounded-xl border p-3 flex flex-wrap gap-2 ${card}`}>
+          <button onClick={() => handleSmartSearch('auto')}
+            className="px-5 py-2.5 bg-[#f59e0b] text-white text-[12px] font-bold rounded-lg hover:bg-[#d97706] active:scale-[0.97] transition flex items-center gap-1.5">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M12 2L4.5 20.29L5.21 21L12 18L18.79 21L19.5 20.29L12 2Z" fill="white"/></svg>
+            스마트검색
+          </button>
+          <button onClick={() => handleSmartSearch('api')}
+            className="px-5 py-2.5 bg-[#8b5cf6] text-white text-[12px] font-bold rounded-lg hover:bg-[#7c3aed] active:scale-[0.97] transition flex items-center gap-1.5">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M20 4H4C2.89 4 2 4.89 2 6V18C2 19.11 2.89 20 4 20H20C21.11 20 22 19.11 22 18V6C22 4.89 21.11 4 20 4ZM20 18H4V8L12 13L20 8V18ZM12 11L4 6H20L12 11Z" fill="white"/></svg>
+            API검색
+          </button>
+          <div className={`w-px h-8 self-center ${dark ? 'bg-[#2a2a40]' : 'bg-gray-200'}`} />
           <button onClick={handleSearch}
             className="px-5 py-2.5 bg-[#03c75a] text-white text-[12px] font-bold rounded-lg hover:bg-[#02b350] active:scale-[0.97] transition flex items-center gap-1.5">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M15.5 14H14.71L14.43 13.73C15.41 12.59 16 11.11 16 9.5C16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16C11.11 16 12.59 15.41 13.73 14.43L14 14.71V15.5L19 20.49L20.49 19L15.5 14ZM9.5 14C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14Z" fill="white"/></svg>
@@ -564,6 +685,8 @@ export default function NaverTermsPage() {
               <div className="flex-1">
                 <h3 className={`text-[15px] font-extrabold ${txt}`}>
                   Term 크롤링
+                  {crawl.mode === 'smart' && <span className="ml-2 text-[11px] font-bold text-[#f59e0b] bg-[#f59e0b]/10 px-2 py-0.5 rounded-full">Smart</span>}
+                  {crawl.mode === 'api' && <span className="ml-2 text-[11px] font-bold text-[#8b5cf6] bg-[#8b5cf6]/10 px-2 py-0.5 rounded-full">API</span>}
                   {crawl.mode === 'uc' && <span className="ml-2 text-[11px] font-bold text-[#3b82f6] bg-[#3b82f6]/10 px-2 py-0.5 rounded-full">UC</span>}
                   {crawl.mode === 'chrome' && <span className="ml-2 text-[11px] font-bold text-[#03c75a] bg-[#03c75a]/10 px-2 py-0.5 rounded-full">Chrome</span>}
                 </h3>
@@ -599,44 +722,46 @@ export default function NaverTermsPage() {
                 {!crawl.active && progressPct >= 100 && <span className="text-[#03c75a] text-[13px]">&#x2714;</span>}
               </div>
 
-              {/* 3탭 진행 카드 */}
-              <div className="flex gap-2">
-                {crawl.tabs.map(tab => {
-                  const isCurrent = crawl.active && crawl.currentTab === tab.key && !tab.done;
-                  return (
-                    <div key={tab.key} className={`flex-1 rounded-xl px-3 py-2.5 border transition-all ${
-                      tab.done
-                        ? (dark ? 'bg-[#03c75a]/10 border-[#03c75a]/40' : 'bg-green-50 border-green-300')
-                        : isCurrent
-                          ? (dark ? 'bg-[#1a2a3a] border-[#03c75a]/60' : 'bg-blue-50 border-blue-300')
-                          : (dark ? 'bg-[#1c1c2e] border-[#2a2a40]' : 'bg-gray-50 border-gray-200')
-                    }`}>
-                      <div className="flex items-center gap-1.5 mb-1">
-                        {tab.done ? (
-                          <svg width="14" height="14" viewBox="0 0 24 24" fill="#03c75a"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z"/></svg>
-                        ) : isCurrent ? (
-                          <span className="w-3 h-3 border-2 border-[#03c75a] border-t-transparent rounded-full animate-spin" />
-                        ) : (
-                          <span className={`w-3 h-3 rounded-full ${dark ? 'bg-[#333]' : 'bg-gray-300'}`} />
-                        )}
-                        <span className={`text-[11px] font-bold ${
-                          tab.done ? 'text-[#03c75a]' : isCurrent ? (dark ? 'text-white' : 'text-gray-900') : txtMuted
-                        }`}>{tab.label}</span>
-                      </div>
-                      {tab.done && tab.count !== undefined && (
-                        <p className={`text-[10px] ml-5 ${txtSub}`}>{tab.count}개 상품</p>
-                      )}
-                      {isCurrent && (
-                        <div className="mt-1.5 ml-5">
-                          <div className={`h-1 rounded-full overflow-hidden ${dark ? 'bg-[#333]' : 'bg-gray-200'}`}>
-                            <div className="h-full bg-[#03c75a] rounded-full animate-pulse" style={{ width: '60%' }} />
-                          </div>
+              {/* 3탭 진행 카드 (Smart/API 모드에서는 탭카드 숨김) */}
+              {crawl.tabs.length > 0 && (
+                <div className="flex gap-2">
+                  {crawl.tabs.map(tab => {
+                    const isCurrent = crawl.active && crawl.currentTab === tab.key && !tab.done;
+                    return (
+                      <div key={tab.key} className={`flex-1 rounded-xl px-3 py-2.5 border transition-all ${
+                        tab.done
+                          ? (dark ? 'bg-[#03c75a]/10 border-[#03c75a]/40' : 'bg-green-50 border-green-300')
+                          : isCurrent
+                            ? (dark ? 'bg-[#1a2a3a] border-[#03c75a]/60' : 'bg-blue-50 border-blue-300')
+                            : (dark ? 'bg-[#1c1c2e] border-[#2a2a40]' : 'bg-gray-50 border-gray-200')
+                      }`}>
+                        <div className="flex items-center gap-1.5 mb-1">
+                          {tab.done ? (
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="#03c75a"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z"/></svg>
+                          ) : isCurrent ? (
+                            <span className="w-3 h-3 border-2 border-[#03c75a] border-t-transparent rounded-full animate-spin" />
+                          ) : (
+                            <span className={`w-3 h-3 rounded-full ${dark ? 'bg-[#333]' : 'bg-gray-300'}`} />
+                          )}
+                          <span className={`text-[11px] font-bold ${
+                            tab.done ? 'text-[#03c75a]' : isCurrent ? (dark ? 'text-white' : 'text-gray-900') : txtMuted
+                          }`}>{tab.label}</span>
                         </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
+                        {tab.done && tab.count !== undefined && (
+                          <p className={`text-[10px] ml-5 ${txtSub}`}>{tab.count}개 상품</p>
+                        )}
+                        {isCurrent && (
+                          <div className="mt-1.5 ml-5">
+                            <div className={`h-1 rounded-full overflow-hidden ${dark ? 'bg-[#333]' : 'bg-gray-200'}`}>
+                              <div className="h-full bg-[#03c75a] rounded-full animate-pulse" style={{ width: '60%' }} />
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
 
               {/* 전체 프로그래스바 */}
               <div className="mt-3">

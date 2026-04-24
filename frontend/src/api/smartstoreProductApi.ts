@@ -7,10 +7,14 @@ export interface SmartStoreProduct {
   store_id: number;
   origin_product_no: number;
   channel_product_no: number | null;
+  group_product_no: number | null;
   name: string;
   sale_price: number;
+  discount_price: number;
+  seller_discount: number;
   stock_quantity: number;
   status_type: string | null;
+  display_status: string | null;
   channel_product_display_status_type: string | null;
   seller_management_code: string | null;
   category_id: string | null;
@@ -25,6 +29,39 @@ export interface SmartStoreProduct {
   all_order_count: number;
   has_orders?: boolean;
   store_name?: string;
+  // CSV 수집 상세 컬럼
+  options: string | null;
+  additional_products: string | null;
+  delivery_fee_type: string | null;
+  basic_delivery_fee: number;
+  return_delivery_fee: number;
+  exchange_delivery_fee: number;
+  bundle_delivery: string | null;
+  category1: string | null;
+  category2: string | null;
+  category3: string | null;
+  category4: string | null;
+  manufacturer: string | null;
+  brand_name: string | null;
+  model_name: string | null;
+  naver_shopping_registered: string | null;
+  seller_barcode: string | null;
+  internal_code1: string | null;
+  internal_code2: string | null;
+  registered_at: string | null;
+  last_modified_at: string | null;
+  // 마스터 변경 추적
+  has_pending_changes: number;
+  pending_change_groups: string;
+  pending_change_count: number;
+  master_price: number | null;
+  master_sale_status: number | null;
+  price_diff: number;
+  status_mismatch: number;
+  restock_checked: number;
+  restock_at: string | null;
+  restock_price_changed: number;
+  restock_reverse_margin: number;
   synced_at: string;
   created_at: string;
   updated_at: string | null;
@@ -45,6 +82,12 @@ export interface ProductStats {
   ss_sold_count: number;
   sold_by_status: Record<string, number>;
   ss_sold_by_status: Record<string, number>;
+  changes_count: number;
+  status_mismatch_count: number;
+  field_changes_count: number;
+  reverse_margin_count: number;
+  restock_unchecked_count: number;
+  no_master_count: number;
   last_synced_at: string | null;
 }
 
@@ -67,6 +110,10 @@ export async function fetchProducts(
   sortBy?: string,
   sortDir?: string,
   minSsAmount?: number,
+  hasChanges?: number,
+  reverseMargin?: number,
+  restockUnchecked?: number,
+  noMaster?: number,
 ): Promise<ProductListResponse> {
   const params: Record<string, string | number> = { store_id: storeId, page, per_page: perPage };
   if (status) params.status = status;
@@ -77,6 +124,10 @@ export async function fetchProducts(
   if (sortBy) params.sort_by = sortBy;
   if (sortDir) params.sort_dir = sortDir;
   if (minSsAmount !== undefined) params.min_ss_amount = minSsAmount;
+  if (hasChanges !== undefined) params.has_changes = hasChanges;
+  if (reverseMargin !== undefined) params.reverse_margin = reverseMargin;
+  if (restockUnchecked !== undefined) params.restock_unchecked = restockUnchecked;
+  if (noMaster !== undefined) params.no_master = noMaster;
   // 검색어가 길면 POST로 전환 (URL 길이 제한 회피)
   if (search && search.length > 200) {
     const { data } = await api.post<ProductListResponse>('/search/', params);
@@ -132,32 +183,19 @@ export async function downloadProductExcel(
     search?: string; hasOrders?: boolean; isFocus?: boolean;
     sortBy?: string; sortDir?: string;
   },
-  onProgress?: (pct: number) => void,
+  _onProgress?: (pct: number) => void,
 ): Promise<void> {
   const qs = _buildParams(params);
-  const { data, headers } = await api.get(`/excel/?${qs}`, {
-    responseType: 'blob',
-    onDownloadProgress: (e) => {
-      if (onProgress && e.total && e.total > 0) {
-        onProgress(Math.round((e.loaded / e.total) * 100));
-      } else if (onProgress && e.loaded) {
-        onProgress(-1);
-      }
-    },
-  });
+  // 브라우저 다운로드로 직접 열기 (저장 위치 선택 가능)
+  window.open(`/api/smartstore/products/excel/?${qs}`, '_blank');
+}
 
-  const cd = headers['content-disposition'] || '';
-  const match = cd.match(/filename\*?=(?:UTF-8'')?(.+)/i);
-  const filename = match ? decodeURIComponent(match[1]) : '스마트스토어_상품목록.xlsx';
-
-  const url = URL.createObjectURL(data as Blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
+export async function fetchProductCount(
+  params: { storeIds?: number[]; statuses?: string[]; wOnly?: boolean },
+): Promise<number> {
+  const qs = _buildParams(params);
+  const { data } = await api.get<{ count: number }>(`/count/?${qs}`);
+  return data.count;
 }
 
 export async function fetchWCodes(
@@ -175,6 +213,19 @@ export async function fetchWCodes(
     },
   });
   return data.codes;
+}
+
+export async function toggleRestockChecked(productIds: number[], checked: number): Promise<{ updated: number }> {
+  const { data } = await api.post<{ updated: number }>('/restock-check/', {
+    product_ids: productIds,
+    checked,
+  });
+  return data;
+}
+
+export async function refreshTracking(storeId = 0): Promise<{ refreshed: number }> {
+  const { data } = await api.post<{ refreshed: number }>('/refresh-tracking/', { store_id: storeId });
+  return data;
 }
 
 // ── 주문이력 ──
@@ -264,6 +315,223 @@ export async function suspendProducts(
     product_ids: productIds,
     select_all: selectAll,
     filters,
+  });
+  return data;
+}
+
+export async function fetchOrphanWCodes(
+  storeIds?: number[],
+): Promise<{ codes: string[]; count: number }> {
+  const sp = new URLSearchParams();
+  if (storeIds) storeIds.forEach(id => sp.append('store_ids', String(id)));
+  const { data } = await api.get<{ codes: string[]; count: number }>(`/orphan-wcodes/?${sp.toString()}`);
+  return data;
+}
+
+// ── 전상품 API 검증 ──
+
+export interface AuditStatus {
+  running: boolean;
+  progress_pct: number;
+  checked: number;
+  total: number;
+  match: number;
+  mismatch: number;
+  fixed: number;
+  closed: number;
+  errors: number;
+  current_api_key: string;
+  logs: string[];
+  elapsed: number;
+  audit_log_id: number;
+}
+
+export interface AuditLog {
+  id: number;
+  started_at: string;
+  completed_at: string | null;
+  source: string;
+  total_target: number;
+  checked: number;
+  match_count: number;
+  mismatch_count: number;
+  fixed_count: number;
+  api_error_count: number;
+  closed_count: number;
+  by_api_key: Record<string, { total: number; match: number; mismatch: number; closed: number; errors: number }> | null;
+  elapsed_sec: number;
+}
+
+export interface AuditLogDetail {
+  summary: { action: string; cnt: number }[];
+  changes: {
+    id: number;
+    origin_product_no: number;
+    seller_management_code: string;
+    store_name: string;
+    db_status: string;
+    api_status: string;
+    action: string;
+    new_status: string;
+    error_detail: string | null;
+    checked_at: string;
+  }[];
+}
+
+export async function startAudit(source: 'api' | 'ownerclan' = 'api'): Promise<{ ok: boolean; message: string }> {
+  const { data } = await api.post<{ ok: boolean; message: string }>('/audit/start/', { source });
+  return data;
+}
+
+export async function getAuditStatus(): Promise<AuditStatus> {
+  const { data } = await api.get<AuditStatus>('/audit/status/');
+  return data;
+}
+
+export async function stopAudit(): Promise<void> {
+  await api.post('/audit/stop/');
+}
+
+export async function getAuditLogs(limit = 20): Promise<AuditLog[]> {
+  const { data } = await api.get<AuditLog[]>('/audit/logs/', { params: { limit } });
+  return data;
+}
+
+export async function getAuditLogDetail(id: number): Promise<AuditLogDetail> {
+  const { data } = await api.get<AuditLogDetail>(`/audit/logs/${id}/`);
+  return data;
+}
+
+
+// ── 0마진 처리 ──
+
+export interface ZeroMarginPreviewItem {
+  origin_product_no: number;
+  name: string;
+  store_name: string;
+  sale_price: number;
+  master_price: number;
+  settle: number;
+  margin: number;
+  new_price: number;
+  new_margin: number;
+}
+
+export interface ZeroMarginPreviewResult {
+  count: number;
+  items: ZeroMarginPreviewItem[];
+}
+
+export interface ZeroMarginUpdateResult {
+  total: number;
+  success: number;
+  fail: number;
+  items: {
+    origin_product_no: number;
+    name: string;
+    old_price: number;
+    new_price: number;
+    ok: boolean;
+    error?: string;
+  }[];
+}
+
+export async function fetchZeroMarginPreview(storeId = 0): Promise<ZeroMarginPreviewResult> {
+  const { data } = await api.get<ZeroMarginPreviewResult>('/zero-margin/preview/', {
+    params: storeId ? { store_id: storeId } : {},
+  });
+  return data;
+}
+
+export async function executeZeroMarginUpdate(storeId = 0): Promise<ZeroMarginUpdateResult> {
+  const { data } = await api.post<ZeroMarginUpdateResult>('/zero-margin/update/', {
+    store_id: storeId,
+  });
+  return data;
+}
+
+export interface ZeroMarginLog {
+  id: number;
+  total: number;
+  success_count: number;
+  fail_count: number;
+  total_diff: number;
+  created_at: string;
+}
+
+export interface ZeroMarginLogItem {
+  origin_product_no: number;
+  name: string;
+  store_name: string;
+  old_price: number;
+  new_price: number;
+  master_price: number;
+  ok: number;
+  error_msg: string | null;
+}
+
+export async function fetchZeroMarginLogs(limit = 20): Promise<ZeroMarginLog[]> {
+  const { data } = await api.get<ZeroMarginLog[]>('/zero-margin/logs/', { params: { limit } });
+  return data;
+}
+
+export async function fetchZeroMarginLogDetail(id: number): Promise<{ items: ZeroMarginLogItem[] }> {
+  const { data } = await api.get<{ items: ZeroMarginLogItem[] }>(`/zero-margin/logs/${id}/`);
+  return data;
+}
+
+// ── 상품 편집 ──
+
+export interface ProductFullDetail {
+  origin_product_no: number;
+  store_id: number;
+  store_name: string;
+  name: string;
+  status_type: string;
+  sale_type: string;
+  sale_price: number;
+  stock_quantity: number;
+  leaf_category_id: string;
+  detail_content: string;
+  representative_image: { url?: string } | null;
+  optional_images: { url?: string }[];
+  origin_area: { originAreaCode?: string; content?: string };
+  after_service: { tel?: string; guide?: string };
+  delivery_info: Record<string, any>;
+  seller_tags: { text?: string }[];
+  tax_type: string;
+  option_info: Record<string, any>;
+  product_info_notice: Record<string, any>;
+}
+
+export async function fetchProductFullDetail(
+  opno: number, storeId: number,
+): Promise<ProductFullDetail> {
+  const { data } = await api.get<ProductFullDetail>(`/${opno}/detail/`, {
+    params: { store_id: storeId },
+  });
+  return data;
+}
+
+export async function updateProduct(
+  opno: number, storeId: number, updates: Record<string, any>,
+): Promise<{ ok: boolean; origin_product_no: number }> {
+  const { data } = await api.put(`/${opno}/update/`, { store_id: storeId, updates });
+  return data;
+}
+
+export async function uploadProductImage(
+  storeId: number, imageFile: File, onProgress?: (pct: number) => void,
+): Promise<{ url: string }> {
+  const form = new FormData();
+  form.append('store_id', String(storeId));
+  form.append('image', imageFile);
+  const { data } = await api.post<{ url: string }>('/upload-image/', form, {
+    timeout: 60000,
+    onUploadProgress: (e) => {
+      if (onProgress && e.total && e.total > 0)
+        onProgress(Math.round((e.loaded / e.total) * 100));
+    },
   });
   return data;
 }

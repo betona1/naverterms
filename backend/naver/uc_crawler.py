@@ -71,24 +71,7 @@ def stop():
 # 데이터 추출
 # ══════════════════════════════════════════
 
-def _find_sr(data, depth=0):
-    """JSON에서 shoppingResult 찾기"""
-    if not data or not isinstance(data, (dict, list)) or depth > 12:
-        return None
-    if isinstance(data, dict):
-        if 'shoppingResult' in data and isinstance(data['shoppingResult'].get('products'), list):
-            return data['shoppingResult']
-        if 'products' in data and isinstance(data['products'], list) and data['products']:
-            p = data['products'][0]
-            if isinstance(p, dict) and ('productName' in p or 'productTitle' in p or 'mallName' in p):
-                return data
-    items = data if isinstance(data, list) else (data.values() if isinstance(data, dict) else [])
-    for v in items:
-        if isinstance(v, (dict, list)):
-            r = _find_sr(v, depth + 1)
-            if r:
-                return r
-    return None
+from .crawl_utils import find_shopping_result as _find_sr, save_search_result as _save_common
 
 
 def _extract_next_data(driver):
@@ -171,33 +154,9 @@ def _click_exact_search(driver):
 # ══════════════════════════════════════════
 
 def _save(keyword_text, tab_type, sr):
-    from .models import NaverKeyword, NaverSearchSnapshot
-
+    _save_common(keyword_text, tab_type, sr, source='uc')
     products = sr.get('products', [])[:40]
     total = sr.get('total', 0)
-    terms = sr.get('terms', [])
-    term_count = sr.get('termCount', 0)
-    query = sr.get('query', keyword_text)
-
-    kw, _ = NaverKeyword.objects.get_or_create(keyword=query or keyword_text)
-    kw.last_searched_at = timezone.now()
-
-    if terms:
-        kw.terms = terms
-        kw.term_count = term_count or len(terms)
-
-    if tab_type == 'total':
-        kw.total_count = total
-    elif tab_type == 'checkout':
-        kw.naverpay_count = total
-    elif tab_type == 'model':
-        kw.price_compare_count = total
-    kw.save()
-
-    NaverSearchSnapshot.objects.create(
-        keyword=kw, tab_type=tab_type,
-        products=products, total=total,
-    )
     _log(f'  [{TAB_NAME[tab_type]}] 저장OK — {len(products)}개 total={total}')
     return True
 

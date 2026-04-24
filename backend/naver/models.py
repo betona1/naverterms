@@ -64,8 +64,12 @@ class NaverRankTarget(models.Model):
     target_value = models.CharField(max_length=200)
     display_name = models.CharField(max_length=200, blank=True, default='')
     is_active = models.BooleanField(default=True)
+    auto_track = models.BooleanField(default=False)
+    auto_track_times = models.JSONField(default=list, blank=True)  # ["09:00","13:00","18:00"]
     source_product_id = models.IntegerField(null=True, blank=True)
     source_product_name = models.CharField(max_length=500, blank=True, default='')
+    matched_product_id = models.CharField(max_length=50, blank=True, default='')
+    matched_product_name = models.CharField(max_length=500, blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -141,3 +145,21 @@ class KeywordEnrichCache(models.Model):
 
     class Meta:
         db_table = 'naver_keyword_enrich_cache'
+
+
+class NaverReport(models.Model):
+    REPORT_TYPES = [
+        ('monthly', '월간보고서'),
+        ('analysis', '분석'),
+    ]
+    title = models.CharField(max_length=300)
+    content = models.TextField()
+    report_type = models.CharField(max_length=50, choices=REPORT_TYPES, default='monthly')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'naver_report'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return self.title

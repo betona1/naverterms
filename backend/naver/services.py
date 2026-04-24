@@ -218,6 +218,126 @@ def get_tag_statistics(keyword_id):
 
 
 # ══════════════════════════════════════════
+# 공식 API 상품 → 크롤링 형식 변환
+# ══════════════════════════════════════════
+
+def _map_api_to_crawl_format(item):
+    """공식 API items[] → 크롤링 products[] 형식 변환"""
+    title = re.sub(r'<[^>]+>', '', item.get('title', ''))
+    return {
+        'productName': title,
+        'lowPrice': item.get('lprice', ''),
+        'mallName': item.get('mallName', ''),
+        'imageUrl': item.get('image', ''),
+        'productUrl': item.get('link', ''),
+        'category1Name': item.get('category1', ''),
+        'category2Name': item.get('category2', ''),
+        'category3Name': item.get('category3', ''),
+        'category4Name': item.get('category4', ''),
+        'maker': item.get('maker', ''),
+        'brand': item.get('brand', ''),
+        'productId': item.get('productId', ''),
+        'productType': item.get('productType', ''),
+        'manuTag': '',
+        'attributeValue': '',
+        'characterValue': '',
+        'reviewCount': 0,
+        'openDate': '',
+        'scoreInfo': '',
+        '_source': 'api',
+    }
+
+
+def fetch_products_via_api(keyword, max_items=40):
+    """공식 네이버 쇼핑 API로 상품 수집 (차단 위험 없음)"""
+    data = _naver_search(keyword, display=min(max_items, 100), start=1)
+    items = data.get('items', [])
+    total = data.get('total', 0)
+    products = [_map_api_to_crawl_format(item) for item in items[:max_items]]
+    return {'products': products, 'total': total}
+
+
+def run_smart_analysis(keyword_id, method='auto'):
+    """스마트 분석: 자동 fallback 지원
+
+    method:
+      'auto' — HTTP 크롤링 시도 → 차단 시 API fallback
+      'api'  — 공식 API + 캐시된 terms
+      'http' — HTTP 크롤링만
+
+    반환: {'analysis': NaverTermAnalysis, 'method_used': str, 'terms_source': str, 'products_source': str}
+    """
+    from . import http_crawler
+
+    kw = NaverKeyword.objects.get(id=keyword_id)
+    terms = kw.terms or []
+    result_info = {'method_used': method, 'terms_source': None, 'products_source': None}
+
+    if method in ('auto', 'http'):
+        # HTTP 크롤링 시도
+        session = http_crawler._get_session()
+        sr = http_crawler.fetch_keyword(session, kw.keyword, 'total')
+
+        if sr and not sr.get('blocked') and sr.get('products'):
+            # HTTP 성공 → 저장 + 분석
+            from . import crawl_utils
+            crawl_utils.save_search_result(kw.keyword, 'total', sr, source='http')
+            kw.refresh_from_db()
+            result_info['terms_source'] = 'http'
+            result_info['products_source'] = 'http'
+            result_info['method_used'] = 'http'
+            analysis = run_full_analysis(keyword_id)
+            return {**result_info, 'analysis': analysis}
+
+        if sr and sr.get('blocked') and method == 'http':
+            # HTTP만 요청했는데 차단 → 실패
+            return {**result_info, 'analysis': None, 'blocked': True}
+
+        # auto이고 차단/실패 → API fallback
+        if method == 'auto':
+            logger.info(f'[Smart] HTTP 실패/차단 → API fallback: "{kw.keyword}"')
+
+    # API 모드 (method='api' 또는 auto의 fallback)
+    result_info['method_used'] = 'api'
+
+    # terms 캐시 확인
+    if not terms:
+        result_info['terms_source'] = 'missing'
+    else:
+        result_info['terms_source'] = 'cache'
+
+    # products는 공식 API로 수집
+    try:
+        api_data = fetch_products_via_api(kw.keyword, max_items=40)
+        products = api_data['products']
+        total = api_data['total']
+        result_info['products_source'] = 'api'
+    except Exception as e:
+        logger.error(f'[Smart] API 실패: "{kw.keyword}" — {e}')
+        return {**result_info, 'analysis': None, 'error': str(e)}
+
+    if not products:
+        return {**result_info, 'analysis': None}
+
+    # 스냅샷 저장
+    NaverSearchSnapshot.objects.create(
+        keyword=kw, tab_type='total',
+        products=products, total=total,
+    )
+    kw.total_count = total
+    kw.last_searched_at = timezone.now()
+    kw.save(update_fields=['total_count', 'last_searched_at'])
+
+    if not terms:
+        # terms 없으면 가중치 분석 불가 — products만 저장됨
+        return {**result_info, 'analysis': None, 'need_terms': True}
+
+    # 가중치 분석 실행
+    analysis = run_full_analysis(keyword_id)
+    return {**result_info, 'analysis': analysis}
+
+
+# ══════════════════════════════════════════
 # 연관키워드 — 네이버 검색광고 API
 # ══════════════════════════════════════════
 
@@ -330,7 +450,13 @@ def run_rank_tracking(target_ids=None):
                     if target.target_type == 'store':
                         match = (item.get('mallName', '').strip() == target.target_value.strip())
                     elif target.target_type == 'product_id':
-                        match = (str(item.get('productId', '')) == str(target.target_value))
+                        tv = str(target.target_value).strip()
+                        # productId 매칭
+                        if str(item.get('productId', '')) == tv:
+                            match = True
+                        # link URL에 상품번호 포함 매칭
+                        elif tv in item.get('link', ''):
+                            match = True
 
                     if match:
                         rank = idx + 1
@@ -341,6 +467,19 @@ def run_rank_tracking(target_ids=None):
                 product_name = ''
                 if found:
                     product_name = re.sub(r'<[^>]+>', '', found.get('title', ''))
+
+                # 매칭된 상품 정보를 타겟에 저장 (상품별 그룹핑용)
+                if found:
+                    pid = str(found.get('productId', ''))
+                    update_fields = []
+                    if pid and target.matched_product_id != pid:
+                        target.matched_product_id = pid
+                        update_fields.append('matched_product_id')
+                    if product_name and target.matched_product_name != product_name:
+                        target.matched_product_name = product_name
+                        update_fields.append('matched_product_name')
+                    if update_fields:
+                        target.save(update_fields=update_fields)
 
                 history = NaverRankHistory.objects.create(
                     target=target,
@@ -422,7 +561,8 @@ def _fetch_category_keyword_rank_live(cid, start_date, end_date, age='', gender=
     }
 
     while page_num <= max_pages:
-        for attempt in range(3):
+        resp = None
+        for attempt in range(5):
             resp = http_requests.post(
                 _DATALAB_KEYWORD_RANK_URL,
                 headers=post_headers,
@@ -435,8 +575,11 @@ def _fetch_category_keyword_rank_live(cid, start_date, end_date, age='', gender=
                 timeout=15,
             )
             if resp.status_code == 429:
-                time.sleep(1 * (attempt + 1))
+                time.sleep(2 * (attempt + 1))
                 continue
+            break
+        if resp is None or resp.status_code == 429:
+            # 429 지속 → 여기까지 수집한 데이터라도 반환
             break
         if resp.status_code != 200:
             raise Exception(f'DataLab keyword rank API error: {resp.status_code}')
@@ -448,7 +591,7 @@ def _fetch_category_keyword_rank_live(cid, start_date, end_date, age='', gender=
         if len(ranks) < 20:
             break
         page_num += 1
-        time.sleep(0.2)
+        time.sleep(0.5)
 
     return all_ranks[:max_count]
 

@@ -11,9 +11,11 @@ const NAV_ITEMS = [
   { key: 'analytics', label: '스토어분석', color: '#10b981' },
   { key: 'terms', label: 'Term 분석', color: '#0078d7' },
   { key: 'rank', label: '순위추적', color: '#f59e0b' },
+  { key: 'cunning', label: '순위컨닝', color: '#ec4899' },
   { key: 'keywords', label: '연관키워드', color: '#06b6d4' },
   { key: 'catkeywords', label: '카테고리키워드', color: '#e879f9' },
   { key: 'ownerclan', label: '오너클랜상품', color: '#ff6b35' },
+  { key: 'reports', label: '보고서', color: '#ef4444' },
   { key: 'extension', label: '도우미프로그램', color: '#8b5cf6' },
 ] as const;
 
@@ -26,7 +28,7 @@ export default function TopNav({ page, onPageChange, onStoreSettings, dark, onTo
           <div className="w-6 h-6 rounded flex items-center justify-center text-white font-bold text-[11px]"
                style={{ background: '#03c75a' }}>N</div>
           <span className={`font-bold text-[13px] ${dark ? 'text-white' : 'text-gray-900'}`}>
-            Term 분석기
+            스스상품관리
           </span>
         </div>
 

@@ -1,19 +1,20 @@
-// background.js v2.2.0 — 통합 서비스 워커
-// 네이버 Term 분석 + 순위추적 + 로하스 수집 + 지마켓 순위추적
+// background.js v3.0.0 — 내부/외부 모드 통합 서비스 워커
+// 내부용: Django API 연동 (DB 저장)
+// 외부용: chrome.storage.local 저장 + CSV 내보내기
 'use strict';
 
-// 로하스 / 지마켓 모듈 로드
 importScripts('bg_lohas.js', 'bg_gmarket.js');
 
 // ══════════════════════════════════════════
-// 네이버 Term 분석 + 순위추적
+// 설정
 // ══════════════════════════════════════════
-
-const API = 'http://192.168.219.100:8901/api/naver';
+const INTERNAL_API = 'http://192.168.219.100:8901/api/naver';
 const TAB_ORDER = ['total', 'model', 'checkout'];
 const RANK_TAB_ORDER = ['total'];
 const TAB_NAME = { total: '전체', model: '가격비교', checkout: '네이버페이' };
+const BREAK_EVERY = 5; // N개 키워드마다 휴식
 
+let saveMode = 'external'; // 'internal' | 'external'
 let mode = 'term'; // 'term' | 'rank'
 let queue = [];
 let qIdx = -1;
@@ -33,7 +34,15 @@ function log(msg) {
   if (logs.length > 300) logs.splice(0, 100);
 }
 
-// ── 메시지 (네이버) ──
+// 모드 로드
+chrome.storage.local.get('saveMode', r => {
+  if (r.saveMode) saveMode = r.saveMode;
+  log(`모드: ${saveMode === 'internal' ? '내부용' : '외부용'}`);
+});
+
+// ══════════════════════════════════════════
+// 메시지 핸들러
+// ══════════════════════════════════════════
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   switch (msg.type) {
     case 'NAVER_START_TERM_SEARCH':
@@ -69,8 +78,25 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
       resumeAfterCaptcha();
       reply({ ok: true });
       return false;
+    case 'SET_SAVE_MODE':
+      saveMode = msg.mode || 'external';
+      chrome.storage.local.set({ saveMode });
+      log(`모드 변경: ${saveMode === 'internal' ? '내부용' : '외부용'}`);
+      reply({ ok: true, mode: saveMode });
+      return false;
+    case 'GET_SAVE_MODE':
+      reply({ mode: saveMode });
+      return false;
+    case 'GET_RESULTS':
+      getStoredResults().then(r => reply(r));
+      return true; // async
+    case 'CLEAR_RESULTS':
+      clearStoredResults().then(() => reply({ ok: true }));
+      return true;
+    case 'EXPORT_CSV':
+      getStoredResults().then(r => reply(r));
+      return true;
   }
-  // 네이버 메시지가 아니면 다음 리스너로 전달
 });
 
 // ══════════════════════════════════════════
@@ -85,7 +111,7 @@ function start(keywords) {
     keyword: kw, tabsDone: [], tabIdx: 0, status: 'pending',
   }));
   qIdx = -1;
-  log(`── ${keywords.length}개 키워드 시작 ──`);
+  log(`── ${keywords.length}개 키워드 시작 (${saveMode === 'internal' ? '내부용' : '외부용'}) ──`);
   chrome.alarms.create('crawlKeepAlive', { periodInMinutes: 0.5 });
   nextKeyword();
 }
@@ -95,14 +121,11 @@ function startRankTracking(targets) {
   logs.length = 0;
   logSeq = 0;
   mode = 'rank';
-
-  // 키워드별로 타겟 그룹핑
   const kwMap = {};
   for (const t of targets) {
     if (!kwMap[t.keyword]) kwMap[t.keyword] = [];
     kwMap[t.keyword].push(t);
   }
-
   queue = Object.keys(kwMap).map(kw => ({
     keyword: kw, tabsDone: [], tabIdx: 0, status: 'pending',
     targets: kwMap[kw],
@@ -124,6 +147,22 @@ function nextKeyword() {
     notifyComplete();
     return;
   }
+
+  // 5개마다 휴식
+  if (qIdx > 0 && qIdx % BREAK_EVERY === 0) {
+    const breakMs = 30000 + Math.random() * 30000;
+    log(`  ☕ ${Math.round(breakMs / 1000)}초 휴식 (${qIdx}/${queue.length})`);
+    setTimeout(() => {
+      processing = true;
+      const item = queue[qIdx];
+      item.status = 'active';
+      item.tabIdx = 0;
+      log(`[${qIdx + 1}/${queue.length}] "${item.keyword}"`);
+      navigateToTab();
+    }, breakMs);
+    return;
+  }
+
   processing = true;
   const item = queue[qIdx];
   item.status = 'active';
@@ -132,7 +171,6 @@ function nextKeyword() {
   navigateToTab();
 }
 
-// ── ★ 핵심: URL 이동으로 탭별 데이터 수집 ──
 function navigateToTab() {
   const item = queue[qIdx];
   const tabs = mode === 'rank' ? RANK_TAB_ORDER : TAB_ORDER;
@@ -149,7 +187,7 @@ function navigateToTab() {
 
   if (naverTab) {
     chrome.tabs.update(naverTab, { url, active: true })
-      .then(() => setTimer(12000))
+      .then(() => setTimer(20000))
       .catch(e => {
         log(`  ⚠ 탭 업데이트 실패: ${e.message}`);
         naverTab = null;
@@ -162,18 +200,19 @@ function navigateToTab() {
 
 function createTab(url) {
   chrome.tabs.create({ url, active: true })
-    .then(tab => { naverTab = tab.id; setTimer(12000); })
+    .then(tab => { naverTab = tab.id; setTimer(20000); })
     .catch(e => { log(`  ⚠ 탭 생성 실패: ${e.message}`); skipTab(); });
 }
 
-// ── 페이지 로드 완료 ──
 function onPageReady(tabId) {
   if (tabId !== naverTab || !waitingData) return;
   log('  페이지 로드 완료');
-  setTimer(5000);
+  setTimer(8000);
 }
 
-// ── ★ 데이터 수신 ──
+// ══════════════════════════════════════════
+// 데이터 수신 + 저장
+// ══════════════════════════════════════════
 async function onData(msg) {
   if (!waitingData || qIdx < 0 || qIdx >= queue.length) return;
   const item = queue[qIdx];
@@ -181,8 +220,6 @@ async function onData(msg) {
   if (!products.length) { log('  (상품 0개 무시)'); return; }
 
   const dataTab = msg.productSet || 'total';
-
-  // ★ BUG FIX: productSet 검증 — 이전 탭의 지연 데이터 무시
   const tabs = mode === 'rank' ? RANK_TAB_ORDER : TAB_ORDER;
   const expectedTab = tabs[item.tabIdx];
   if (dataTab !== expectedTab) {
@@ -192,41 +229,63 @@ async function onData(msg) {
 
   waitingData = false;
   clr();
-
   if (!item.tabsDone.includes(dataTab)) item.tabsDone.push(dataTab);
 
   if (mode === 'rank') {
     log(`  ★ [${TAB_NAME[dataTab]}] ${products.length}개 — 순위 검색`);
     await processRankResults(item, products, dataTab, msg.total || 0);
   } else {
-    log(`  ★ [${TAB_NAME[dataTab]}] ${products.length}개 total=${msg.total || 0} terms=${(msg.terms||[]).length}`);
-    // Django 저장
-    try {
-      const r = await fetch(`${API}/ext/search-result/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          keyword: item.keyword,
-          tab_type: dataTab,
-          products: products.slice(0, 40),
-          total: msg.total || 0,
-          terms: msg.terms || [],
-          term_count: msg.termCount || 0,
-        })
-      });
-      log(`  [${TAB_NAME[dataTab]}] ${r.ok ? '저장OK' : 'Django실패 ' + r.status}`);
-    } catch (e) {
-      log(`  [${TAB_NAME[dataTab]}] Django실패`);
-    }
+    log(`  ★ [${TAB_NAME[dataTab]}] ${products.length}개 total=${msg.total || 0} terms=${(msg.terms || []).length}`);
+    await saveTermData(item.keyword, dataTab, products.slice(0, 40), msg.total || 0, msg.terms || [], msg.termCount || 0);
   }
 
-  // 다음 탭
+  // 다음 탭 (딜레이 강화: 4~8초)
   item.tabIdx++;
-  const delay = 1500 + Math.random() * 2000;
+  const delay = 4000 + Math.random() * 4000;
   setTimeout(() => navigateToTab(), delay);
 }
 
-// ── ★ 순위추적: 상품 매칭 + Django 저장 ──
+// ── 모드별 저장 ──
+async function saveTermData(keyword, tabType, products, total, terms, termCount) {
+  if (saveMode === 'internal') {
+    // Django API POST
+    try {
+      const r = await fetch(`${INTERNAL_API}/ext/search-result/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keyword, tab_type: tabType, products, total, terms, term_count: termCount })
+      });
+      log(`  [${TAB_NAME[tabType]}] ${r.ok ? '저장OK' : 'Django실패 ' + r.status}`);
+    } catch (e) {
+      log(`  [${TAB_NAME[tabType]}] Django실패`);
+    }
+  } else {
+    // chrome.storage.local 저장
+    try {
+      const storageKey = `term_${keyword}_${tabType}`;
+      const entry = { keyword, tabType, products, total, terms, termCount, timestamp: Date.now() };
+      await chrome.storage.local.set({ [storageKey]: entry });
+
+      // 키워드 인덱스 업데이트
+      const idx = await chrome.storage.local.get('_keyword_index');
+      const kwIndex = idx._keyword_index || [];
+      const existing = kwIndex.find(k => k.keyword === keyword);
+      if (existing) {
+        if (!existing.tabs.includes(tabType)) existing.tabs.push(tabType);
+        existing.lastUpdated = Date.now();
+      } else {
+        kwIndex.push({ keyword, tabs: [tabType], lastUpdated: Date.now() });
+      }
+      await chrome.storage.local.set({ _keyword_index: kwIndex });
+
+      log(`  [${TAB_NAME[tabType]}] 로컬저장OK`);
+    } catch (e) {
+      log(`  [${TAB_NAME[tabType]}] 로컬저장실패: ${e.message}`);
+    }
+  }
+}
+
+// ── 순위추적 (항상 Django API) ──
 async function processRankResults(item, products, tabType, totalResults) {
   const targets = item.targets || [];
   for (const target of targets) {
@@ -241,49 +300,83 @@ async function processRankResults(item, products, tabType, totalResults) {
       } else if (target.target_type === 'product_id') {
         match = String(p.nvMid || p.id || '') === String(target.target_value);
       }
-      if (match) {
-        rank = i + 1;
-        foundProduct = p;
-        break;
-      }
+      if (match) { rank = i + 1; foundProduct = p; break; }
     }
 
-    log(`  📊 [${target.target_value}] ${rank ? rank + '위' : '미발견 (40위 밖)'}`);
+    log(`  [${target.target_value}] ${rank ? rank + '위' : '미발견'}`);
 
-    // 앱 탭에 진행상황 전달
     if (appTab) {
       chrome.tabs.sendMessage(appTab, {
         type: 'NAVER_TRACKING_PROGRESS',
         keyword: item.keyword,
         target_value: target.target_value,
-        rank: rank,
+        rank,
         current: qIdx + 1,
         total: queue.length,
       }).catch(() => {});
     }
 
-    // Django 저장
-    try {
-      const r = await fetch(`${API}/ext/rank-result/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          target_id: target.target_id,
-          rank_position: rank,
-          tab_type: tabType,
-          total_results: totalResults,
-          found_product_name: foundProduct?.productName || foundProduct?.productTitle || '',
-          found_product_price: foundProduct ? parseInt(foundProduct.lowPrice || foundProduct.price || '0', 10) || null : null,
-          found_review_count: foundProduct ? (foundProduct.reviewCount || 0) : null,
-        })
-      });
-      log(`  [${target.target_value}] ${r.ok ? '저장OK' : 'Django실패 ' + r.status}`);
-    } catch (e) {
-      log(`  [${target.target_value}] Django실패`);
+    if (saveMode === 'internal') {
+      try {
+        const r = await fetch(`${INTERNAL_API}/ext/rank-result/`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            target_id: target.target_id,
+            rank_position: rank,
+            tab_type: tabType,
+            total_results: totalResults,
+            found_product_name: foundProduct?.productName || foundProduct?.productTitle || '',
+            found_product_price: foundProduct ? parseInt(foundProduct.lowPrice || foundProduct.price || '0', 10) || null : null,
+            found_review_count: foundProduct ? (foundProduct.reviewCount || 0) : null,
+          })
+        });
+        log(`  [${target.target_value}] ${r.ok ? '저장OK' : 'Django실패 ' + r.status}`);
+      } catch (e) {
+        log(`  [${target.target_value}] Django실패`);
+      }
     }
   }
 }
 
+// ══════════════════════════════════════════
+// 로컬 데이터 관리 (외부용)
+// ══════════════════════════════════════════
+async function getStoredResults() {
+  const idx = await chrome.storage.local.get('_keyword_index');
+  const kwIndex = idx._keyword_index || [];
+  const results = [];
+
+  for (const kw of kwIndex) {
+    const kwData = { keyword: kw.keyword, tabs: {}, lastUpdated: kw.lastUpdated };
+    for (const tab of kw.tabs) {
+      const key = `term_${kw.keyword}_${tab}`;
+      const data = await chrome.storage.local.get(key);
+      if (data[key]) {
+        kwData.tabs[tab] = data[key];
+      }
+    }
+    results.push(kwData);
+  }
+  return { results, count: results.length };
+}
+
+async function clearStoredResults() {
+  const idx = await chrome.storage.local.get('_keyword_index');
+  const kwIndex = idx._keyword_index || [];
+  const keys = ['_keyword_index'];
+  for (const kw of kwIndex) {
+    for (const tab of kw.tabs) {
+      keys.push(`term_${kw.keyword}_${tab}`);
+    }
+  }
+  await chrome.storage.local.remove(keys);
+  log('로컬 데이터 초기화 완료');
+}
+
+// ══════════════════════════════════════════
+// 진행 관리
+// ══════════════════════════════════════════
 function skipTab() {
   if (qIdx < 0 || qIdx >= queue.length) return;
   const item = queue[qIdx];
@@ -302,7 +395,8 @@ function finishKeyword() {
   log(`  ✓ "${item.keyword}" 완료 (${tabs || '없음'})`);
   item.status = 'done';
   processing = false;
-  const delay = 2000 + Math.random() * 3000;
+  // 키워드 간 딜레이 강화: 8~15초
+  const delay = 8000 + Math.random() * 7000;
   log(`  ${Math.round(delay / 1000)}초 후 다음`);
   setTimeout(() => nextKeyword(), delay);
 }
@@ -334,7 +428,7 @@ function setTimer(ms) {
       log(`  [${TAB_NAME[tabKey]}] 타임아웃 → 새로고침`);
       if (naverTab) {
         chrome.tabs.reload(naverTab).catch(() => {});
-        setTimer(8000);
+        setTimer(12000);
       } else { skipTab(); }
     } else {
       log(`  [${TAB_NAME[tabKey]}] 2회 실패 → 스킵`);
@@ -352,7 +446,7 @@ function pauseForCaptcha() {
   if (captchaPaused) return;
   captchaPaused = true;
   clr();
-  log('⏸ CAPTCHA — 일시정지');
+  log('⏸ CAPTCHA — 수동으로 해결해주세요');
 }
 
 function resumeAfterCaptcha() {
@@ -379,15 +473,14 @@ function cancel() {
 // 상태
 // ══════════════════════════════════════════
 function getStatus(since) {
-  let steps = 0;
   const tabCount = mode === 'rank' ? 1 : 3;
-  for (const q of queue) {
-    steps += q.tabsDone.length;
-  }
+  let steps = 0;
+  for (const q of queue) steps += q.tabsDone.length;
   const cur = qIdx >= 0 && qIdx < queue.length ? queue[qIdx] : null;
   return {
     running: processing,
     mode,
+    saveMode,
     total: queue.length,
     done: queue.filter(q => q.status === 'done').length,
     steps, totalSteps: queue.length * tabCount,
@@ -407,7 +500,7 @@ chrome.tabs.onUpdated.addListener((id, ci, tab) => {
     appTab = id;
   }
   if (id === naverTab && ci.url) {
-    if (ci.url.includes('nid.naver.com') || ci.url.includes('captcha')) {
+    if (ci.url.includes('nid.naver.com') || ci.url.includes('captcha') || ci.url.includes('wtm_captcha')) {
       log('⚠ 로그인/CAPTCHA 리다이렉트');
       pauseForCaptcha();
     } else if (captchaPaused && ci.url.includes('search.shopping.naver.com')) {
@@ -431,5 +524,7 @@ chrome.alarms.onAlarm.addListener(alarm => {
 });
 
 // 초기화
-fetch(`${API}/keywords/`).then(r => log('Django ' + (r.ok ? 'OK' : r.status))).catch(() => log('Django 연결실패'));
-log('background.js v2.2.0 (통합+순위추적+버그수정)');
+if (saveMode === 'internal') {
+  fetch(`${INTERNAL_API}/keywords/`).then(r => log('Django ' + (r.ok ? 'OK' : r.status))).catch(() => log('Django 연결실패'));
+}
+log('background.js v3.0.0 (내부/외부 모드 지원)');

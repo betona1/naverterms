@@ -10,6 +10,10 @@ import OwnerClanProductsPage from './pages/OwnerClanProductsPage';
 import SmartStoreAnalyticsPage from './pages/SmartStoreAnalyticsPage';
 import NaverKeywordPage from './pages/NaverKeywordPage';
 import NaverCategoryKeywordPage from './pages/NaverCategoryKeywordPage';
+import ReportsPage from './pages/ReportsPage';
+import RankCunningPage from './pages/RankCunningPage';
+import StoreCollectPage from './pages/StoreCollectPage';
+import ProductEditPage from './pages/ProductEditPage';
 
 const PAGE_KEY = 'nt-page';
 
@@ -22,6 +26,9 @@ const HASH_MAP: Record<string, string> = {
   '#keywords': 'keywords',
   '#catkeywords': 'catkeywords',
   '#analytics': 'analytics',
+  '#cunning': 'cunning',
+  '#reports': 'reports',
+  '#store-collect': 'store-collect',
 };
 
 export default function App() {
@@ -41,13 +48,21 @@ export default function App() {
 
   useEffect(() => {
     const onHash = () => {
-      const h = window.location.hash.replace('#', '');
-      if (h && ['terms', 'rank', 'products', 'extension', 'ownerclan', 'analytics', 'keywords', 'catkeywords'].includes(h)) {
+      const raw = window.location.hash.replace('#', '');
+      const h = raw.split('?')[0];
+      if (h === 'product-edit') {
+        setPage('product-edit');
+        return;
+      }
+      if (h && ['terms', 'rank', 'products', 'extension', 'ownerclan', 'analytics', 'keywords', 'catkeywords', 'cunning', 'reports', 'store-collect'].includes(h)) {
         setPage(h);
         try { localStorage.setItem(PAGE_KEY, h); } catch { /* */ }
       }
     };
     window.addEventListener('hashchange', onHash);
+    // 초기 해시가 product-edit인 경우
+    const initHash = window.location.hash.replace('#', '').split('?')[0];
+    if (initHash === 'product-edit') setPage('product-edit');
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
@@ -72,6 +87,10 @@ export default function App() {
           {page === 'catkeywords' && <NaverCategoryKeywordPage />}
           {page === 'ownerclan' && <OwnerClanProductsPage />}
           {page === 'analytics' && <SmartStoreAnalyticsPage />}
+          {page === 'cunning' && <RankCunningPage />}
+          {page === 'reports' && <ReportsPage />}
+          {page === 'store-collect' && <StoreCollectPage />}
+          {page === 'product-edit' && <ProductEditPage />}
         </main>
       </div>
       {showStoreSettings && (

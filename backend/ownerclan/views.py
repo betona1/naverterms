@@ -75,7 +75,7 @@ class OwnerClanProductListView(APIView):
         changed_field = request.query_params.get('changed_field') or None
         result = ownerclan_product_service.get_products(
             page, per_page,
-            sale_status=int(sale_status) if sale_status else None,
+            sale_status=sale_status if sale_status else None,
             is_synced=int(is_synced) if is_synced is not None and is_synced != '' else None,
             search=search,
             changed_field=changed_field,
@@ -116,6 +116,23 @@ class OwnerClanProductStatsView(APIView):
         return Response(ownerclan_product_service.get_stats())
 
 
+class OwnerClanSoldoutSyncStatusView(APIView):
+    def get(self, request):
+        import json
+        import os
+        from django.conf import settings as django_settings
+        result_path = os.path.join(django_settings.BASE_DIR, 'sync_soldout_result.json')
+        if not os.path.exists(result_path):
+            return Response({'exists': False})
+        try:
+            with open(result_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            data['exists'] = True
+            return Response(data)
+        except Exception:
+            return Response({'exists': False})
+
+
 class OwnerClanProductChangedFieldsView(APIView):
     def get(self, request):
         return Response(ownerclan_product_service.get_changed_field_counts())
@@ -132,7 +149,7 @@ class OwnerClanProductExcelExportView(APIView):
         changed_field = request.query_params.get('changed_field') or None
 
         rows = ownerclan_product_service.get_products_for_export(
-            sale_status=int(sale_status) if sale_status else None,
+            sale_status=sale_status if sale_status else None,
             is_synced=int(is_synced) if is_synced is not None and is_synced != '' else None,
             search=search,
             changed_field=changed_field,
@@ -319,9 +336,45 @@ class OwnerClanProductWCodesView(APIView):
         changed_field = request.query_params.get('changed_field') or None
 
         codes = ownerclan_product_service.get_w_codes(
-            sale_status=int(sale_status) if sale_status else None,
+            sale_status=sale_status if sale_status else None,
             is_synced=int(is_synced) if is_synced is not None and is_synced != '' else None,
             search=search,
             changed_field=changed_field,
         )
         return Response({'codes': codes, 'count': len(codes)})
+
+
+class OwnerClanSyncStatusPreviewView(APIView):
+    """오너클랜 → 스마트스토어 상태 동기화 미리보기"""
+    def get(self, request):
+        result = ownerclan_product_service.sync_status_preview()
+        return Response(result)
+
+
+class OwnerClanSyncStatusExecuteView(APIView):
+    """오너클랜 → 스마트스토어 상태 동기화 실행"""
+    def post(self, request):
+        mode = request.data.get('mode', 'all')  # all, activate, suspend
+        result = ownerclan_product_service.sync_status_execute(mode=mode)
+        return Response(result)
+
+
+class OwnerClanChangeLogView(APIView):
+    """변경사항 통합 리포트 (날짜별 필터 + 페이지네이션)"""
+    def get(self, request):
+        date = request.query_params.get('date')
+        page = int(request.query_params.get('page', 1))
+        per_page = int(request.query_params.get('per_page', 50))
+        return Response(ownerclan_product_service.get_change_log_summary(date, page, per_page))
+
+
+class OwnerClanChangeLogDatesView(APIView):
+    """변경 발생 날짜 목록"""
+    def get(self, request):
+        return Response(ownerclan_product_service.get_change_log_dates())
+
+
+class OwnerClanProductChangeLogView(APIView):
+    """개별 상품 변경 이력"""
+    def get(self, request, pk):
+        return Response(ownerclan_product_service.get_product_change_log(pk))

@@ -1,16 +1,36 @@
-import { useState, useEffect, useCallback, type MouseEvent as ReactMouseEvent } from 'react';
+import { useState, useEffect, useCallback, useRef, type MouseEvent as ReactMouseEvent } from 'react';
 import {
   fetchProducts,
   syncProducts,
   fetchProductStats,
   downloadProductExcel,
   fetchWCodes,
+  fetchProductCount,
+  fetchOrphanWCodes,
   previewSuspend,
   suspendProducts as apiSuspendProducts,
   toggleFocus,
+  toggleRestockChecked,
+  refreshTracking,
+  startAudit,
+  getAuditStatus,
+  stopAudit,
+  getAuditLogs,
+  getAuditLogDetail,
   type SmartStoreProduct,
   type ProductStats,
   type SuspendPreviewResult,
+  type AuditStatus,
+  type AuditLog,
+  type AuditLogDetail,
+  fetchZeroMarginPreview,
+  executeZeroMarginUpdate,
+  fetchZeroMarginLogs,
+  fetchZeroMarginLogDetail,
+  type ZeroMarginPreviewItem,
+  type ZeroMarginUpdateResult,
+  type ZeroMarginLog,
+  type ZeroMarginLogItem,
 } from '../api/smartstoreProductApi';
 import { fetchStores, type SmartStore } from '../api/smartstoreApi';
 import * as naverApi from '../api/naverApi';
@@ -54,7 +74,7 @@ export default function SmartStoreProductsPage() {
   const [stats, setStats] = useState<ProductStats | null>(null);
   const [loading, setLoading] = useState(false);
   const [soldoutFilter, setSoldoutFilter] = useState(false);
-  const [filterMode, setFilterMode] = useState<'all' | 'focus' | 'premium' | 'sold'>('all');
+  const [filterMode, setFilterMode] = useState<'all' | 'focus' | 'premium' | 'sold' | 'changes' | 'status_mm' | 'field_chg' | 'reverse_margin' | 'no_master'>('all');
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState('');
   const [excelOpen, setExcelOpen] = useState(false);
@@ -70,9 +90,113 @@ export default function SmartStoreProductsPage() {
   const [suspendResult, setSuspendResult] = useState<{ success: number; fail: number } | null>(null);
   const [orderModal, setOrderModal] = useState<{ code: string; name: string } | null>(null);
   const [rankTrackProduct, setRankTrackProduct] = useState<SmartStoreProduct | null>(null);
+  const [trackedProductIds, setTrackedProductIds] = useState<Set<number>>(new Set());
+  // 구매키워드 모달
+  const [buyKwModal, setBuyKwModal] = useState<{ productCode: string; productName: string } | null>(null);
+  const [trackingRefreshing, setTrackingRefreshing] = useState(false);
+  // 전상품 검증
+  const [auditStatus, setAuditStatus] = useState<AuditStatus | null>(null);
+  const [auditPolling, setAuditPolling] = useState(false);
+  const [auditConfirmOpen, setAuditConfirmOpen] = useState(false);
+  const [auditLogsOpen, setAuditLogsOpen] = useState(false);
+  const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
+  const [auditDetail, setAuditDetail] = useState<AuditLogDetail | null>(null);
+  const [auditDetailId, setAuditDetailId] = useState(0);
+  const auditTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const auditLogRef = useRef<HTMLPreElement>(null);
+  // 0마진 처리
+  const [zmOpen, setZmOpen] = useState(false);
+  const [zmPreview, setZmPreview] = useState<ZeroMarginPreviewItem[] | null>(null);
+  const [zmLoading, setZmLoading] = useState(false);
+  const [zmExecuting, setZmExecuting] = useState(false);
+  const [zmResult, setZmResult] = useState<ZeroMarginUpdateResult | null>(null);
+  const [zmTab, setZmTab] = useState<'preview' | 'logs'>('preview');
+  const [zmLogs, setZmLogs] = useState<ZeroMarginLog[]>([]);
+  const [zmLogDetail, setZmLogDetail] = useState<ZeroMarginLogItem[] | null>(null);
+  const [zmLogId, setZmLogId] = useState(0);
+  // 뷰 모드: 'default' = 기존 테이블, 'detail' = 대장보기(상세)
+  const [viewMode, setViewMode] = useState<'default' | 'detail'>('default');
   // 정렬
   const [sortBy, setSortBy] = useState('');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+
+  // 전상품 검증 초기 상태 확인 + 폴링
+  useEffect(() => {
+    getAuditStatus().then(st => {
+      setAuditStatus(st);
+      if (st.running) setAuditPolling(true);
+    }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!auditPolling) {
+      if (auditTimerRef.current) clearInterval(auditTimerRef.current);
+      auditTimerRef.current = null;
+      return;
+    }
+    auditTimerRef.current = setInterval(async () => {
+      try {
+        const st = await getAuditStatus();
+        setAuditStatus(st);
+        if (!st.running) {
+          setAuditPolling(false);
+          loadProducts();
+          loadStats();
+        }
+      } catch { /* */ }
+    }, 1500);
+    return () => {
+      if (auditTimerRef.current) clearInterval(auditTimerRef.current);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [auditPolling]);
+
+  useEffect(() => {
+    if (auditLogRef.current) {
+      auditLogRef.current.scrollTop = auditLogRef.current.scrollHeight;
+    }
+  }, [auditStatus?.logs]);
+
+  const handleAuditStart = async (source: 'api' | 'ownerclan' = 'api') => {
+    setAuditConfirmOpen(false);
+    try {
+      const res = await startAudit(source);
+      if (res.ok) {
+        setAuditPolling(true);
+      } else {
+        alert(res.message);
+      }
+    } catch (e: any) {
+      alert(e?.response?.data?.message || '검증 시작 실패');
+    }
+  };
+
+  const handleAuditStop = async () => {
+    await stopAudit();
+  };
+
+  const handleAuditLogsOpen = async () => {
+    try {
+      const logs = await getAuditLogs(20);
+      setAuditLogs(logs);
+      setAuditLogsOpen(true);
+      setAuditDetail(null);
+      setAuditDetailId(0);
+    } catch { /* */ }
+  };
+
+  const handleAuditDetailOpen = async (id: number) => {
+    try {
+      const detail = await getAuditLogDetail(id);
+      setAuditDetail(detail);
+      setAuditDetailId(id);
+    } catch { /* */ }
+  };
+
+  // 순위추적 배지용 product ID 조회
+  useEffect(() => {
+    naverApi.getTrackedProductIds().then(ids => setTrackedProductIds(new Set(ids))).catch(() => {});
+  }, []);
 
   // 상점명 + API 상점 목록 조회
   useEffect(() => {
@@ -97,7 +221,10 @@ export default function SmartStoreProductsPage() {
     if (storeId < 0) return;
     setLoading(true);
     try {
-      const res = await fetchProducts(storeId, page, perPage, status || undefined, search || undefined, soldoutFilter ? 1 : undefined, filterMode === 'focus' ? 1 : undefined, filterMode === 'sold' ? 1 : undefined, sortBy || undefined, sortBy ? sortDir : undefined, filterMode === 'premium' ? 500000 : undefined);
+      const hasChangesVal = filterMode === 'changes' ? 1 : filterMode === 'status_mm' ? 2 : filterMode === 'field_chg' ? 3 : undefined;
+      const reverseMarginVal = filterMode === 'reverse_margin' ? 1 : undefined;
+      const noMasterVal = filterMode === 'no_master' ? 1 : undefined;
+      const res = await fetchProducts(storeId, page, perPage, status || undefined, search || undefined, soldoutFilter ? 1 : undefined, filterMode === 'focus' ? 1 : undefined, filterMode === 'sold' ? 1 : undefined, sortBy || undefined, sortBy ? sortDir : undefined, filterMode === 'premium' ? 500000 : undefined, hasChangesVal, reverseMarginVal, undefined, noMasterVal);
       setProducts(res.items);
       setTotal(res.total);
       setTotalPages(res.total_pages);
@@ -334,7 +461,7 @@ export default function SmartStoreProductsPage() {
 
   // storeId는 항상 0 이상 (0=전체, n=개별상점)
 
-  const colSpan = isAllStores ? 12 : 11;
+  const colSpan = isAllStores ? 13 : 12;
   const getStoreUrlById = (sid: number) => apiStores.find(st => st.id === sid)?.store_url || '';
 
   return (
@@ -365,7 +492,22 @@ export default function SmartStoreProductsPage() {
                 <option key={s.id} value={s.id}>{s.store_name}</option>
               ))}
             </select>
-            <span className="text-gray-400 text-sm">상품관리</span>
+            <button
+              onClick={() => { window.location.hash = 'store-collect'; }}
+              className="text-gray-400 text-sm hover:text-[#03c75a] transition-colors cursor-pointer"
+            >
+              스토어관리
+            </button>
+            <button
+              onClick={() => setViewMode(viewMode === 'default' ? 'detail' : 'default')}
+              className={`text-sm px-2.5 py-1 rounded-full border transition-all ${
+                viewMode === 'detail'
+                  ? 'bg-[#03c75a] text-white border-[#03c75a] shadow-sm'
+                  : 'text-gray-500 dark:text-gray-400 border-gray-300 dark:border-gray-600 hover:border-[#03c75a] hover:text-[#03c75a]'
+              }`}
+            >
+              {viewMode === 'detail' ? '간략보기' : '대장보기'}
+            </button>
           </div>
           <div className="flex items-center gap-2">
             {hasSelection && (
@@ -390,6 +532,31 @@ export default function SmartStoreProductsPage() {
               </>
             )}
             <button
+              className="px-3 py-1.5 text-sm bg-pink-500 text-white rounded hover:bg-pink-600 disabled:opacity-50 font-medium"
+              onClick={async () => {
+                const ids = Array.from(selectedIds);
+                const selected = products.filter(p => ids.includes(p.id));
+                if (selected.length === 0) return;
+                const payload = selected.map(p => ({
+                  origin_product_no: p.origin_product_no,
+                  store_name: p.store_name || '',
+                  store_id: p.store_id,
+                  product_name: p.name,
+                  sale_price: p.sale_price,
+                  category_id: p.category_id || '',
+                  product_image_url: p.product_image_url || '',
+                  seller_management_code: p.seller_management_code || '',
+                }));
+                try {
+                  const res = await naverApi.addRankCunningProducts(payload);
+                  alert(`순위컨닝에 ${res.added}개 추가 완료`);
+                } catch (e) { alert('추가 실패'); }
+              }}
+              disabled={!hasSelection}
+            >
+              순위컨닝
+            </button>
+            <button
               className="px-4 py-1.5 text-sm bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50 font-medium"
               onClick={handleSuspendClick}
               disabled={!hasSelection || suspendLoading}
@@ -410,6 +577,16 @@ export default function SmartStoreProductsPage() {
             >
               W코드
             </button>
+            {isAllStores && (
+              <button
+                className="px-4 py-1.5 text-sm bg-orange-600 text-white rounded hover:bg-orange-700 disabled:opacity-50 font-medium"
+                onClick={() => auditStatus?.running ? undefined : setAuditConfirmOpen(true)}
+                disabled={auditStatus?.running}
+                title="전체 상품 네이버 API 검증"
+              >
+                {auditStatus?.running ? `검증중 ${auditStatus.progress_pct}%` : '품단종 검증'}
+              </button>
+            )}
             {!isAllStores && (
               <button
                 className="px-4 py-1.5 text-sm bg-[#03c75a] text-white rounded hover:bg-[#02b351] disabled:opacity-50 font-medium"
@@ -433,6 +610,67 @@ export default function SmartStoreProductsPage() {
           }`}>
             {syncMsg}
             <button className="ml-2 text-xs underline opacity-60" onClick={() => setSyncMsg('')}>닫기</button>
+          </div>
+        )}
+
+        {/* Audit progress bar */}
+        {auditStatus && (auditStatus.running || (auditStatus.checked > 0 && auditStatus.audit_log_id > 0)) && (
+          <div className="bg-[#1c1c2e] dark:bg-[#1c1c2e] bg-white border border-[#2a2a40] dark:border-[#2a2a40] border-gray-200 rounded-lg p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium text-white dark:text-white text-gray-900">
+                  {auditStatus.running
+                    ? (auditStatus.current_api_key === 'ownerclan' ? '오너클랜 비교 진행 중' : '전상품 API 검증 진행 중')
+                    : (auditStatus.current_api_key === 'ownerclan' ? '오너클랜 비교 완료' : '검증 완료')}
+                </span>
+                {auditStatus.running && (
+                  <span className="inline-block w-2 h-2 bg-orange-500 rounded-full animate-pulse" />
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                {auditStatus.running && (
+                  <button
+                    onClick={handleAuditStop}
+                    className="px-3 py-1 text-xs bg-red-600 text-white rounded hover:bg-red-700"
+                  >중지</button>
+                )}
+                <button
+                  onClick={handleAuditLogsOpen}
+                  className="px-3 py-1 text-xs bg-gray-600 text-white rounded hover:bg-gray-700"
+                >이력</button>
+                {!auditStatus.running && (
+                  <button
+                    onClick={() => { setAuditStatus(null); }}
+                    className="text-xs text-gray-400 hover:text-gray-200"
+                  >닫기</button>
+                )}
+              </div>
+            </div>
+            {/* Progress bar */}
+            <div className="w-full bg-gray-700 dark:bg-gray-700 bg-gray-200 rounded-full h-3 overflow-hidden">
+              <div
+                className="bg-orange-500 h-3 rounded-full transition-all duration-300"
+                style={{ width: `${Math.min(auditStatus.progress_pct, 100)}%` }}
+              />
+            </div>
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-300 dark:text-gray-300 text-gray-600">
+              <span>{auditStatus.progress_pct}% ({auditStatus.checked.toLocaleString()} / {auditStatus.total.toLocaleString()})</span>
+              <span>일치: <span className="text-green-400">{auditStatus.match.toLocaleString()}</span></span>
+              <span>불일치: <span className="text-yellow-400">{auditStatus.mismatch.toLocaleString()}</span></span>
+              <span>수정: <span className="text-blue-400">{auditStatus.fixed.toLocaleString()}</span></span>
+              <span>CLOSE: <span className="text-gray-400">{auditStatus.closed.toLocaleString()}</span></span>
+              <span>에러: <span className="text-red-400">{auditStatus.errors.toLocaleString()}</span></span>
+              <span>경과: {Math.floor(auditStatus.elapsed / 60)}분 {Math.floor(auditStatus.elapsed % 60)}초</span>
+            </div>
+            {/* Live logs */}
+            {auditStatus.logs.length > 0 && (
+              <pre
+                ref={auditLogRef}
+                className="bg-black/40 dark:bg-black/40 bg-gray-100 rounded p-2 text-xs text-gray-300 dark:text-gray-300 text-gray-700 max-h-32 overflow-y-auto font-mono"
+              >
+                {auditStatus.logs.slice(-20).join('\n')}
+              </pre>
+            )}
           </div>
         )}
 
@@ -527,7 +765,63 @@ export default function SmartStoreProductsPage() {
               className={`px-3 py-1.5 text-sm font-medium transition-colors ${filterMode === 'sold' && !status ? 'bg-blue-600 text-white' : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700'}`}
               onClick={() => { setFilterMode(filterMode === 'sold' && !status ? 'all' : 'sold'); setStatus(''); setPage(1); }}
             >판매된상품{stats ? ` ${stats.sold_count.toLocaleString()}` : ''}{stats && stats.ss_sold_count !== stats.sold_count ? <span className="text-[#03c75a] ml-0.5">({stats.ss_sold_count.toLocaleString()})</span> : ''}</button>
+            <button
+              className={`px-3 py-1.5 text-sm font-medium transition-colors ${filterMode === 'changes' ? 'bg-orange-500 text-white' : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700'}`}
+              onClick={() => { setFilterMode(filterMode === 'changes' ? 'all' : 'changes'); setStatus(''); setPage(1); }}
+            >수정사항{stats && stats.changes_count > 0 ? ` ${stats.changes_count.toLocaleString()}` : ''}</button>
+            <button
+              className={`px-3 py-1.5 text-sm font-medium transition-colors ${filterMode === 'reverse_margin' ? 'bg-red-600 text-white' : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700'}`}
+              onClick={() => { setFilterMode(filterMode === 'reverse_margin' ? 'all' : 'reverse_margin'); setStatus(''); setPage(1); }}
+            >역마진{stats && stats.reverse_margin_count > 0 ? ` ${stats.reverse_margin_count.toLocaleString()}` : ''}</button>
+            {filterMode === 'reverse_margin' && stats && stats.reverse_margin_count > 0 && (
+              <button
+                className="px-3 py-1.5 text-sm font-medium bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300 hover:bg-red-200 dark:hover:bg-red-900/60 transition-colors rounded"
+                onClick={async () => {
+                  setZmOpen(true); setZmLoading(true); setZmResult(null); setZmPreview(null);
+                  try {
+                    const res = await fetchZeroMarginPreview(storeId);
+                    setZmPreview(res.items);
+                  } catch { setZmPreview([]); }
+                  setZmLoading(false);
+                }}
+              >0마진처리</button>
+            )}
+            <button
+              className={`px-3 py-1.5 text-sm font-medium transition-colors ${filterMode === 'no_master' ? 'bg-purple-600 text-white' : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700'}`}
+              onClick={() => { setFilterMode(filterMode === 'no_master' ? 'all' : 'no_master'); setStatus(''); setPage(1); }}
+            >원본없음{stats && stats.no_master_count > 0 ? ` ${stats.no_master_count.toLocaleString()}` : ''}</button>
           </div>
+          {(filterMode === 'changes' || filterMode === 'status_mm' || filterMode === 'field_chg') && (
+            <div className="flex items-center gap-1">
+              <div className="flex rounded overflow-hidden border border-orange-300 dark:border-orange-600">
+                <button
+                  className={`px-2 py-1 text-xs font-medium transition-colors ${filterMode === 'changes' ? 'bg-orange-500 text-white' : 'bg-white dark:bg-gray-800 text-orange-600 dark:text-orange-400 hover:bg-orange-50 dark:hover:bg-orange-900/20'}`}
+                  onClick={() => { setFilterMode('changes'); setPage(1); }}
+                >전체 {stats?.changes_count?.toLocaleString()}</button>
+                <button
+                  className={`px-2 py-1 text-xs font-medium transition-colors ${filterMode === 'status_mm' ? 'bg-red-500 text-white' : 'bg-white dark:bg-gray-800 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20'}`}
+                  onClick={() => { setFilterMode('status_mm'); setPage(1); }}
+                >상태불일치 {stats?.status_mismatch_count?.toLocaleString()}</button>
+                <button
+                  className={`px-2 py-1 text-xs font-medium transition-colors ${filterMode === 'field_chg' ? 'bg-amber-500 text-white' : 'bg-white dark:bg-gray-800 text-amber-600 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-900/20'}`}
+                  onClick={() => { setFilterMode('field_chg'); setPage(1); }}
+                >필드변경 {stats?.field_changes_count?.toLocaleString()}</button>
+              </div>
+              <button
+                className="px-2 py-1 text-xs font-medium rounded border border-orange-300 dark:border-orange-600 text-orange-600 dark:text-orange-400 hover:bg-orange-50 dark:hover:bg-orange-900/20 disabled:opacity-50"
+                disabled={trackingRefreshing}
+                onClick={async () => {
+                  setTrackingRefreshing(true);
+                  try {
+                    await refreshTracking(storeId);
+                    loadProducts();
+                    loadStats();
+                  } catch { /* ignore */ }
+                  setTrackingRefreshing(false);
+                }}
+              >{trackingRefreshing ? '갱신중...' : '갱신'}</button>
+            </div>
+          )}
           <select
             className="text-sm border border-gray-300 dark:border-gray-600 rounded px-2 py-1.5 bg-white dark:bg-gray-800"
             value={status}
@@ -598,8 +892,156 @@ export default function SmartStoreProductsPage() {
           </div>
         </div>
 
-        {/* Product table */}
-        <div className="bg-white dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700 overflow-x-auto">
+        {/* 대장보기 (detail view) */}
+        {viewMode === 'detail' && (
+          <div className="bg-white dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700 overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-gray-50 dark:bg-gray-700/50 sticky top-0">
+                <tr className="text-left text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">
+                  <th className="px-2 py-2 w-8">
+                    <input type="checkbox" className="rounded"
+                      checked={products.length > 0 && products.every(p => selectedIds.has(p.id))}
+                      onChange={handlePageSelectAll}
+                    />
+                  </th>
+                  {isAllStores && <th className="px-2 py-2">상점</th>}
+                  <th className="px-2 py-2">이미지</th>
+                  <th className="px-2 py-2 min-w-[200px]">상품명</th>
+                  <th className="px-2 py-2">관리코드</th>
+                  <th className="px-2 py-2">카테고리</th>
+                  <th className="px-2 py-2 text-right">판매가</th>
+                  <th className="px-2 py-2 text-right">정가</th>
+                  <th className="px-2 py-2 text-right">할인</th>
+                  <th className="px-2 py-2 text-right">재고</th>
+                  <th className="px-2 py-2 text-center">상태</th>
+                  <th className="px-2 py-2">배송</th>
+                  <th className="px-2 py-2">제조/브랜드</th>
+                  <th className="px-2 py-2">등록일</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+                {loading ? (
+                  <tr><td colSpan={14} className="text-center py-8 text-gray-400">로딩 중...</td></tr>
+                ) : products.length === 0 ? (
+                  <tr><td colSpan={14} className="text-center py-8 text-gray-400">상품이 없습니다.</td></tr>
+                ) : products.map((p) => {
+                  const hasDiscount = p.discount_price > 0 && p.discount_price !== p.sale_price;
+                  const discountPct = hasDiscount ? Math.round((1 - p.sale_price / p.discount_price) * 100) : 0;
+                  const categoryStr = [p.category1, p.category2, p.category3, p.category4].filter(Boolean).join(' > ');
+                  return (
+                    <tr key={p.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/30 align-top">
+                      <td className="px-2 py-2">
+                        <input type="checkbox" className="rounded"
+                          checked={selectAll || selectedIds.has(p.id)}
+                          onChange={() => handleToggleId(p.id)}
+                        />
+                      </td>
+                      {isAllStores && (
+                        <td className="px-2 py-2 text-xs text-gray-500 whitespace-nowrap">{p.store_name || '-'}</td>
+                      )}
+                      <td className="px-2 py-2">
+                        <SSHoverImage src={p.product_image_url} />
+                      </td>
+                      <td className="px-2 py-2">
+                        <div className="line-clamp-2 text-xs leading-relaxed cursor-pointer text-blue-600 dark:text-blue-400 hover:underline max-w-[250px]"
+                          onClick={() => setDetailProduct(p)}
+                          title={p.name}
+                        >{p.name}</div>
+                        {p.options === 'Y' && (
+                          <span className="text-[10px] px-1 py-0.5 rounded bg-purple-100 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400 mt-0.5 inline-block">옵션</span>
+                        )}
+                        {p.additional_products === 'Y' && (
+                          <span className="text-[10px] px-1 py-0.5 rounded bg-teal-100 dark:bg-teal-900/30 text-teal-600 dark:text-teal-400 mt-0.5 ml-0.5 inline-block">추가상품</span>
+                        )}
+                      </td>
+                      <td className="px-2 py-2 text-xs">
+                        {p.seller_management_code ? (
+                          p.seller_management_code.startsWith('W') ? (
+                            <a href={`https://ownerclan.com/V2/product/view.php?selfcode=${p.seller_management_code}`}
+                              target="_blank" rel="noopener noreferrer"
+                              className="text-orange-600 dark:text-orange-400 hover:underline"
+                            >{p.seller_management_code}</a>
+                          ) : <span className="text-gray-500">{p.seller_management_code}</span>
+                        ) : <span className="text-gray-300">-</span>}
+                      </td>
+                      <td className="px-2 py-2 text-xs text-gray-600 dark:text-gray-400 max-w-[180px]">
+                        {categoryStr ? (
+                          <span className="line-clamp-2" title={categoryStr}>{categoryStr}</span>
+                        ) : <span className="text-gray-300">-</span>}
+                      </td>
+                      <td className="px-2 py-2 text-right text-xs font-medium whitespace-nowrap">
+                        <span className="text-gray-900 dark:text-gray-100">{p.sale_price.toLocaleString()}</span>
+                      </td>
+                      <td className="px-2 py-2 text-right text-xs whitespace-nowrap">
+                        {hasDiscount ? (
+                          <span className="text-gray-400 line-through">{p.discount_price.toLocaleString()}</span>
+                        ) : <span className="text-gray-300">-</span>}
+                      </td>
+                      <td className="px-2 py-2 text-right text-xs whitespace-nowrap">
+                        {hasDiscount ? (
+                          <div>
+                            <span className="text-red-500 font-medium">-{discountPct}%</span>
+                            {p.seller_discount > 0 && (
+                              <div className="text-[10px] text-gray-400">판매자 {p.seller_discount.toLocaleString()}</div>
+                            )}
+                          </div>
+                        ) : <span className="text-gray-300">-</span>}
+                      </td>
+                      <td className="px-2 py-2 text-right text-xs">
+                        <span className={p.stock_quantity === 0 ? 'text-red-500 font-bold' : ''}>
+                          {p.stock_quantity.toLocaleString()}
+                        </span>
+                      </td>
+                      <td className="px-2 py-2 text-center">
+                        <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-medium ${
+                          STATUS_COLORS[p.status_type || ''] || 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400'
+                        }`}>
+                          {STATUS_LABELS[p.status_type || ''] || p.status_type || '-'}
+                        </span>
+                        {p.display_status && p.display_status !== p.status_type && (
+                          <div className="text-[10px] text-gray-400 mt-0.5">{p.display_status}</div>
+                        )}
+                      </td>
+                      <td className="px-2 py-2 text-xs whitespace-nowrap">
+                        {p.delivery_fee_type ? (
+                          <div>
+                            <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                              p.delivery_fee_type === '무료' ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                              : p.delivery_fee_type === '유료' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400'
+                              : 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400'
+                            }`}>{p.delivery_fee_type}</span>
+                            {p.basic_delivery_fee > 0 && (
+                              <span className="text-[10px] text-gray-500 ml-1">{p.basic_delivery_fee.toLocaleString()}</span>
+                            )}
+                            {p.bundle_delivery && (
+                              <div className="text-[10px] text-indigo-500 dark:text-indigo-400 mt-0.5">묶음</div>
+                            )}
+                          </div>
+                        ) : <span className="text-gray-300">-</span>}
+                      </td>
+                      <td className="px-2 py-2 text-xs text-gray-600 dark:text-gray-400 max-w-[120px]">
+                        {(p.manufacturer || p.brand_name) ? (
+                          <div className="line-clamp-2">
+                            {p.manufacturer && <div title={p.manufacturer}>{p.manufacturer}</div>}
+                            {p.brand_name && p.brand_name !== p.manufacturer && (
+                              <div className="text-[10px] text-gray-400" title={p.brand_name}>{p.brand_name}</div>
+                            )}
+                          </div>
+                        ) : <span className="text-gray-300">-</span>}
+                      </td>
+                      <td className="px-2 py-2 text-xs text-gray-500 whitespace-nowrap">
+                        {p.registered_at ? p.registered_at.slice(0, 10) : '-'}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {/* Product table (default view) */}
+        {viewMode === 'default' && <div className="bg-white dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700 overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-gray-50 dark:bg-gray-700/50">
               <tr className="text-left text-xs text-gray-500 dark:text-gray-400">
@@ -650,12 +1092,14 @@ export default function SmartStoreProductsPage() {
                   onClick={() => toggleSort('sale_price')}
                   title="판매가순 정렬"
                 >판매가{sortIcon('sale_price')}</th>
+                <th className="px-3 py-2 w-20 text-right" title="정산가(판매가×0.93) - 오너클랜단가">마진</th>
                 <th
                   className={`px-3 py-2 w-20 text-right cursor-pointer select-none hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors ${sortBy === 'stock' ? 'text-blue-600 dark:text-blue-400' : ''}`}
                   onClick={() => toggleSort('stock')}
                   title="재고순 정렬"
                 >재고{sortIcon('stock')}</th>
                 <th className="px-3 py-2 w-20 text-center">상태</th>
+                <th className="px-3 py-2 w-28 text-center">변경</th>
                 <th className="px-3 py-2 w-20 text-right">주문건수</th>
                 <th
                   className={`px-3 py-2 w-32 text-right cursor-pointer select-none hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors ${sortBy === 'order_amount' || sortBy === 'ss_order_amount' ? 'text-blue-600 dark:text-blue-400' : ''}`}
@@ -702,25 +1146,25 @@ export default function SmartStoreProductsPage() {
                     <SSHoverImage src={p.product_image_url} />
                   </td>
                   <td className="px-3 py-2">
-                    <div
-                      className="line-clamp-2 text-xs leading-relaxed cursor-pointer text-blue-600 dark:text-blue-400 hover:underline"
-                      onClick={() => setDetailProduct(p)}
-                    >{p.name}</div>
+                    <div className="flex items-center gap-1">
+                      <div
+                        className="line-clamp-2 text-xs leading-relaxed cursor-pointer text-blue-600 dark:text-blue-400 hover:underline"
+                        onClick={() => setDetailProduct(p)}
+                      >{p.name}</div>
+                      {trackedProductIds.has(p.origin_product_no) && (
+                        <span className="shrink-0 px-1.5 py-0.5 text-[10px] font-bold rounded bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-400">
+                          순위추적
+                        </span>
+                      )}
+                    </div>
                     {(() => {
-                      const pStoreUrl = isAllStores ? getStoreUrlById(p.store_id) : storeUrl;
-                      return p.channel_product_no ? (
-                        pStoreUrl ? (
-                          <a
-                            href={`https://smartstore.naver.com/${pStoreUrl}/products/${p.channel_product_no}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-[10px] text-blue-500 dark:text-blue-400 hover:underline mt-0.5 inline-block"
-                          >{p.channel_product_no}</a>
-                        ) : (
-                          <div className="text-[10px] text-gray-400 mt-0.5">{p.channel_product_no}</div>
-                        )
-                      ) : (
-                        <div className="text-[10px] text-gray-400 mt-0.5">#{p.origin_product_no}</div>
+                      const code = p.channel_product_no || String(p.origin_product_no);
+                      return (
+                        <button
+                          className="text-[10px] text-blue-500 dark:text-blue-400 hover:underline mt-0.5 inline-block"
+                          onClick={(e) => { e.stopPropagation(); setBuyKwModal({ productCode: code, productName: p.name }); }}
+                          title="구매키워드 보기"
+                        >{p.channel_product_no || `#${p.origin_product_no}`}</button>
                       );
                     })()}
                   </td>
@@ -756,6 +1200,21 @@ export default function SmartStoreProductsPage() {
                     {p.sale_price.toLocaleString()}
                   </td>
                   <td className="px-3 py-2 text-right text-xs">
+                    {p.master_price && p.master_price > 0 ? (() => {
+                      const settle = Math.round(p.sale_price * 0.93);
+                      const margin = settle - p.master_price;
+                      const pct = Math.round((margin / p.master_price) * 100);
+                      return (
+                        <div title={`정산가: ${settle.toLocaleString()} / 오너단가: ${p.master_price.toLocaleString()}`}>
+                          <span className={`font-medium ${margin < 0 ? 'text-red-600 dark:text-red-400' : margin < p.master_price * 0.05 ? 'text-yellow-600 dark:text-yellow-400' : 'text-green-600 dark:text-green-400'}`}>
+                            {margin < 0 ? '' : '+'}{margin.toLocaleString()}
+                          </span>
+                          <span className={`block text-[10px] ${margin < 0 ? 'text-red-400 dark:text-red-500' : 'text-gray-400'}`}>{pct}%</span>
+                        </div>
+                      );
+                    })() : <span className="text-gray-300 dark:text-gray-600">-</span>}
+                  </td>
+                  <td className="px-3 py-2 text-right text-xs">
                     <span className={p.stock_quantity === 0 ? 'text-red-500 font-bold' : ''}>
                       {p.stock_quantity.toLocaleString()}
                     </span>
@@ -766,6 +1225,29 @@ export default function SmartStoreProductsPage() {
                     }`}>
                       {STATUS_LABELS[p.status_type || ''] || p.status_type || '-'}
                     </span>
+                  </td>
+                  <td className="px-3 py-2 text-center">
+                    <div className="flex flex-wrap gap-0.5 justify-center">
+                      {p.restock_at && p.restock_checked === 0 && (
+                        <button
+                          className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[9px] font-medium bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400 hover:bg-purple-200 dark:hover:bg-purple-900/50"
+                          title={`재입고: ${p.restock_at?.slice(0, 16)}${p.restock_price_changed ? ' | 가격변동' : ''}${p.restock_reverse_margin ? ' | 역마진' : ''}\n클릭하여 확인완료`}
+                          onClick={async (e) => { e.stopPropagation(); await toggleRestockChecked([p.id], 1); loadProducts(); loadStats(); }}
+                        >재입고{p.restock_price_changed ? ' $' : ''}{p.restock_reverse_margin ? ' !' : ''}</button>
+                      )}
+                      {p.status_mismatch === 1 && (
+                        <span className="inline-block px-1.5 py-0.5 rounded text-[9px] font-medium bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400">상태</span>
+                      )}
+                      {p.pending_change_groups && p.pending_change_groups.split(',').map(g => {
+                        const labels: Record<string, string> = { price: '가격', shipping: '배송', product_name: '상품명', detail: '상세', image: '이미지', option: '옵션', info: '정보', compliance: '인증', notice: '공지' };
+                        return (
+                          <span key={g} className="inline-block px-1.5 py-0.5 rounded text-[9px] font-medium bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400">{labels[g] || g}</span>
+                        );
+                      })}
+                      {!p.has_pending_changes && !p.status_mismatch && !(p.restock_at && p.restock_checked === 0) && (
+                        <span className="text-gray-300 dark:text-gray-600">-</span>
+                      )}
+                    </div>
                   </td>
                   <td className="px-3 py-2 text-right text-xs tabular-nums">
                     {p.all_order_count > 0 ? (
@@ -811,7 +1293,7 @@ export default function SmartStoreProductsPage() {
               ))}
             </tbody>
           </table>
-        </div>
+        </div>}
 
         {/* Pagination */}
         {totalPages > 1 && (
@@ -894,6 +1376,15 @@ export default function SmartStoreProductsPage() {
         />
       )}
 
+      {/* 구매키워드 모달 */}
+      {buyKwModal && (
+        <BuyKeywordModal
+          productCode={buyKwModal.productCode}
+          productName={buyKwModal.productName}
+          onClose={() => setBuyKwModal(null)}
+        />
+      )}
+
       {/* Suspend Confirm Modal */}
       {suspendModalOpen && suspendPreview && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => { if (!suspendExecuting) { setSuspendModalOpen(false); setSuspendResult(null); } }}>
@@ -969,6 +1460,377 @@ export default function SmartStoreProductsPage() {
                     )}
                   </div>
                 </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+
+      {/* 0마진 처리 모달 */}
+      {zmOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => { if (!zmExecuting) { setZmOpen(false); setZmResult(null); setZmLogDetail(null); } }}>
+          <div
+            className="bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-2xl mx-4 max-h-[80vh] flex flex-col"
+            onClick={e => e.stopPropagation()}
+          >
+            {/* 헤더 + 탭 */}
+            <div className="flex items-center justify-between px-4 py-2 border-b border-gray-200 dark:border-gray-700 shrink-0">
+              <div className="flex items-center gap-3">
+                <h3 className="font-bold text-sm">0마진 처리</h3>
+                <div className="flex rounded overflow-hidden border border-gray-300 dark:border-gray-600">
+                  <button
+                    className={`px-2.5 py-1 text-[11px] font-medium ${zmTab === 'preview' ? 'bg-red-600 text-white' : 'text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700'}`}
+                    onClick={() => setZmTab('preview')}
+                  >미리보기</button>
+                  <button
+                    className={`px-2.5 py-1 text-[11px] font-medium ${zmTab === 'logs' ? 'bg-red-600 text-white' : 'text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700'}`}
+                    onClick={async () => {
+                      setZmTab('logs'); setZmLogDetail(null);
+                      try { const logs = await fetchZeroMarginLogs(); setZmLogs(logs); } catch { setZmLogs([]); }
+                    }}
+                  >처리이력</button>
+                </div>
+              </div>
+              {!zmExecuting && (
+                <button className="text-gray-400 hover:text-gray-600 text-lg" onClick={() => { setZmOpen(false); setZmResult(null); setZmLogDetail(null); }}>&times;</button>
+              )}
+            </div>
+
+            <div className="px-4 py-3 flex-1 overflow-y-auto min-h-0">
+              {/* 미리보기 탭 */}
+              {zmTab === 'preview' && (
+                <>
+                  {zmLoading ? (
+                    <div className="text-center py-8 text-gray-500 animate-pulse">미리보기 로딩중...</div>
+                  ) : zmResult ? (
+                    <div className="space-y-3">
+                      <div className="text-center py-2">
+                        <div className="text-green-600 dark:text-green-400 font-bold text-lg mb-1">처리 완료</div>
+                        <div className="text-sm">성공 <span className="font-bold text-green-600">{zmResult.success}</span> / 실패 <span className="font-bold text-red-500">{zmResult.fail}</span> / 전체 {zmResult.total}</div>
+                      </div>
+                      {zmResult.items.length > 0 && (
+                        <div className="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
+                          <table className="w-full text-xs">
+                            <thead>
+                              <tr className="bg-gray-50 dark:bg-gray-700/50 text-gray-500 dark:text-gray-400">
+                                <th className="text-left px-2 py-1.5">상품명</th>
+                                <th className="text-right px-2 py-1.5">변경전</th>
+                                <th className="text-right px-2 py-1.5">변경후</th>
+                                <th className="text-center px-2 py-1.5">결과</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+                              {zmResult.items.map(it => (
+                                <tr key={it.origin_product_no}>
+                                  <td className="px-2 py-1.5 truncate max-w-[200px]" title={it.name}>{it.name}</td>
+                                  <td className="px-2 py-1.5 text-right tabular-nums">{it.old_price.toLocaleString()}</td>
+                                  <td className="px-2 py-1.5 text-right tabular-nums font-medium">{it.new_price.toLocaleString()}</td>
+                                  <td className="px-2 py-1.5 text-center">
+                                    {it.ok ? <span className="text-green-600">OK</span> : <span className="text-red-500" title={it.error}>실패</span>}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                      <button
+                        className="w-full px-4 py-2 text-sm bg-gray-600 text-white rounded hover:bg-gray-700 font-medium"
+                        onClick={() => { setZmOpen(false); setZmResult(null); loadProducts(); loadStats(); }}
+                      >닫기</button>
+                    </div>
+                  ) : zmPreview && zmPreview.length === 0 ? (
+                    <div className="text-center py-8 text-gray-500 text-sm">역마진 상품이 없습니다.</div>
+                  ) : zmPreview ? (
+                    <div className="space-y-3">
+                      <div className="text-sm text-gray-700 dark:text-gray-300">
+                        역마진 상품 <span className="font-bold text-red-600 dark:text-red-400">{zmPreview.length}</span>개의 가격을
+                        <span className="font-bold"> 수익 0원</span> (10원 단위 올림)으로 수정합니다.
+                      </div>
+                      <div className="text-[10px] text-gray-400 dark:text-gray-500">
+                        공식: 올림(오너단가 / 0.93 / 10) x 10 (네이버 수수료 7% 포함)
+                      </div>
+                      <div className="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="bg-gray-50 dark:bg-gray-700/50 text-gray-500 dark:text-gray-400">
+                              <th className="text-left px-2 py-1.5">상품명</th>
+                              <th className="text-left px-2 py-1.5">스토어</th>
+                              <th className="text-right px-2 py-1.5">현재가</th>
+                              <th className="text-right px-2 py-1.5">오너단가</th>
+                              <th className="text-right px-2 py-1.5 text-red-500">손해</th>
+                              <th className="text-right px-2 py-1.5 text-blue-500">수정가</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+                            {zmPreview.map(it => (
+                              <tr key={it.origin_product_no}>
+                                <td className="px-2 py-1.5 truncate max-w-[180px]" title={it.name}>{it.name}</td>
+                                <td className="px-2 py-1.5 text-gray-500">{it.store_name}</td>
+                                <td className="px-2 py-1.5 text-right tabular-nums">{it.sale_price.toLocaleString()}</td>
+                                <td className="px-2 py-1.5 text-right tabular-nums">{it.master_price.toLocaleString()}</td>
+                                <td className="px-2 py-1.5 text-right tabular-nums text-red-600 dark:text-red-400 font-medium">{it.margin.toLocaleString()}</td>
+                                <td className="px-2 py-1.5 text-right tabular-nums text-blue-600 dark:text-blue-400 font-medium">{it.new_price.toLocaleString()}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      <div className="flex gap-2">
+                        <button
+                          className="flex-1 px-4 py-2 text-sm bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded hover:bg-gray-300 dark:hover:bg-gray-600 font-medium"
+                          onClick={() => { setZmOpen(false); setZmResult(null); }}
+                          disabled={zmExecuting}
+                        >취소</button>
+                        <button
+                          className="flex-1 px-4 py-2 text-sm bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50 font-medium"
+                          disabled={zmExecuting}
+                          onClick={async () => {
+                            setZmExecuting(true);
+                            try {
+                              const res = await executeZeroMarginUpdate(storeId);
+                              setZmResult(res);
+                            } catch (e: any) {
+                              alert(e?.response?.data?.error || '0마진 처리 실패');
+                            }
+                            setZmExecuting(false);
+                          }}
+                        >{zmExecuting ? '처리 중...' : `${zmPreview.length}개 가격 수정`}</button>
+                      </div>
+                    </div>
+                  ) : null}
+                </>
+              )}
+
+              {/* 이력 탭 */}
+              {zmTab === 'logs' && (
+                <>
+                  {zmLogDetail ? (
+                    <div className="space-y-3">
+                      <button className="text-xs text-blue-500 hover:underline" onClick={() => setZmLogDetail(null)}>&larr; 이력 목록</button>
+                      <div className="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="bg-gray-50 dark:bg-gray-700/50 text-gray-500 dark:text-gray-400">
+                              <th className="text-left px-2 py-1.5">상품명</th>
+                              <th className="text-left px-2 py-1.5">스토어</th>
+                              <th className="text-right px-2 py-1.5">변경전</th>
+                              <th className="text-right px-2 py-1.5">변경후</th>
+                              <th className="text-right px-2 py-1.5">오너단가</th>
+                              <th className="text-center px-2 py-1.5">결과</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+                            {zmLogDetail.map((it, i) => (
+                              <tr key={i}>
+                                <td className="px-2 py-1.5 truncate max-w-[160px]" title={it.name}>{it.name}</td>
+                                <td className="px-2 py-1.5 text-gray-500">{it.store_name}</td>
+                                <td className="px-2 py-1.5 text-right tabular-nums">{it.old_price.toLocaleString()}</td>
+                                <td className="px-2 py-1.5 text-right tabular-nums font-medium">{it.new_price.toLocaleString()}</td>
+                                <td className="px-2 py-1.5 text-right tabular-nums">{it.master_price.toLocaleString()}</td>
+                                <td className="px-2 py-1.5 text-center">
+                                  {it.ok ? <span className="text-green-600">OK</span> : <span className="text-red-500" title={it.error_msg || ''}>실패</span>}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  ) : zmLogs.length === 0 ? (
+                    <div className="text-center py-8 text-gray-500 text-sm">처리 이력이 없습니다.</div>
+                  ) : (
+                    <div className="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="bg-gray-50 dark:bg-gray-700/50 text-gray-500 dark:text-gray-400">
+                            <th className="text-left px-2 py-1.5">일시</th>
+                            <th className="text-right px-2 py-1.5">대상</th>
+                            <th className="text-right px-2 py-1.5 text-green-500">성공</th>
+                            <th className="text-right px-2 py-1.5 text-red-500">실패</th>
+                            <th className="text-right px-2 py-1.5">총 가격인상</th>
+                            <th className="text-center px-2 py-1.5">상세</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+                          {zmLogs.map(log => (
+                            <tr key={log.id}>
+                              <td className="px-2 py-1.5">{log.created_at?.slice(0, 16).replace('T', ' ')}</td>
+                              <td className="px-2 py-1.5 text-right tabular-nums">{log.total}</td>
+                              <td className="px-2 py-1.5 text-right tabular-nums text-green-600">{log.success_count}</td>
+                              <td className="px-2 py-1.5 text-right tabular-nums text-red-500">{log.fail_count}</td>
+                              <td className="px-2 py-1.5 text-right tabular-nums">+{log.total_diff.toLocaleString()}원</td>
+                              <td className="px-2 py-1.5 text-center">
+                                <button
+                                  className="text-blue-500 hover:underline"
+                                  onClick={async () => {
+                                    const res = await fetchZeroMarginLogDetail(log.id);
+                                    setZmLogDetail(res.items);
+                                  }}
+                                >보기</button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 전상품 검�� 확인 모달 */}
+      {auditConfirmOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setAuditConfirmOpen(false)}>
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-sm mx-4" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-700">
+              <h3 className="font-bold text-sm">품단종 검증</h3>
+              <button className="text-gray-400 hover:text-gray-600 text-lg" onClick={() => setAuditConfirmOpen(false)}>&times;</button>
+            </div>
+            <div className="px-4 py-4 space-y-3">
+              <div className="text-sm text-gray-700 dark:text-gray-300 mb-1">검증 방식을 선택하세요</div>
+              {/* 오너클랜 비교 */}
+              <button
+                className="w-full text-left px-3 py-3 rounded-lg border-2 border-purple-500/60 bg-purple-50 dark:bg-purple-900/20 hover:bg-purple-100 dark:hover:bg-purple-900/40 transition"
+                onClick={() => handleAuditStart('ownerclan')}
+              >
+                <div className="text-sm font-bold text-purple-700 dark:text-purple-300">오너클랜 비교</div>
+                <div className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                  오너클랜 sale_status와 SS status_type을 W코드로 비교 (5초)
+                </div>
+              </button>
+              {/* API 검증 */}
+              <button
+                className="w-full text-left px-3 py-3 rounded-lg border border-gray-200 dark:border-gray-600 bg-gray-50 dark:bg-gray-700/50 hover:bg-gray-100 dark:hover:bg-gray-700 transition"
+                onClick={() => handleAuditStart('api')}
+              >
+                <div className="text-sm font-bold text-orange-600 dark:text-orange-400">네이버 API 전수 검증</div>
+                <div className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                  25만건 네이버 API 호출로 실제 상태 확인 (~80분)
+                </div>
+              </button>
+              <button
+                className="w-full px-4 py-2 text-sm bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded hover:bg-gray-300 dark:hover:bg-gray-600 font-medium"
+                onClick={() => setAuditConfirmOpen(false)}
+              >취소</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 검증 이력 모달 */}
+      {auditLogsOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => { setAuditLogsOpen(false); setAuditDetail(null); }}>
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-2xl mx-4 max-h-[80vh] flex flex-col" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-700 shrink-0">
+              <h3 className="font-bold text-sm">
+                {auditDetail ? `검증 상세 #${auditDetailId}` : '검증 이력'}
+              </h3>
+              <div className="flex items-center gap-2">
+                {auditDetail && (
+                  <button className="text-xs text-blue-400 hover:underline" onClick={() => { setAuditDetail(null); setAuditDetailId(0); }}>목록으로</button>
+                )}
+                <button className="text-gray-400 hover:text-gray-600 text-lg" onClick={() => { setAuditLogsOpen(false); setAuditDetail(null); }}>&times;</button>
+              </div>
+            </div>
+            <div className="px-4 py-3 overflow-y-auto flex-1">
+              {auditDetail ? (
+                <div className="space-y-3">
+                  {/* 요약 */}
+                  <div className="flex flex-wrap gap-2">
+                    {auditDetail.summary.map(s => (
+                      <span key={s.action} className={`px-2 py-1 rounded text-xs font-medium ${
+                        s.action === 'fixed' ? 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400' :
+                        s.action === 'closed' ? 'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300' :
+                        s.action === 'error' ? 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400' :
+                        'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400'
+                      }`}>
+                        {s.action}: {s.cnt}건
+                      </span>
+                    ))}
+                  </div>
+                  {/* 변경 목록 */}
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="border-b border-gray-200 dark:border-gray-700 text-gray-500">
+                        <th className="text-left py-1 px-1">W코드</th>
+                        <th className="text-left py-1 px-1">상점</th>
+                        <th className="text-center py-1 px-1">DB상태</th>
+                        <th className="text-center py-1 px-1">API상태</th>
+                        <th className="text-center py-1 px-1">조치</th>
+                        <th className="text-left py-1 px-1">비고</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {auditDetail.changes.map(c => (
+                        <tr key={c.id} className="border-b border-gray-100 dark:border-gray-700/50">
+                          <td className="py-1 px-1 font-mono">{c.seller_management_code || c.origin_product_no}</td>
+                          <td className="py-1 px-1">{c.store_name}</td>
+                          <td className="py-1 px-1 text-center">{c.db_status}</td>
+                          <td className="py-1 px-1 text-center">{c.api_status}</td>
+                          <td className="py-1 px-1 text-center">
+                            <span className={`px-1.5 py-0.5 rounded ${
+                              c.action === 'fixed' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400' :
+                              c.action === 'closed' ? 'bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-300' :
+                              'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
+                            }`}>{c.action}</span>
+                          </td>
+                          <td className="py-1 px-1 text-gray-400 truncate max-w-[120px]">{c.error_detail || ''}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {auditDetail.changes.length === 0 && (
+                    <div className="text-center text-sm text-gray-400 py-4">변경 사항 없음 (전부 일치)</div>
+                  )}
+                </div>
+              ) : (
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b border-gray-200 dark:border-gray-700 text-gray-500">
+                      <th className="text-left py-1.5 px-1">일시</th>
+                      <th className="text-center py-1.5 px-1">유형</th>
+                      <th className="text-right py-1.5 px-1">대상</th>
+                      <th className="text-right py-1.5 px-1">확인</th>
+                      <th className="text-right py-1.5 px-1">일치</th>
+                      <th className="text-right py-1.5 px-1">불일치</th>
+                      <th className="text-right py-1.5 px-1">CLOSE</th>
+                      <th className="text-right py-1.5 px-1">에러</th>
+                      <th className="text-right py-1.5 px-1">시간</th>
+                      <th className="py-1.5 px-1"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {auditLogs.map(log => (
+                      <tr key={log.id} className="border-b border-gray-100 dark:border-gray-700/50 hover:bg-gray-50 dark:hover:bg-gray-700/30">
+                        <td className="py-1.5 px-1">{log.started_at ? new Date(log.started_at).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '-'}</td>
+                        <td className="py-1.5 px-1 text-center">
+                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                            log.source === 'ownerclan' ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400'
+                              : 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400'
+                          }`}>{log.source === 'ownerclan' ? 'OC비교' : 'API'}</span>
+                        </td>
+                        <td className="py-1.5 px-1 text-right">{log.total_target.toLocaleString()}</td>
+                        <td className="py-1.5 px-1 text-right">{log.checked.toLocaleString()}</td>
+                        <td className="py-1.5 px-1 text-right text-green-600 dark:text-green-400">{log.match_count.toLocaleString()}</td>
+                        <td className="py-1.5 px-1 text-right text-yellow-600 dark:text-yellow-400">{log.mismatch_count.toLocaleString()}</td>
+                        <td className="py-1.5 px-1 text-right">{log.closed_count.toLocaleString()}</td>
+                        <td className="py-1.5 px-1 text-right text-red-500">{log.api_error_count.toLocaleString()}</td>
+                        <td className="py-1.5 px-1 text-right">{log.elapsed_sec ? `${Math.floor(log.elapsed_sec / 60)}분` : '-'}</td>
+                        <td className="py-1.5 px-1">
+                          <button
+                            className="text-blue-400 hover:underline"
+                            onClick={() => handleAuditDetailOpen(log.id)}
+                          >상세</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               )}
             </div>
           </div>
@@ -1059,12 +1921,31 @@ function ExcelModal({ stores, onClose, currentFilters }: {
   const [statusEtc, setStatusEtc] = useState(true);
   const [wOnly, setWOnly] = useState(false);
   const [wCodes, setWCodes] = useState('');
+  const [productCount, setProductCount] = useState<number | null>(null);
+  const [orphanCodes, setOrphanCodes] = useState<string[] | null>(null);
+  const [orphanLoading, setOrphanLoading] = useState(false);
 
   // Progress states
   const [excelProgress, setExcelProgress] = useState<{ pct: number; status: 'loading' | 'done' | 'error' } | null>(null);
   const [wProgress, setWProgress] = useState<{ pct: number; status: 'loading' | 'done' | 'error' } | null>(null);
 
   const isBusy = (excelProgress?.status === 'loading') || (wProgress?.status === 'loading');
+
+  // 조건 변경 시 상품 수 조회
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const count = await fetchProductCount({
+          storeIds: allStores ? undefined : Array.from(selectedStoreIds),
+          statuses: (statusSale && statusSuspension && statusEtc) ? undefined :
+            [...(statusSale ? ['SALE'] : []), ...(statusSuspension ? ['SUSPENSION'] : []), ...(statusEtc ? ['CLOSE','PROHIBITION','WAIT'] : [])],
+          wOnly,
+        });
+        setProductCount(count);
+      } catch { setProductCount(null); }
+    };
+    load();
+  }, [allStores, selectedStoreIds, statusSale, statusSuspension, statusEtc, wOnly]);
 
   const handleAllStores = () => {
     if (allStores) {
@@ -1247,6 +2128,14 @@ function ExcelModal({ stores, onClose, currentFilters }: {
               </label>
             </div>
 
+            {/* 상품 수 표시 */}
+            {productCount !== null && (
+              <div className="text-center py-2 bg-gray-50 dark:bg-gray-700/50 rounded-lg">
+                <span className="text-xs text-gray-500 dark:text-gray-400">대상 상품: </span>
+                <span className="text-sm font-bold text-gray-900 dark:text-white">{productCount.toLocaleString()}개</span>
+              </div>
+            )}
+
             {/* 버튼 */}
             <div className="flex gap-2">
               <button
@@ -1290,6 +2179,49 @@ function ExcelModal({ stores, onClose, currentFilters }: {
                   readOnly
                   value={wCodes}
                 />
+              </div>
+            )}
+
+            {/* 원본없음 W코드 찾기 */}
+            <div className="border-t border-gray-200 dark:border-gray-700 pt-3">
+              <button
+                className="w-full px-4 py-2 text-sm bg-purple-600 text-white rounded hover:bg-purple-700 font-medium disabled:opacity-50"
+                onClick={async () => {
+                  setOrphanLoading(true);
+                  try {
+                    const res = await fetchOrphanWCodes(getStoreIds());
+                    setOrphanCodes(res.codes);
+                  } catch { setOrphanCodes([]); }
+                  finally { setOrphanLoading(false); }
+                }}
+                disabled={orphanLoading || isBusy}
+              >
+                {orphanLoading ? '조회 중...' : '오너클랜 상품대장에 없는 W코드 찾기'}
+              </button>
+            </div>
+
+            {orphanCodes !== null && !orphanLoading && (
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs text-purple-600 dark:text-purple-400 font-medium">원본없음 {orphanCodes.length.toLocaleString()}개</span>
+                  {orphanCodes.length > 0 && (
+                    <button
+                      className="text-xs text-blue-500 hover:underline"
+                      onClick={() => { navigator.clipboard.writeText(orphanCodes.join('\n')); }}
+                    >
+                      복사
+                    </button>
+                  )}
+                </div>
+                {orphanCodes.length > 0 ? (
+                  <textarea
+                    className="w-full h-40 text-xs border border-purple-300 dark:border-purple-600 rounded p-2 bg-purple-50 dark:bg-purple-900/20 font-mono"
+                    readOnly
+                    value={orphanCodes.join('\n')}
+                  />
+                ) : (
+                  <p className="text-xs text-gray-500 text-center py-2">모든 W코드가 오너클랜 상품대장에 존재합니다.</p>
+                )}
               </div>
             )}
           </div>
@@ -1431,7 +2363,10 @@ function SSProductDetailModal({ product: p, storeUrl, onClose, onRankTrack }: {
     return 'text-gray-500 dark:text-gray-400';
   };
 
-  const fields: { label: string; value: string | number | null }[] = [
+  const MASTER_STATUS: Record<number, string> = { 1: '판매중', 2: '품절/중지', 3: '판매종료' };
+  const CHANGE_LABELS: Record<string, string> = { price: '가격', shipping: '배송', product_name: '상품명', detail: '상세', image: '이미지', option: '옵션', info: '정보', compliance: '인증', notice: '공지' };
+
+  const fields: { label: string; value: string | number | null; highlight?: string }[] = [
     { label: '상품번호', value: p.origin_product_no },
     { label: '채널상품번호', value: p.channel_product_no },
     { label: '상품명', value: p.name },
@@ -1441,6 +2376,13 @@ function SSProductDetailModal({ product: p, storeUrl, onClose, onRankTrack }: {
     { label: '노출상태', value: p.channel_product_display_status_type || '-' },
     { label: '관리코드', value: p.seller_management_code || '-' },
     { label: '카테고리', value: catPath || p.category_id || '-' },
+    ...(p.master_price != null ? [
+      { label: '마스터 가격', value: p.master_price.toLocaleString() + '원', highlight: p.price_diff ? (p.price_diff > 0 ? 'text-red-500' : 'text-blue-500') : undefined },
+      { label: '마스터 상태', value: MASTER_STATUS[p.master_sale_status || 0] || '-', highlight: p.status_mismatch ? 'text-red-500 font-bold' : undefined },
+    ] : []),
+    ...(p.has_pending_changes ? [
+      { label: '변경사항', value: (p.pending_change_groups || '').split(',').map(g => CHANGE_LABELS[g] || g).join(', ') + ` (${p.pending_change_count}건)`, highlight: 'text-orange-500 font-bold' },
+    ] : []),
     { label: '동기화일시', value: p.synced_at ? new Date(p.synced_at).toLocaleString('ko-KR') : '-' },
     { label: '등록일', value: p.created_at ? new Date(p.created_at).toLocaleString('ko-KR') : '-' },
     { label: '수정일', value: p.updated_at ? new Date(p.updated_at).toLocaleString('ko-KR') : '-' },
@@ -1502,6 +2444,12 @@ function SSProductDetailModal({ product: p, storeUrl, onClose, onRankTrack }: {
                   상세페이지
                 </a>
               )}
+              <a
+                href={`#product-edit?opno=${p.origin_product_no}&store_id=${p.store_id}`}
+                className="px-4 py-2.5 text-sm font-medium bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors"
+              >
+                상품 편집
+              </a>
             </div>
 
             <table className="w-full text-sm">
@@ -1509,7 +2457,7 @@ function SSProductDetailModal({ product: p, storeUrl, onClose, onRankTrack }: {
                 {fields.map(f => (
                   <tr key={f.label}>
                     <td className="px-2 py-2 text-xs font-medium text-gray-500 dark:text-gray-400 w-28">{f.label}</td>
-                    <td className="px-2 py-2 text-xs break-all">{f.value ?? '-'}</td>
+                    <td className={`px-2 py-2 text-xs break-all ${f.highlight || ''}`}>{f.value ?? '-'}</td>
                   </tr>
                 ))}
               </tbody>
@@ -2002,6 +2950,104 @@ function RankTrackingModal({ product: p, stores, onClose }: {
             </div>
           )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+
+// ── 구매키워드 모달 ──
+function BuyKeywordModal({ productCode, productName, onClose }: {
+  productCode: string;
+  productName: string;
+  onClose: () => void;
+}) {
+  const [items, setItems] = useState<naverApi.BuyKeywordItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    setLoading(true);
+    naverApi.getBuyKeywords(productCode)
+      .then(res => {
+        if (res.success) setItems(res.results);
+        else setError('데이터를 불러올 수 없습니다');
+      })
+      .catch(() => setError('서버 연결 실패'))
+      .finally(() => setLoading(false));
+  }, [productCode]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
+      <div
+        className="bg-white dark:bg-[#1c1c2e] border border-gray-200 dark:border-[#2a2a40] rounded-xl shadow-2xl w-full max-w-3xl mx-4 max-h-[80vh] flex flex-col"
+        onClick={e => e.stopPropagation()}
+      >
+        {/* 헤더 */}
+        <div className="flex items-center justify-between px-5 py-3 border-b border-gray-200 dark:border-[#2a2a40] shrink-0">
+          <div>
+            <h3 className="text-[14px] font-extrabold text-gray-900 dark:text-gray-100">
+              구매키워드 <span className="text-[#03c75a]">#{productCode}</span>
+            </h3>
+            <p className="text-[11px] text-gray-500 dark:text-gray-400 truncate max-w-[400px]">{productName}</p>
+          </div>
+          <button className="text-gray-400 hover:text-gray-600 text-lg" onClick={onClose}>&times;</button>
+        </div>
+
+        {/* 본문 */}
+        <div className="overflow-auto flex-1">
+          {loading ? (
+            <div className="flex items-center justify-center py-20 text-gray-400">
+              <div className="w-5 h-5 border-2 border-[#03c75a] border-t-transparent rounded-full animate-spin mr-2" />
+              로딩중...
+            </div>
+          ) : error ? (
+            <div className="text-center py-20 text-red-400">{error}</div>
+          ) : items.length === 0 ? (
+            <div className="text-center py-20 text-gray-400 dark:text-gray-500">
+              <p className="text-[14px]">구매키워드 데이터가 없습니다</p>
+              <p className="text-[11px] mt-1">order 시스템에 해당 상품의 채널상품 데이터가 등록되지 않았습니다</p>
+            </div>
+          ) : (
+            <table className="w-full text-[12px]">
+              <thead className="sticky top-0 z-10">
+                <tr className="bg-[#f0f3f7] dark:bg-[#1a2332]">
+                  <th className="px-4 py-2.5 text-left font-bold text-gray-500 dark:text-gray-400">키워드</th>
+                  <th className="px-4 py-2.5 text-left font-bold text-gray-500 dark:text-gray-400">채널그룹</th>
+                  <th className="px-4 py-2.5 text-left font-bold text-gray-500 dark:text-gray-400">채널명</th>
+                  <th className="px-4 py-2.5 text-right font-bold text-gray-500 dark:text-gray-400">결제수</th>
+                  <th className="px-4 py-2.5 text-right font-bold text-gray-500 dark:text-gray-400">결제금액</th>
+                  <th className="px-4 py-2.5 text-left font-bold text-gray-500 dark:text-gray-400">판매자</th>
+                  <th className="px-4 py-2.5 text-left font-bold text-gray-500 dark:text-gray-400">업로드일</th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((item, i) => (
+                  <tr key={i} className="border-t border-gray-100 dark:border-[#2a2a40] hover:bg-gray-50 dark:hover:bg-[#222240] transition-colors">
+                    <td className="px-4 py-2 font-bold text-gray-900 dark:text-gray-100">{item.keyword}</td>
+                    <td className="px-4 py-2 text-gray-500 dark:text-gray-400">{item.channel_group}</td>
+                    <td className="px-4 py-2 text-gray-500 dark:text-gray-400">{item.channel_name}</td>
+                    <td className="px-4 py-2 text-right font-bold text-[#03c75a]">{item.order_count.toLocaleString()}</td>
+                    <td className="px-4 py-2 text-right font-medium text-gray-900 dark:text-gray-100">{item.order_amount.toLocaleString()}원</td>
+                    <td className="px-4 py-2 text-gray-500 dark:text-gray-400">{item.naver_shop_name}</td>
+                    <td className="px-4 py-2 text-[11px] text-gray-400 dark:text-gray-500">
+                      {item.uploaded_at ? new Date(item.uploaded_at).toLocaleDateString('ko-KR') : '-'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        {/* 하단 요약 */}
+        {items.length > 0 && (
+          <div className="px-5 py-2.5 border-t border-gray-200 dark:border-[#2a2a40] flex items-center gap-4 text-[11px] text-gray-500 dark:text-gray-400 shrink-0">
+            <span>총 <strong className="text-gray-900 dark:text-gray-100">{items.length}</strong>개 키워드</span>
+            <span>총 결제수 <strong className="text-[#03c75a]">{items.reduce((s, i) => s + i.order_count, 0).toLocaleString()}</strong></span>
+            <span>총 결제금액 <strong className="text-gray-900 dark:text-gray-100">{items.reduce((s, i) => s + i.order_amount, 0).toLocaleString()}원</strong></span>
+          </div>
+        )}
       </div>
     </div>
   );

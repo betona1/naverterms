@@ -69,6 +69,53 @@ export async function getRankSummary() {
   return data;
 }
 
+// ── 순위추적 그룹/피벗/자동 ──
+export interface RankGroupKeyword {
+  target_id: number;
+  keyword: string;
+  keyword_id: number;
+  current_rank: number | null;
+  previous_rank: number | null;
+  change: number | null;
+  tracked_at: string | null;
+}
+export interface RankGroup {
+  group_key: string;
+  target_type: string;
+  target_value: string;
+  display_name: string;
+  matched_product_id: string;
+  source_product_id: number | null;
+  source_product_name: string;
+  auto_track: boolean;
+  auto_track_times: string[];
+  keyword_count: number;
+  keywords: RankGroupKeyword[];
+}
+export async function getRankGroupedSummary(): Promise<RankGroup[]> {
+  const { data } = await api.get('/rank/summary-grouped/');
+  return data;
+}
+export interface RankPivotData {
+  keywords: string[];
+  dates: string[];
+  data: Record<string, Record<string, number | null>>;
+}
+export async function getRankPivot(groupKey: string, days = 30): Promise<RankPivotData> {
+  const { data } = await api.get('/rank/pivot/', { params: { group_key: groupKey, days } });
+  return data;
+}
+export async function getTrackedProductIds(): Promise<number[]> {
+  const { data } = await api.get('/rank/tracked-products/');
+  return data;
+}
+export async function toggleRankAutoTrack(groupKey: string, enabled: boolean, times?: string[]) {
+  const payload: any = { group_key: groupKey, enabled };
+  if (times !== undefined) payload.times = times;
+  const { data } = await api.post('/rank/toggle-auto/', payload);
+  return data;
+}
+
 // ── 스케줄 ──
 export async function getSchedules() {
   const { data } = await api.get('/schedules/');
@@ -97,6 +144,43 @@ export async function ucStatus(logSince = 0) {
 }
 export async function ucStop() {
   const { data } = await api.post('/uc/stop/');
+  return data;
+}
+
+// ── 스마트 수집/분석 ──
+export interface SmartCollectResult {
+  keyword: string;
+  tab?: string;
+  count?: number;
+  total?: number;
+  keyword_id?: number;
+  has_terms?: boolean;
+  error?: string;
+}
+export interface SmartCollectResponse {
+  method_used: 'http' | 'api';
+  terms_source?: string;
+  products_source?: string;
+  results: SmartCollectResult[];
+  blocked: boolean;
+  logs?: any[];
+  api_results?: SmartCollectResult[];
+}
+export async function smartCollect(
+  keywords: string[],
+  method: 'auto' | 'http' | 'api' = 'auto',
+  tabs?: string[],
+): Promise<SmartCollectResponse> {
+  const payload: any = { keywords, method };
+  if (tabs) payload.tabs = tabs;
+  const { data } = await api.post('/collect/', payload);
+  return data;
+}
+export async function smartAnalysis(
+  keywordId: number,
+  method: 'auto' | 'api' = 'auto',
+) {
+  const { data } = await api.post(`/smart-analysis/${keywordId}/`, { method });
   return data;
 }
 
@@ -150,6 +234,62 @@ export async function autoMatchKeywords(productName: string, keywords: string[])
 export async function getCategoryNames(cids: string[]): Promise<Record<string, string>> {
   const { data } = await api.get('/datalab/category-names/', { params: { cids: cids.join(',') } });
   return data;
+}
+
+// ── 구매키워드 ──
+export interface BuyKeywordItem {
+  naver_product_name: string;
+  keyword: string;
+  channel_name: string;
+  channel_group: string;
+  order_count: number;
+  order_amount: number;
+  naver_shop_name: string;
+  uploaded_at: string;
+}
+export async function getBuyKeywords(productCode: string): Promise<{ success: boolean; results: BuyKeywordItem[] }> {
+  const { data } = await api.get(`/buy-keywords/${productCode}/`);
+  return data;
+}
+
+// ── 보고서 ──
+export interface Report {
+  id: number;
+  title: string;
+  report_type: string;
+  created_at: string;
+  content?: string;
+}
+export async function getReports(): Promise<Report[]> {
+  const { data } = await api.get('/reports/');
+  return data;
+}
+export async function getReport(id: number): Promise<Report> {
+  const { data } = await api.get(`/reports/${id}/`);
+  return data;
+}
+export async function createReport(payload: { title: string; content: string; report_type?: string }): Promise<Report> {
+  const { data } = await api.post('/reports/', payload);
+  return data;
+}
+export async function deleteReport(id: number): Promise<void> {
+  await api.delete(`/reports/${id}/`);
+}
+export function downloadReport(id: number) {
+  window.open(`/api/naver/reports/${id}/download/`, '_blank');
+}
+
+// ── 순위컨닝 ──
+export async function getRankCunningProducts() {
+  const { data } = await api.get('/rank-cunning/');
+  return data;
+}
+export async function addRankCunningProducts(products: any[]) {
+  const { data } = await api.post('/rank-cunning/', { products });
+  return data;
+}
+export async function deleteRankCunningProduct(id: number) {
+  await api.delete(`/rank-cunning/${id}/`);
 }
 
 // ── 엑셀 다운로드 ──

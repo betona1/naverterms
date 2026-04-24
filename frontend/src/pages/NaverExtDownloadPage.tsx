@@ -1,6 +1,6 @@
 import { useTheme } from '../hooks/useTheme';
 
-const VERSION = '1.4.4';
+const VERSION = '3.0.0';
 const ZIP_FILE = `/downloads/naver-term-analyzer-v${VERSION}.zip`;
 
 const STEPS = [
@@ -29,9 +29,11 @@ export default function NaverExtDownloadPage() {
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#03c75a]/10 text-[#03c75a] text-[11px] font-bold mb-3">
             v{VERSION}
           </div>
-          <h1 className="text-[24px] font-extrabold mb-2">네이버쇼핑 Term 분석기</h1>
+          <h1 className="text-[24px] font-extrabold mb-2">Term 수집기</h1>
           <p className={`text-[13px] ${sub}`}>
             Chrome 확장프로그램 — 네이버쇼핑 검색 키워드의 term 구조 분석 및 순위추적
+            <br />
+            <span className="text-[#03c75a] font-bold">내부용</span> (Django DB 저장) / <span className="text-[#60a5fa] font-bold">외부용</span> (로컬 저장 + CSV)
           </p>
         </div>
 
@@ -40,7 +42,7 @@ export default function NaverExtDownloadPage() {
           <div className="text-[40px] mb-3">&#128230;</div>
           <h2 className="text-[16px] font-bold mb-1">Chrome 확장프로그램 다운로드</h2>
           <p className={`text-[12px] ${sub} mb-4`}>
-            naver-term-analyzer-v{VERSION}.zip ({`~20KB`})
+            naver-term-analyzer-v{VERSION}.zip ({`~36KB`})
           </p>
           <a
             href={ZIP_FILE}
@@ -74,12 +76,12 @@ export default function NaverExtDownloadPage() {
           <h2 className="text-[15px] font-bold mb-4">주요 기능</h2>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {[
+              { t: '내부/외부 모드', d: '내부: Django DB 저장 / 외부: 로컬 저장 + CSV 내보내기' },
               { t: 'Term 구조 분석', d: '네이버쇼핑 키워드의 term 분해 결과 추출' },
-              { t: '6가지 가중치', d: '순서고정/위치/상품명/파트/카테고리 가중치 계산' },
               { t: '탭별 상품 수집', d: '전체/가격비교/네이버페이 탭 자동 순회' },
               { t: '순위추적', d: '특정 스토어/상품의 검색 순위 자동 모니터링' },
-              { t: 'CAPTCHA 대응', d: '캡차 발생 시 자동 일시정지 후 알림' },
-              { t: '자동 스케줄', d: '설정된 시간에 자동 순위추적 실행' },
+              { t: 'CAPTCHA 강화', d: '캡차/차단 감지 시 자동 일시정지, 수동 해결 후 재개' },
+              { t: 'CSV 내보내기', d: '수집 결과를 Excel 호환 CSV로 다운로드 (외부 모드)' },
             ].map(f => (
               <div key={f.t} className={`p-3 rounded-lg ${stepBg}`}>
                 <div className="text-[12px] font-bold mb-0.5">{f.t}</div>

@@ -244,3 +244,107 @@ def update_product_sales_summary():
 
     _sold_cache['ts'] = 0
     return updated
+
+
+def save_daily_snapshot():
+    """오늘 날짜 기준 스토어별 + 전체 판매 스냅샷 저장 (하루 1회)"""
+    from datetime import date
+    today = date.today()
+
+    with connections['myproduct'].cursor() as cur:
+        # 스토어별 집계
+        cur.execute("""
+            SELECT store_id,
+                   COUNT(*) as total,
+                   SUM(CASE WHEN all_order_qty > 0 THEN 1 ELSE 0 END) as sold,
+                   SUM(CASE WHEN total_order_qty > 0 THEN 1 ELSE 0 END) as ss_sold,
+                   COALESCE(SUM(all_order_qty), 0),
+                   COALESCE(SUM(all_order_amount), 0),
+                   COALESCE(SUM(total_order_qty), 0),
+                   COALESCE(SUM(total_order_amount), 0)
+            FROM smartstore_product
+            GROUP BY store_id
+        """)
+        store_rows = cur.fetchall()
+
+        # 전체 합계
+        cur.execute("""
+            SELECT COUNT(*),
+                   SUM(CASE WHEN all_order_qty > 0 THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN total_order_qty > 0 THEN 1 ELSE 0 END),
+                   COALESCE(SUM(all_order_qty), 0),
+                   COALESCE(SUM(all_order_amount), 0),
+                   COALESCE(SUM(total_order_qty), 0),
+                   COALESCE(SUM(total_order_amount), 0)
+            FROM smartstore_product
+        """)
+        total_row = cur.fetchone()
+
+        # UPSERT — 같은 날 재실행해도 덮어쓰기
+        upsert_sql = """
+            INSERT INTO product_sales_snapshot
+                (snapshot_date, store_id, total_products, sold_products, ss_sold_products,
+                 total_order_qty, total_order_amount, ss_order_qty, ss_order_amount)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                total_products=VALUES(total_products),
+                sold_products=VALUES(sold_products),
+                ss_sold_products=VALUES(ss_sold_products),
+                total_order_qty=VALUES(total_order_qty),
+                total_order_amount=VALUES(total_order_amount),
+                ss_order_qty=VALUES(ss_order_qty),
+                ss_order_amount=VALUES(ss_order_amount)
+        """
+
+        # 스토어별
+        for r in store_rows:
+            cur.execute(upsert_sql, [today, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]])
+
+        # 전체 (store_id=0)
+        cur.execute(upsert_sql, [today, 0, total_row[0], total_row[1], total_row[2],
+                                 total_row[3], total_row[4], total_row[5], total_row[6]])
+
+    return len(store_rows) + 1
+
+
+def get_sales_delta(store_id=0):
+    """전날 대비 판매 증감 반환"""
+    from datetime import date, timedelta
+    today = date.today()
+    yesterday = today - timedelta(days=1)
+
+    with connections['myproduct'].cursor() as cur:
+        cur.execute(
+            "SELECT snapshot_date, sold_products, ss_sold_products, "
+            "total_order_qty, total_order_amount, ss_order_qty, ss_order_amount "
+            "FROM product_sales_snapshot "
+            "WHERE store_id = %s AND snapshot_date IN (%s, %s) "
+            "ORDER BY snapshot_date",
+            [store_id, yesterday, today],
+        )
+        rows = {r[0]: r for r in cur.fetchall()}
+
+    t = rows.get(today)
+    y = rows.get(yesterday)
+
+    if not t:
+        return None
+
+    result = {
+        'date': str(today),
+        'sold_products': t[1],
+        'ss_sold_products': t[2],
+        'total_order_qty': t[3],
+        'total_order_amount': t[4],
+        'ss_order_qty': t[5],
+        'ss_order_amount': t[6],
+    }
+
+    if y:
+        result['delta_sold'] = t[1] - y[1]
+        result['delta_ss_sold'] = t[2] - y[2]
+        result['delta_order_qty'] = t[3] - y[3]
+        result['delta_order_amount'] = t[4] - y[4]
+        result['prev_date'] = str(yesterday)
+
+    return result

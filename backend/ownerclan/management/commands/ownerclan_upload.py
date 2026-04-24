@@ -12,6 +12,7 @@ from django.db import connections
 from ownerclan.ownerclan_product_service import (
     EXCEL_COL_MAP, DB,
     _parse_excel_row, _safe_str, _field_changed,
+    record_field_changes,
 )
 
 PROGRESS_INTERVAL = 1000
@@ -147,6 +148,9 @@ def _process_upload(file_path, task_id):
                 if not any_current_changed:
                     skipped += 1
                 else:
+                    # 변경사항 로그 기록 (UPDATE 전에 old_data와 비교)
+                    record_field_changes(pid, product_code, old_data, data)
+
                     set_parts = [f"{f}=%s" for f in fields]
                     set_parts.append("uploaded_at=%s")
                     vals = [data[f] for f in fields] + [now]

@@ -22,10 +22,18 @@ urlpatterns = [
     path('rank/targets/<int:pk>/', views.RankTargetDetailView.as_view()),
     path('rank/history/', views.RankHistoryView.as_view()),
     path('rank/summary/', views.RankSummaryView.as_view()),
+    path('rank/summary-grouped/', views.RankGroupedSummaryView.as_view()),
+    path('rank/pivot/', views.RankPivotView.as_view()),
+    path('rank/tracked-products/', views.RankTrackedProductsView.as_view()),
+    path('rank/toggle-auto/', views.RankToggleAutoView.as_view()),
 
     # 스케줄
     path('schedules/', views.ScheduleListView.as_view()),
     path('schedules/<int:pk>/', views.ScheduleDetailView.as_view()),
+
+    # 스마트 수집/분석
+    path('collect/', views.SmartCollectView.as_view()),
+    path('smart-analysis/<int:keyword_id>/', views.SmartAnalysisView.as_view()),
 
     # 데이터 초기화
     path('reset-data/', views.DataResetView.as_view()),
@@ -44,6 +52,18 @@ urlpatterns = [
     path('uc/start/', views.UCStartView.as_view()),
     path('uc/status/', views.UCStatusView.as_view()),
     path('uc/stop/', views.UCStopView.as_view()),
+
+    # 구매키워드 (order 시스템 프록시)
+    path('buy-keywords/<str:product_code>/', views.ProductBuyKeywordProxyView.as_view()),
+
+    # 보고서
+    path('reports/', views.ReportListView.as_view()),
+    path('reports/<int:pk>/', views.ReportDetailView.as_view()),
+    path('reports/<int:pk>/download/', views.ReportDownloadView.as_view()),
+
+    # 순위컨닝
+    path('rank-cunning/', views.RankCunningListView.as_view()),
+    path('rank-cunning/<int:pk>/', views.RankCunningDetailView.as_view()),
 
     # 엑셀
     path('export/terms/', views.ExportTermsView.as_view()),

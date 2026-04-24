@@ -13,10 +13,19 @@ import {
   syncProducts,
   activateSuspended,
   downloadSampleExcel,
+  fetchSyncStatusPreview,
+  executeSyncStatus,
+  fetchChangeLogSummary,
+  fetchChangeLogDates,
+  fetchProductChangeLog,
   type OwnerClanProductItem,
   type ProductDetail,
   type ProductStats,
   type UploadTaskStatus,
+  type SyncStatusPreview,
+  type ChangeLogSummary,
+  type ChangeLogItem,
+  type ChangeLogDateEntry,
 } from '../api/ownerclanProductApi';
 
 const SALE_STATUS_LABELS: Record<number, string> = { 1: '판매중', 2: '품절', 3: '단종' };
@@ -84,13 +93,24 @@ export default function OwnerClanProductsPage() {
 
   const [exportProgress, setExportProgress] = useState<{ pct: number; status: 'loading' | 'done' | 'error'; label: string } | null>(null);
   const [wCodes, setWCodes] = useState('');
+  const [statusSyncing, setStatusSyncing] = useState(false);
+  const [statusSyncResult, setStatusSyncResult] = useState<{ success: number; fail: number; skipped: number } | null>(null);
+  const [syncPreview, setSyncPreview] = useState<SyncStatusPreview | null>(null);
+  const [syncPreviewExpanded, setSyncPreviewExpanded] = useState(false);
+  const [syncPreviewLoading, setSyncPreviewLoading] = useState(false);
+  const [changeLog, setChangeLog] = useState<ChangeLogSummary | null>(null);
+  const [changeLogExpanded, setChangeLogExpanded] = useState(false);
+  const [changeLogDate, setChangeLogDate] = useState<string>('');
+  const [changeLogPage, setChangeLogPage] = useState(1);
+  const [changeLogDates, setChangeLogDates] = useState<ChangeLogDateEntry[]>([]);
+  const [detailChangeLog, setDetailChangeLog] = useState<ChangeLogItem[]>([]);
 
   const loadProducts = useCallback(async () => {
     setLoading(true);
     try {
       const res = await fetchProducts(
         page, perPage,
-        saleStatus ? Number(saleStatus) : undefined,
+        saleStatus ? (saleStatus.includes(',') ? saleStatus : Number(saleStatus)) : undefined,
         syncFilter !== '' ? Number(syncFilter) : undefined,
         search || undefined,
         changedField || undefined,
@@ -113,9 +133,26 @@ export default function OwnerClanProductsPage() {
     setChangedFieldCounts(counts);
   }, []);
 
+
+  const loadChangeLog = useCallback(async () => {
+    try {
+      const cl = await fetchChangeLogSummary(changeLogDate || undefined, changeLogPage, 50);
+      setChangeLog(cl);
+    } catch { /* ignore */ }
+  }, [changeLogDate, changeLogPage]);
+
+  const loadChangeLogDates = useCallback(async () => {
+    try {
+      const res = await fetchChangeLogDates();
+      setChangeLogDates(res.dates);
+    } catch { /* ignore */ }
+  }, []);
+
   useEffect(() => { loadProducts(); }, [loadProducts]);
   useEffect(() => { loadStats(); }, [loadStats]);
   useEffect(() => { loadChangedFields(); }, [loadChangedFields]);
+  useEffect(() => { loadChangeLog(); }, [loadChangeLog]);
+  useEffect(() => { loadChangeLogDates(); }, [loadChangeLogDates]);
 
   useEffect(() => {
     return () => {
@@ -133,7 +170,6 @@ export default function OwnerClanProductsPage() {
           if (uploadPollRef.current) clearInterval(uploadPollRef.current);
           uploadPollRef.current = null;
           const rd = t.result_data;
-          setUploadMsg(`신규 ${rd.inserted ?? 0}건, 변경 ${rd.updated ?? 0}건, 스킵 ${rd.skipped ?? 0}건 (총 ${rd.total ?? 0}건)`);
           setUploadTask(null);
           loadProducts();
           loadStats();
@@ -141,6 +177,18 @@ export default function OwnerClanProductsPage() {
           // 판매중지 상품이 있으면 활성화 확인 모달 표시
           if (rd.suspended_count && rd.suspended_count > 0) {
             setActivatePrompt({ taskId: t.task_id, count: rd.suspended_count });
+          }
+          // 엑셀 업로드 후 자동 품절해제 동기화
+          try {
+            const preview = await fetchSyncStatusPreview();
+            if (preview.to_activate_total > 0) {
+              const result = await executeSyncStatus('activate');
+              setUploadMsg(`신규 ${rd.inserted ?? 0}건, 변경 ${rd.updated ?? 0}건, 스킵 ${rd.skipped ?? 0}건 (총 ${rd.total ?? 0}건) · 품절해제 ${result.success}건 자동동기화`);
+            } else {
+              setUploadMsg(`신규 ${rd.inserted ?? 0}건, 변경 ${rd.updated ?? 0}건, 스킵 ${rd.skipped ?? 0}건 (총 ${rd.total ?? 0}건)`);
+            }
+          } catch {
+            setUploadMsg(`신규 ${rd.inserted ?? 0}건, 변경 ${rd.updated ?? 0}건, 스킵 ${rd.skipped ?? 0}건 (총 ${rd.total ?? 0}건)`);
           }
         } else if (t.status === 'error') {
           if (uploadPollRef.current) clearInterval(uploadPollRef.current);
@@ -239,9 +287,14 @@ export default function OwnerClanProductsPage() {
   const openDetail = async (id: number) => {
     setDetailId(id);
     setDetailLoading(true);
+    setDetailChangeLog([]);
     try {
-      const d = await fetchProductDetail(id);
+      const [d, cl] = await Promise.all([
+        fetchProductDetail(id),
+        fetchProductChangeLog(id).catch(() => [] as ChangeLogItem[]),
+      ]);
       setDetail(d);
+      setDetailChangeLog(cl);
     } finally {
       setDetailLoading(false);
     }
@@ -400,35 +453,127 @@ export default function OwnerClanProductsPage() {
         )}
 
         {/* Stats */}
-        {stats && (
+        {stats && (<>
           <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
-            <StatCard label="전체" value={stats.total} />
-            <StatCard label="판매중" value={stats.selling} color="text-green-600 dark:text-green-400" />
-            <StatCard label="품절" value={stats.soldout} color="text-yellow-600 dark:text-yellow-400" />
-            <StatCard label="단종" value={stats.discontinued} color="text-red-600 dark:text-red-400" />
-            <StatCard label="변경됨" value={stats.changed} color="text-orange-600 dark:text-orange-400" />
+            <StatCard label="전체" value={stats.total}
+              active={!saleStatus && !syncFilter && !changedField}
+              onClick={() => { setSaleStatus(''); setSyncFilter(''); setChangedField(''); setPage(1); }} />
+            <StatCard label="판매중" value={stats.selling} color="text-green-600 dark:text-green-400"
+              active={saleStatus === '1'}
+              onClick={() => { setSaleStatus('1'); setSyncFilter(''); setChangedField(''); setPage(1); }} />
+            <StatCard label="품절" value={stats.soldout} color="text-yellow-600 dark:text-yellow-400"
+              active={saleStatus === '2'}
+              onClick={() => { setSaleStatus('2'); setSyncFilter(''); setChangedField(''); setPage(1); }} />
+            <StatCard label="단종" value={stats.discontinued} color="text-red-600 dark:text-red-400"
+              active={saleStatus === '3'}
+              onClick={() => { setSaleStatus('3'); setSyncFilter(''); setChangedField(''); setPage(1); }} />
+            <StatCard label="수정사항" value={stats.changed} color="text-orange-600 dark:text-orange-400"
+              active={changedField === '__any__'}
+              onClick={() => { setChangedField('__any__'); setSaleStatus(''); setSyncFilter(''); setPage(1); }} />
           </div>
-        )}
+          {/* 스마트스토어 동기화 */}
+          <div className="flex items-center gap-2">
+            <button
+              disabled={statusSyncing || syncPreviewLoading}
+              className={`px-4 py-2 text-xs font-bold rounded transition-colors ${
+                statusSyncing || syncPreviewLoading
+                  ? 'bg-gray-400 text-white cursor-not-allowed'
+                  : 'bg-blue-600 text-white hover:bg-blue-700'
+              }`}
+              onClick={async () => {
+                setSyncPreviewLoading(true);
+                setStatusSyncResult(null);
+                try {
+                  const p = await fetchSyncStatusPreview();
+                  setSyncPreview(p);
+                  setSyncPreviewExpanded(false);
+                  if (p.total_sync === 0) return;
+                  if (!confirm(`스마트스토어 ${p.total_sync.toLocaleString()}개 상품 상태를 동기화하시겠습니까?\n\n품절해제→SALE: ${p.to_activate_total.toLocaleString()}\nSALE→품절: ${p.to_soldout.toLocaleString()}\nSALE→단종: ${p.to_discontinued.toLocaleString()}`)) return;
+                  setStatusSyncing(true);
+                  const result = await executeSyncStatus();
+                  setStatusSyncResult({ success: result.success, fail: result.fail, skipped: result.skipped ?? 0 });
+                  loadStats();
+                  loadProducts();
+                } catch (e: any) {
+                  alert('동기화 오류: ' + (e.message || e));
+                } finally {
+                  setSyncPreviewLoading(false);
+                  setStatusSyncing(false);
+                }
+              }}
+            >
+              {syncPreviewLoading || statusSyncing ? '동기화 진행중...' : '스마트스토어 동기화'}
+            </button>
+            {statusSyncResult && (
+              <span className="text-xs text-gray-500 dark:text-gray-400">
+                성공 {statusSyncResult.success.toLocaleString()} / 실패 {statusSyncResult.fail.toLocaleString()}
+                {statusSyncResult.skipped > 0 && ` / 제외 ${statusSyncResult.skipped.toLocaleString()}`}
+              </span>
+            )}
+          </div>
+          {/* 동기화 결과/미리보기 패널 */}
+          {syncPreview && (
+            <div className="bg-white dark:bg-[#1e1e2e] rounded border border-blue-200 dark:border-blue-800 p-3 text-xs space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="font-bold text-blue-600 dark:text-blue-400">
+                  {statusSyncResult ? '스마트스토어 동기화 완료' : '스마트스토어 동기화 현황'}
+                </span>
+                <div className="flex items-center gap-3">
+                  <span className="text-gray-400">상태변경 {syncPreview.total_sync.toLocaleString()}개 · 가격변동 {syncPreview.price_changed.toLocaleString()}개 제외</span>
+                  <button className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200" onClick={() => setSyncPreview(null)}>✕</button>
+                </div>
+              </div>
+              {/* 간략 표시 — 스마트스토어 기준 */}
+              <div className="flex flex-wrap gap-4 text-gray-700 dark:text-gray-300">
+                {syncPreview.to_activate_total > 0 && (
+                  <span>품절해제→SALE <b className="text-green-600 dark:text-green-400">{syncPreview.to_activate_total.toLocaleString()}</b>
+                    <span className="text-gray-400 ml-1">(중지 {syncPreview.to_activate_suspension.toLocaleString()} + 품절 {syncPreview.to_activate_outofstock.toLocaleString()})</span>
+                  </span>
+                )}
+                {syncPreview.to_soldout > 0 && <span>SALE→품절처리 <b className="text-yellow-600 dark:text-yellow-400">{syncPreview.to_soldout.toLocaleString()}</b></span>}
+                {syncPreview.to_discontinued > 0 && <span>SALE→단종처리 <b className="text-red-600 dark:text-red-400">{syncPreview.to_discontinued.toLocaleString()}</b></span>}
+                {syncPreview.total_sync === 0 && <span className="text-gray-400">동기화할 상태 변경 사항이 없습니다</span>}
+              </div>
+              {/* 펼치기 - 필드별 변경사항 */}
+              {Object.keys(syncPreview.field_changes).length > 0 && (
+                <>
+                  <button
+                    className="text-blue-500 hover:underline text-xs"
+                    onClick={() => setSyncPreviewExpanded(!syncPreviewExpanded)}
+                  >{syncPreviewExpanded ? '▲ 접기' : '▼ 필드별 변경사항 보기'}</button>
+                  {syncPreviewExpanded && (
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-1 text-gray-600 dark:text-gray-400 pl-2 border-l-2 border-blue-200 dark:border-blue-800">
+                      {syncPreview.field_changes.price != null && <span>가격변동 <b>{syncPreview.field_changes.price}</b></span>}
+                      {syncPreview.field_changes.product_name != null && <span>상품명 <b>{syncPreview.field_changes.product_name}</b></span>}
+                      {syncPreview.field_changes.detail_html != null && <span>상세페이지 <b>{syncPreview.field_changes.detail_html}</b></span>}
+                      {syncPreview.field_changes.image != null && <span>대표이미지 <b>{syncPreview.field_changes.image}</b></span>}
+                      {syncPreview.field_changes.shipping_fee != null && <span>배송비 <b>{syncPreview.field_changes.shipping_fee}</b></span>}
+                      {syncPreview.field_changes.return_fee != null && <span>반품비 <b>{syncPreview.field_changes.return_fee}</b></span>}
+                      {syncPreview.field_changes.combined_option != null && <span>옵션 <b>{syncPreview.field_changes.combined_option}</b></span>}
+                      {syncPreview.field_changes.manufacturer != null && <span>제조사 <b>{syncPreview.field_changes.manufacturer}</b></span>}
+                      {syncPreview.field_changes.origin != null && <span>원산지 <b>{syncPreview.field_changes.origin}</b></span>}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+        </>)}
+
+        {/* 통합 변경사항 리포트 */}
+        <ChangeLogReport
+          changeLog={changeLog}
+          expanded={changeLogExpanded}
+          onToggle={() => setChangeLogExpanded(!changeLogExpanded)}
+          dates={changeLogDates}
+          selectedDate={changeLogDate}
+          onDateChange={(d) => { setChangeLogDate(d); setChangeLogPage(1); }}
+          logPage={changeLogPage}
+          onPageChange={setChangeLogPage}
+        />
 
         {/* Filters */}
         <div className="flex flex-wrap gap-2 items-center">
-          <button
-            className={`px-3 py-1.5 text-xs font-bold rounded transition-colors ${
-              syncFilter === '0' && !changedField
-                ? 'bg-orange-500 text-white'
-                : 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400 hover:bg-orange-200 dark:hover:bg-orange-900/50'
-            }`}
-            onClick={() => {
-              if (syncFilter === '0' && !changedField) {
-                setSyncFilter(''); setChangedField('');
-              } else {
-                setSyncFilter('0'); setChangedField('');
-              }
-              setPage(1);
-            }}
-          >
-            수정사항만 {stats?.changed ? `(${stats.changed.toLocaleString()})` : ''}
-          </button>
           <select className="text-xs border border-gray-300 dark:border-[#444] rounded px-2 py-1.5 bg-white dark:bg-[#2d2d2d]"
             value={saleStatus} onChange={e => { setSaleStatus(e.target.value); setPage(1); }}>
             <option value="">전체 상태</option>
@@ -558,8 +703,8 @@ export default function OwnerClanProductsPage() {
                     </span>
                   </td>
                   <td className="px-3 py-2 text-center">
-                    {p.is_synced === 0 ? (
-                      <span className="inline-block px-2 py-0.5 rounded-full text-[10px] font-medium bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400">변경됨</span>
+                    {p.has_changes ? (
+                      <span className="inline-block px-2 py-0.5 rounded-full text-[10px] font-medium bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400">수정사항</span>
                     ) : (
                       <span className="text-[10px] text-gray-400">일치</span>
                     )}
@@ -598,7 +743,8 @@ export default function OwnerClanProductsPage() {
         <DetailModal
           detail={detail}
           loading={detailLoading}
-          onClose={() => { setDetailId(null); setDetail(null); }}
+          changeLog={detailChangeLog}
+          onClose={() => { setDetailId(null); setDetail(null); setDetailChangeLog([]); }}
           onSync={(id) => handleSyncSingle(id)}
         />
       )}
@@ -652,22 +798,228 @@ export default function OwnerClanProductsPage() {
   );
 }
 
-function StatCard({ label, value, color }: { label: string; value: number; color?: string }) {
+function ChangeLogReport({ changeLog, expanded, onToggle, dates, selectedDate, onDateChange, logPage, onPageChange }: {
+  changeLog: ChangeLogSummary | null;
+  expanded: boolean;
+  onToggle: () => void;
+  dates: ChangeLogDateEntry[];
+  selectedDate: string;
+  onDateChange: (d: string) => void;
+  logPage: number;
+  onPageChange: (p: number) => void;
+}) {
+  if (!changeLog) return null;
+
+  const fc = changeLog.field_changes;
+  const ss = changeLog.soldout_sync;
+  const hasAnyData = fc.total > 0 || (ss && ss.status_changes > 0);
+
+  if (!hasAnyData && !selectedDate) return null;
+
+  const GROUP_COLORS: Record<string, string> = {
+    price: 'bg-red-500', shipping: 'bg-orange-500', product_name: 'bg-yellow-500',
+    detail: 'bg-blue-500', image: 'bg-purple-500', option: 'bg-pink-500',
+    info: 'bg-teal-500', compliance: 'bg-indigo-500', notice: 'bg-gray-500',
+  };
+  const GROUP_BADGE: Record<string, string> = {
+    price: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400',
+    shipping: 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400',
+    product_name: 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400',
+    detail: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400',
+    image: 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400',
+    option: 'bg-pink-100 text-pink-700 dark:bg-pink-900/30 dark:text-pink-400',
+    info: 'bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-400',
+    compliance: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400',
+    notice: 'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-400',
+  };
+
+  const pagination = changeLog.pagination;
+
   return (
-    <div className="bg-white dark:bg-[#1e1e2e] rounded border border-gray-200 dark:border-[#333] px-3 py-2">
+    <div className="bg-white dark:bg-[#1e1e2e] rounded border border-orange-200 dark:border-orange-800 p-3 text-xs space-y-2">
+      {/* Header */}
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <span className="font-bold text-orange-600 dark:text-orange-400">변경사항 리포트</span>
+          <select
+            className="text-[11px] border border-gray-300 dark:border-[#444] rounded px-1.5 py-0.5 bg-white dark:bg-[#2d2d2d] text-gray-700 dark:text-gray-300"
+            value={selectedDate}
+            onChange={e => onDateChange(e.target.value)}
+          >
+            <option value="">현재 미반영</option>
+            {dates.map(d => (
+              <option key={d.date} value={d.date}>
+                {d.date} ({d.field_changes > 0 ? `필드${d.field_changes}` : ''}{d.field_changes > 0 && d.soldout_changes > 0 ? '+' : ''}{d.soldout_changes > 0 ? `품절${d.soldout_changes.toLocaleString()}` : ''})
+              </option>
+            ))}
+          </select>
+        </div>
+        <button
+          className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 text-xs px-2 py-0.5 rounded hover:bg-gray-100 dark:hover:bg-[#333]"
+          onClick={onToggle}
+        >{expanded ? '▲ 접기' : '▼ 펴기'}</button>
+      </div>
+
+      {/* Summary badges */}
+      <div className="flex flex-wrap gap-2 items-center">
+        {/* 필드 변경 그룹 */}
+        {fc.groups.map(g => (
+          <span key={g.group} className="inline-flex items-center gap-1">
+            <span className={`inline-block w-2 h-2 rounded-full ${GROUP_COLORS[g.group] || 'bg-gray-500'}`} />
+            <span>{g.label}</span>
+            <span className="font-bold">{g.count.toLocaleString()}</span>
+          </span>
+        ))}
+        {fc.total === 0 && <span className="text-gray-400">(필드변경 없음)</span>}
+
+        {/* 구분선 */}
+        {ss && <span className="w-px h-4 bg-gray-300 dark:bg-gray-600 mx-1" />}
+
+        {/* 품절동기화 */}
+        {ss && (
+          <>
+            {ss.status_changes > 0 ? (
+              Object.entries(ss.transitions).map(([key, cnt]) => {
+                const isToSoldout = key.includes('→품절') || key.includes('→단종');
+                const isToSelling = key.includes('→판매중');
+                const colorCls = isToSoldout
+                  ? 'text-red-600 dark:text-red-400'
+                  : isToSelling
+                    ? 'text-green-600 dark:text-green-400'
+                    : 'text-gray-600 dark:text-gray-300';
+                return (
+                  <span key={key} className={`font-medium ${colorCls}`}>
+                    {key} <b>{cnt.toLocaleString()}</b>
+                  </span>
+                );
+              })
+            ) : (
+              <span className="text-gray-400">(품절변동 없음)</span>
+            )}
+          </>
+        )}
+        {!ss && <span className="text-gray-400 ml-1">(품절동기화 기록 없음)</span>}
+      </div>
+
+      {/* Expanded Detail */}
+      {expanded && (
+        <div className="mt-2 border-t border-orange-100 dark:border-orange-900 pt-2 space-y-3">
+          {/* 필드 변경 테이블 */}
+          {fc.total > 0 && (
+            <div>
+              <div className="text-gray-500 dark:text-gray-400 mb-1 font-bold">
+                필드 변경 ({fc.total.toLocaleString()}건)
+              </div>
+              <table className="w-full text-left">
+                <thead>
+                  <tr className="text-gray-400 border-b border-gray-200 dark:border-gray-700">
+                    <th className="py-1 px-1">W코드</th>
+                    <th className="py-1 px-1">그룹</th>
+                    <th className="py-1 px-1">필드</th>
+                    <th className="py-1 px-1">변경 전</th>
+                    <th className="py-1 px-1">변경 후</th>
+                    <th className="py-1 px-1">감지일시</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {fc.items.map(item => (
+                    <tr key={item.id} className="border-b border-gray-100 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-[#252540]">
+                      <td className="py-1 px-1 font-mono">{item.product_code}</td>
+                      <td className="py-1 px-1">
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${GROUP_BADGE[item.change_group] || 'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-400'}`}>
+                          {item.group_label}
+                        </span>
+                      </td>
+                      <td className="py-1 px-1 text-gray-600 dark:text-gray-400">{FIELD_LABELS[item.field_name] || item.field_name}</td>
+                      <td className="py-1 px-1 text-red-500 max-w-[150px] truncate" title={item.old_value}>{item.old_value || '-'}</td>
+                      <td className="py-1 px-1 text-green-600 dark:text-green-400 max-w-[150px] truncate" title={item.new_value}>{item.new_value || '-'}</td>
+                      <td className="py-1 px-1 text-gray-400">{item.detected_at}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {/* 페이지네이션 */}
+              {pagination.total_pages > 1 && (
+                <div className="flex items-center justify-center gap-1 mt-2 pt-2 border-t border-gray-100 dark:border-gray-800">
+                  <button
+                    className="px-2 py-0.5 rounded text-[11px] bg-gray-100 dark:bg-[#333] disabled:opacity-30"
+                    disabled={logPage <= 1}
+                    onClick={() => onPageChange(logPage - 1)}
+                  >&lt;</button>
+                  {Array.from({ length: Math.min(pagination.total_pages, 7) }, (_, i) => {
+                    let p: number;
+                    if (pagination.total_pages <= 7) {
+                      p = i + 1;
+                    } else if (logPage <= 4) {
+                      p = i + 1;
+                    } else if (logPage >= pagination.total_pages - 3) {
+                      p = pagination.total_pages - 6 + i;
+                    } else {
+                      p = logPage - 3 + i;
+                    }
+                    return (
+                      <button
+                        key={p}
+                        className={`px-2 py-0.5 rounded text-[11px] ${p === logPage ? 'bg-orange-500 text-white' : 'bg-gray-100 dark:bg-[#333] hover:bg-gray-200 dark:hover:bg-[#444]'}`}
+                        onClick={() => onPageChange(p)}
+                      >{p}</button>
+                    );
+                  })}
+                  <button
+                    className="px-2 py-0.5 rounded text-[11px] bg-gray-100 dark:bg-[#333] disabled:opacity-30"
+                    disabled={logPage >= pagination.total_pages}
+                    onClick={() => onPageChange(logPage + 1)}
+                  >&gt;</button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 품절동기화 상세 */}
+          {ss && (
+            <div className="border-t border-orange-100 dark:border-orange-900 pt-2">
+              <div className="text-gray-500 dark:text-gray-400 mb-1 font-bold">품절 동기화</div>
+              <div className="flex flex-wrap gap-4 text-[11px] text-gray-500 dark:text-gray-400">
+                <span>날짜: {ss.sync_date}</span>
+                <span>총변동: {ss.total_changes.toLocaleString()}건</span>
+                {ss.db_result && (
+                  <>
+                    <span>DB갱신: {ss.db_result.ownerclan_updated}건</span>
+                    <span>품절마킹: {ss.db_result.smartstore_soldout}건</span>
+                    <span>품절해제: {ss.db_result.smartstore_cleared}건</span>
+                    {(ss.db_result.reactivated ?? 0) > 0 && <span>재활성화: {ss.db_result.reactivated}건</span>}
+                  </>
+                )}
+                <span>소요: {ss.elapsed}초</span>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StatCard({ label, value, color, onClick, active }: { label: string; value: number; color?: string; onClick?: () => void; active?: boolean }) {
+  return (
+    <div className={`bg-white dark:bg-[#1e1e2e] rounded border px-3 py-2 transition-colors
+      ${active ? 'border-blue-500 ring-1 ring-blue-500' : 'border-gray-200 dark:border-[#333]'}
+      ${onClick ? 'cursor-pointer hover:border-blue-400' : ''}`}
+      onClick={onClick}>
       <div className="text-xs text-gray-400">{label}</div>
       <div className={`text-lg font-bold ${color || ''}`}>{value.toLocaleString()}</div>
     </div>
   );
 }
 
-function DetailModal({ detail, loading, onClose, onSync }: {
+function DetailModal({ detail, loading, changeLog, onClose, onSync }: {
   detail: ProductDetail | null;
   loading: boolean;
+  changeLog: ChangeLogItem[];
   onClose: () => void;
   onSync: (id: number) => void;
 }) {
-  const [tab, setTab] = useState<'changes' | 'all'>('changes');
+  const [tab, setTab] = useState<'changes' | 'all' | 'history'>('changes');
 
   if (loading || !detail) {
     return (
@@ -704,7 +1056,7 @@ function DetailModal({ detail, loading, onClose, onSync }: {
             </span>
             {detail.is_synced === 0 && (
               <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400">
-                {changed.length}개 항목 변경됨
+                {changed.length}개 항목 수정됨
               </span>
             )}
           </div>
@@ -723,11 +1075,56 @@ function DetailModal({ detail, loading, onClose, onSync }: {
             onClick={() => setTab('changes')}>변경사항 ({changed.length})</button>
           <button className={`px-4 py-2 text-xs font-medium border-b-2 ${tab === 'all' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-400 hover:text-gray-600'}`}
             onClick={() => setTab('all')}>전체보기</button>
+          <button className={`px-4 py-2 text-xs font-medium border-b-2 ${tab === 'history' ? 'border-orange-500 text-orange-600' : 'border-transparent text-gray-400 hover:text-gray-600'}`}
+            onClick={() => setTab('history')}>변경이력 ({changeLog.length})</button>
         </div>
 
         {/* Body */}
         <div className="overflow-y-auto flex-1 px-4 py-3">
-          {displayFields.length === 0 ? (
+          {tab === 'history' ? (
+            changeLog.length === 0 ? (
+              <div className="text-center text-gray-400 py-8">변경 이력이 없습니다.</div>
+            ) : (
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-gray-500 dark:text-gray-400 text-left border-b border-gray-200 dark:border-gray-700">
+                    <th className="px-2 py-1.5">그룹</th>
+                    <th className="px-2 py-1.5">필드</th>
+                    <th className="px-2 py-1.5">변경 전</th>
+                    <th className="px-2 py-1.5">변경 후</th>
+                    <th className="px-2 py-1.5">상태</th>
+                    <th className="px-2 py-1.5">감지일시</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100 dark:divide-gray-700/50">
+                  {changeLog.map(item => (
+                    <tr key={item.id} className={item.is_applied ? 'opacity-50' : ''}>
+                      <td className="px-2 py-1.5">
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                          item.change_group === 'price' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' :
+                          item.change_group === 'shipping' ? 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400' :
+                          item.change_group === 'product_name' ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400' :
+                          item.change_group === 'detail' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400' :
+                          'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-400'
+                        }`}>{item.group_label}</span>
+                      </td>
+                      <td className="px-2 py-1.5 text-gray-600 dark:text-gray-400">{FIELD_LABELS[item.field_name] || item.field_name}</td>
+                      <td className="px-2 py-1.5 text-red-500 max-w-[180px] truncate" title={item.old_value}>{item.old_value || '-'}</td>
+                      <td className="px-2 py-1.5 text-green-600 dark:text-green-400 max-w-[180px] truncate" title={item.new_value}>{item.new_value || '-'}</td>
+                      <td className="px-2 py-1.5">
+                        {item.is_applied ? (
+                          <span className="text-green-500">반영됨</span>
+                        ) : (
+                          <span className="text-orange-500 font-bold">미반영</span>
+                        )}
+                      </td>
+                      <td className="px-2 py-1.5 text-gray-400">{item.detected_at}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )
+          ) : displayFields.length === 0 ? (
             <div className="text-center text-gray-400 py-8">변경된 항목이 없습니다.</div>
           ) : (
             <table className="w-full text-xs">
