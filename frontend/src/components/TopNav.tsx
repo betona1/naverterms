@@ -16,6 +16,7 @@ const NAV_ITEMS = [
   { key: 'extension', label: '도우미프로그램', color: '#8b5cf6' },
   { key: 'apisettings', label: 'API 설정', color: '#f43f5e' },
   { key: 'competitor', label: '타사상품분석', color: '#fb923c' },
+  { key: 'itemscout', label: '판매량추적', color: '#22d3ee' },
 ] as const;
 
 export default function TopNav({ page, onPageChange, onStoreSettings, dark, onToggleTheme }: Props) {

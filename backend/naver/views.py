@@ -3,14 +3,17 @@ from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
+import re
 from .models import (
     NaverKeyword, NaverSearchSnapshot, NaverTermAnalysis,
     NaverRankTarget, NaverRankHistory, NaverTrackingSchedule,
+    KeywordEnrichCache, NaverTrackingProduct,
+    ItemScoutProduct, ItemScoutRecord,
 )
 from .serializers import (
     NaverKeywordSerializer, NaverTermAnalysisSerializer,
     NaverRankTargetSerializer, NaverRankHistorySerializer,
-    NaverTrackingScheduleSerializer,
+    NaverTrackingScheduleSerializer, NaverTrackingProductSerializer,
 )
 from . import services
 from . import uc_crawler
@@ -127,9 +130,22 @@ class RankTargetListView(APIView):
 
     def post(self, request):
         keyword_text = request.data.get('keyword', '').strip()
-        target_type = request.data.get('target_type', 'store')
-        target_value = request.data.get('target_value', '').strip()
-        display_name = request.data.get('display_name', '').strip()
+        product_id = request.data.get('product_id')
+        # product_id 있으면 product 기준, 없으면 기존 방식
+        if product_id:
+            try:
+                product = NaverTrackingProduct.objects.get(id=product_id)
+            except NaverTrackingProduct.DoesNotExist:
+                return Response({'error': '상품을 찾을 수 없습니다'}, status=404)
+            target_type = product.target_type
+            target_value = product.target_value
+            display_name = product.display_name
+        else:
+            target_type = request.data.get('target_type', 'store')
+            target_value = request.data.get('target_value', '').strip()
+            display_name = request.data.get('display_name', '').strip()
+            product = None
+
         source_product_id = request.data.get('source_product_id')
         source_product_name = request.data.get('source_product_name', '').strip()
 
@@ -142,11 +158,16 @@ class RankTargetListView(APIView):
             defaults['source_product_id'] = source_product_id
         if source_product_name:
             defaults['source_product_name'] = source_product_name
+        if product:
+            defaults['product'] = product
 
         target, created = NaverRankTarget.objects.get_or_create(
             keyword=kw, target_type=target_type, target_value=target_value,
             defaults=defaults,
         )
+        if not created and product and target.product is None:
+            target.product = product
+            target.save(update_fields=['product'])
         return Response(NaverRankTargetSerializer(target).data, status=201 if created else 200)
 
 
@@ -215,6 +236,176 @@ class RankHistoryView(APIView):
             qs = qs.filter(target_id=target_id)
         qs = qs.order_by('-tracked_at')
         return Response(NaverRankHistorySerializer(qs, many=True).data)
+
+
+def _parse_target_url(url: str) -> dict:
+    url = url.strip()
+    ss = re.search(r'smartstore\.naver\.com/([^/?&#]+)', url)
+    if ss:
+        return {'target_type': 'store', 'target_value': ss.group(1)}
+    sp = re.search(r'shopping\.naver\.com/product[s]?/(\d+)', url)
+    if sp:
+        return {'target_type': 'product_id', 'target_value': sp.group(1)}
+    mid = re.search(r'nvMid=(\d+)', url)
+    if mid:
+        return {'target_type': 'product_id', 'target_value': mid.group(1)}
+    if re.match(r'^\d{5,}$', url):
+        return {'target_type': 'product_id', 'target_value': url}
+    return {'target_type': 'store', 'target_value': url}
+
+
+class TrackingProductListView(APIView):
+    def get(self, request):
+        products = NaverTrackingProduct.objects.all().order_by('-created_at')
+        return Response(NaverTrackingProductSerializer(products, many=True).data)
+
+    def post(self, request):
+        url = request.data.get('url', '').strip()
+        product_name = request.data.get('product_name', '').strip()
+        display_name = request.data.get('display_name', '').strip()
+        product_url = request.data.get('product_url', '').strip() or url
+
+        if not url:
+            return Response({'error': 'url 필요'}, status=400)
+
+        parsed = _parse_target_url(url)
+        target_type = parsed['target_type']
+        target_value = parsed['target_value']
+
+        product, created = NaverTrackingProduct.objects.get_or_create(
+            target_type=target_type, target_value=target_value,
+            defaults={
+                'display_name': display_name or target_value,
+                'product_name': product_name,
+                'product_url': product_url,
+            }
+        )
+        if not created and (product_name or display_name):
+            if product_name:
+                product.product_name = product_name
+            if display_name:
+                product.display_name = display_name
+            product.save()
+
+        return Response(NaverTrackingProductSerializer(product).data, status=201 if created else 200)
+
+
+class TrackingProductDetailView(APIView):
+    def put(self, request, pk):
+        try:
+            product = NaverTrackingProduct.objects.get(id=pk)
+        except NaverTrackingProduct.DoesNotExist:
+            return Response({'error': 'not found'}, status=404)
+        for field in ('display_name', 'product_name', 'product_image', 'product_url'):
+            if field in request.data:
+                setattr(product, field, request.data[field])
+        product.save()
+        return Response(NaverTrackingProductSerializer(product).data)
+
+    def delete(self, request, pk):
+        try:
+            NaverTrackingProduct.objects.get(id=pk).delete()
+            return Response(status=204)
+        except NaverTrackingProduct.DoesNotExist:
+            return Response({'error': 'not found'}, status=404)
+
+
+class TrackingProductParseView(APIView):
+    def post(self, request):
+        url = request.data.get('url', '').strip()
+        if not url:
+            return Response({'error': 'url 필요'}, status=400)
+        return Response(_parse_target_url(url))
+
+
+class RankGroupsView(APIView):
+    def get(self, request):
+        targets = NaverRankTarget.objects.filter(is_active=True).select_related('keyword')
+        groups: dict = {}
+        for t in targets:
+            key = f'{t.target_type}::{t.target_value}'
+            if key not in groups:
+                groups[key] = {
+                    'target_value': t.target_value,
+                    'target_type': t.target_type,
+                    'display_name': t.display_name,
+                    'source_product_name': t.source_product_name,
+                    'source_product_id': t.source_product_id,
+                    'keyword_count': 0,
+                }
+            groups[key]['keyword_count'] += 1
+        return Response(list(groups.values()))
+
+
+class RankMatrixView(APIView):
+    def get(self, request):
+        product_id = request.query_params.get('product_id')
+        days = int(request.query_params.get('days', 30))
+        since = timezone.now() - timedelta(days=days)
+
+        if not product_id:
+            return Response({'error': 'product_id required'}, status=400)
+
+        try:
+            product = NaverTrackingProduct.objects.get(id=product_id)
+        except NaverTrackingProduct.DoesNotExist:
+            return Response({'error': 'product not found'}, status=404)
+
+        targets = (
+            NaverRankTarget.objects
+            .filter(product=product, is_active=True)
+            .select_related('keyword')
+            .order_by('id')
+        )
+
+        product_info = {
+            'id': product.id,
+            'target_type': product.target_type,
+            'target_value': product.target_value,
+            'display_name': product.display_name,
+            'product_name': product.product_name,
+            'product_image': product.product_image,
+            'product_url': product.product_url,
+        }
+
+        keyword_strs = [t.keyword.keyword for t in targets]
+        enrich_map = {
+            c.keyword: {'monthly_pc': c.monthly_pc_qc, 'monthly_mobile': c.monthly_mobile_qc}
+            for c in KeywordEnrichCache.objects.filter(keyword__in=keyword_strs)
+        }
+
+        targets_data = []
+        for t in targets:
+            enc = enrich_map.get(t.keyword.keyword, {})
+            targets_data.append({
+                'id': t.id,
+                'keyword': t.keyword.keyword,
+                'keyword_id': t.keyword.id,
+                'monthly_pc': enc.get('monthly_pc', 0),
+                'monthly_mobile': enc.get('monthly_mobile', 0),
+            })
+
+        target_ids = [t.id for t in targets]
+        history_qs = (
+            NaverRankHistory.objects
+            .filter(target_id__in=target_ids, tracked_at__gte=since)
+            .order_by('-tracked_at')
+            .values('target_id', 'rank_position', 'tracked_at', 'found_product_image')
+        )
+        history = []
+        for h in history_qs:
+            history.append({
+                'target_id': h['target_id'],
+                'rank_position': h['rank_position'],
+                'tracked_at': h['tracked_at'].isoformat(),
+                'found_product_image': h['found_product_image'] or '',
+            })
+
+        return Response({
+            'product_info': product_info,
+            'targets': targets_data,
+            'history': history,
+        })
 
 
 class RankSummaryView(APIView):
@@ -507,3 +698,91 @@ class UCStopView(APIView):
     def post(self, request):
         uc_crawler.stop()
         return Response({'ok': True})
+
+
+# ──── 아이템스카우트 판매량 추적 ────
+
+class ItemScoutProductListView(APIView):
+    def get(self, request):
+        products = ItemScoutProduct.objects.filter(is_active=True).order_by('created_at')
+        data = []
+        for p in products:
+            latest = p.records.order_by('-record_date').first()
+            data.append({
+                'id': p.id,
+                'name': p.name,
+                'url': p.url,
+                'is_active': p.is_active,
+                'created_at': p.created_at,
+                'latest_purchase': latest.today_purchase if latest else None,
+                'latest_date': latest.record_date if latest else None,
+            })
+        return Response(data)
+
+    def post(self, request):
+        name = request.data.get('name', '').strip()
+        url = request.data.get('url', '').strip()
+        if not name or not url:
+            return Response({'error': '이름과 URL을 입력하세요'}, status=400)
+        product, created = ItemScoutProduct.objects.get_or_create(url=url, defaults={'name': name})
+        if not created:
+            product.name = name
+            product.is_active = True
+            product.save()
+        return Response({'id': product.id, 'name': product.name, 'url': product.url}, status=201 if created else 200)
+
+
+class ItemScoutProductDetailView(APIView):
+    def delete(self, request, pk):
+        try:
+            ItemScoutProduct.objects.get(id=pk).delete()
+            return Response(status=204)
+        except ItemScoutProduct.DoesNotExist:
+            return Response({'error': 'not found'}, status=404)
+
+
+class ItemScoutRecordView(APIView):
+    def post(self, request):
+        from datetime import date
+        items = request.data.get('items', [])
+        if not items:
+            return Response({'error': 'items 필드가 비어있습니다'}, status=400)
+        saved = []
+        for item in items:
+            url = item.get('url', '').strip()
+            today_purchase = item.get('today_purchase', 0)
+            record_date = item.get('record_date') or date.today().isoformat()
+            try:
+                product = ItemScoutProduct.objects.get(url=url)
+            except ItemScoutProduct.DoesNotExist:
+                continue
+            record, _ = ItemScoutRecord.objects.update_or_create(
+                product=product,
+                record_date=record_date,
+                defaults={'today_purchase': today_purchase},
+            )
+            saved.append({'url': url, 'today_purchase': today_purchase, 'record_date': record_date})
+        return Response({'saved': saved, 'count': len(saved)})
+
+    def get(self, request):
+        product_id = request.query_params.get('product_id')
+        days = int(request.query_params.get('days', 30))
+        from datetime import date, timedelta
+        since = date.today() - timedelta(days=days)
+        qs = ItemScoutRecord.objects.select_related('product').filter(record_date__gte=since)
+        if product_id:
+            qs = qs.filter(product_id=product_id)
+        qs = qs.order_by('product_id', 'record_date')
+        data = [
+            {
+                'id': r.id,
+                'product_id': r.product_id,
+                'product_name': r.product.name,
+                'product_url': r.product.url,
+                'today_purchase': r.today_purchase,
+                'record_date': r.record_date,
+                'recorded_at': r.recorded_at,
+            }
+            for r in qs
+        ]
+        return Response(data)

@@ -54,6 +54,27 @@ class NaverTermAnalysis(models.Model):
         db_table = 'naver_term_analysis'
 
 
+class NaverTrackingProduct(models.Model):
+    TYPE_CHOICES = [
+        ('store', '스토어'),
+        ('product_id', '상품ID'),
+    ]
+    target_type = models.CharField(max_length=20, choices=TYPE_CHOICES)
+    target_value = models.CharField(max_length=200)
+    display_name = models.CharField(max_length=200, blank=True, default='')
+    product_name = models.CharField(max_length=500, blank=True, default='')
+    product_image = models.URLField(max_length=500, blank=True, default='')
+    product_url = models.CharField(max_length=500, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'naver_tracking_product'
+        unique_together = [('target_type', 'target_value')]
+
+    def __str__(self):
+        return self.display_name or self.target_value
+
+
 class NaverRankTarget(models.Model):
     TYPE_CHOICES = [
         ('store', '스토어'),
@@ -66,6 +87,10 @@ class NaverRankTarget(models.Model):
     is_active = models.BooleanField(default=True)
     source_product_id = models.IntegerField(null=True, blank=True)
     source_product_name = models.CharField(max_length=500, blank=True, default='')
+    product = models.ForeignKey(
+        NaverTrackingProduct, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='targets'
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -113,6 +138,33 @@ class NaverTrackingSchedule(models.Model):
 # ══════════════════════════════════════════
 # 카테고리키워드 캐시
 # ══════════════════════════════════════════
+
+class ItemScoutProduct(models.Model):
+    name = models.CharField(max_length=200)
+    url = models.URLField(max_length=500, unique=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'itemscout_product'
+
+    def __str__(self):
+        return self.name
+
+
+class ItemScoutRecord(models.Model):
+    product = models.ForeignKey(ItemScoutProduct, on_delete=models.CASCADE, related_name='records')
+    today_purchase = models.IntegerField(default=0)
+    record_date = models.DateField()
+    recorded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'itemscout_record'
+        unique_together = [('product', 'record_date')]
+        indexes = [
+            models.Index(fields=['product', 'record_date']),
+        ]
+
 
 class CategoryKeywordCache(models.Model):
     """카테고리별 TOP 500 키워드 캐시 (DataLab 결과)"""

@@ -16,12 +16,18 @@ urlpatterns = [
     path('products/<int:keyword_id>/', views.ProductsView.as_view()),
     path('tags/<int:keyword_id>/', views.TagStatsView.as_view()),
 
-    # 순위추적
+    # 순위추적 — 상품
+    path('rank/products/', views.TrackingProductListView.as_view()),
+    path('rank/products/<int:pk>/', views.TrackingProductDetailView.as_view()),
+    path('rank/products/parse/', views.TrackingProductParseView.as_view()),
+    # 순위추적 — 키워드/실행
     path('rank/track/', views.RunRankTrackingView.as_view()),
     path('rank/targets/', views.RankTargetListView.as_view()),
     path('rank/targets/<int:pk>/', views.RankTargetDetailView.as_view()),
     path('rank/history/', views.RankHistoryView.as_view()),
     path('rank/summary/', views.RankSummaryView.as_view()),
+    path('rank/groups/', views.RankGroupsView.as_view()),
+    path('rank/matrix/', views.RankMatrixView.as_view()),
 
     # 스케줄
     path('schedules/', views.ScheduleListView.as_view()),
@@ -48,4 +54,9 @@ urlpatterns = [
     # 엑셀
     path('export/terms/', views.ExportTermsView.as_view()),
     path('export/rank/', views.ExportRankView.as_view()),
+
+    # 아이템스카우트
+    path('itemscout/products/', views.ItemScoutProductListView.as_view()),
+    path('itemscout/products/<int:pk>/', views.ItemScoutProductDetailView.as_view()),
+    path('itemscout/records/', views.ItemScoutRecordView.as_view()),
 ]
