@@ -25,29 +25,21 @@
       font-size: 12px; font-weight: 700; cursor: pointer;
     }
     .top-btn:active { transform: scale(0.97); }
-    .btn-csv { background: #03c75a; color: #fff; }
+    .btn-xls { background: #03c75a; color: #fff; }
+    .btn-tag { background: #8b5cf6; color: #fff; }
     .btn-clear { background: #ef4444; color: #fff; }
     .btn-refresh { background: #333; color: #aaa; }
 
-    .summary {
-      font-size: 12px; color: #666; margin-bottom: 16px;
-    }
-
-    .empty {
-      text-align: center; padding: 60px 0; color: #555; font-size: 14px;
-    }
+    .summary { font-size: 12px; color: #666; margin-bottom: 16px; }
+    .empty { text-align: center; padding: 60px 0; color: #555; font-size: 14px; }
 
     /* 키워드 카드 */
     .kw-card {
-      background: #1c1c2e;
-      border-radius: 8px;
-      margin-bottom: 12px;
-      border: 1px solid #2a2a40;
-      overflow: hidden;
+      background: #1c1c2e; border-radius: 8px; margin-bottom: 12px;
+      border: 1px solid #2a2a40; overflow: hidden;
     }
     .kw-hdr {
-      padding: 10px 16px;
-      display: flex; align-items: center; gap: 10px;
+      padding: 10px 16px; display: flex; align-items: center; gap: 10px;
       cursor: pointer; user-select: none;
     }
     .kw-hdr:hover { background: #22223a; }
@@ -67,14 +59,10 @@
     .kw-body.open { display: block; }
 
     /* Terms 표시 */
-    .terms-row {
-      padding: 8px 0;
-      border-bottom: 1px solid #2a2a40;
-    }
+    .terms-row { padding: 8px 0; border-bottom: 1px solid #2a2a40; }
     .terms-label { font-size: 10px; color: #888; margin-bottom: 4px; }
     .term-chip {
-      display: inline-block;
-      padding: 3px 10px; margin: 2px 3px;
+      display: inline-block; padding: 3px 10px; margin: 2px 3px;
       background: #2a2a40; color: #60a5fa;
       border-radius: 12px; font-size: 11px; font-weight: 600;
     }
@@ -89,20 +77,53 @@
     }
     .tab-label .tab-total { color: #888; font-weight: 400; margin-left: 8px; }
 
-    table { width: 100%; border-collapse: collapse; font-size: 11px; }
+    .tbl-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 11px; min-width: 2000px; }
     thead th {
       text-align: left; padding: 6px 8px;
       background: #15152a; color: #888;
       font-weight: 600; font-size: 10px;
-      position: sticky; top: 0;
+      position: sticky; top: 0; white-space: nowrap;
     }
     thead th.r { text-align: right; }
-    tbody td { padding: 5px 8px; border-bottom: 1px solid #1a1a2e; }
+    thead th.c { text-align: center; }
+    tbody td {
+      padding: 5px 8px; border-bottom: 1px solid #1a1a2e;
+      vertical-align: middle; max-width: 260px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
     tbody td.r { text-align: right; font-variant-numeric: tabular-nums; }
-    tbody td.rank { color: #f59e0b; font-weight: 700; text-align: center; }
+    tbody td.c { text-align: center; }
+    tbody td.rank { color: #f59e0b; font-weight: 700; text-align: center; max-width: 40px; }
     tbody tr:hover { background: #22223a; }
-    .pname { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .store { color: #888; }
+    .pid { color: #888; font-family: monospace; font-size: 10px; max-width: 120px; }
+    .pname { max-width: 240px; color: #fff; }
+    .store { color: #888; max-width: 130px; }
+    .cat { color: #9ca3af; max-width: 180px; font-size: 10px; }
+    .attr { color: #fbbf24; max-width: 160px; font-size: 10px; }
+    .tag { color: #60a5fa; max-width: 180px; font-size: 10px; }
+    .thumb {
+      width: 40px; height: 40px; object-fit: cover;
+      border-radius: 4px; border: 1px solid #2a2a40;
+      cursor: pointer;
+    }
+    .thumb:hover { border-color: #03c75a; }
+
+    /* 이미지 확대 모달 */
+    .img-zoom {
+      position: fixed; z-index: 100; pointer-events: none;
+      display: none;
+    }
+    .img-zoom.show { display: block; }
+    .img-zoom-inner {
+      border-radius: 12px; overflow: hidden;
+      border: 1px solid #2a2a40; background: #141422;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+    }
+    .img-zoom-inner img {
+      width: 300px; height: 300px; object-fit: contain;
+      display: block;
+    }
   </style>
 </head>
 <body>
@@ -110,12 +131,14 @@
     <h1>Term 수집 결과</h1>
     <div class="top-btns">
       <button class="top-btn btn-refresh" id="refresh">새로고침</button>
-      <button class="top-btn btn-csv" id="csvBtn">CSV 내보내기</button>
+      <button class="top-btn btn-xls" id="xlsBtn">📗 상품 Excel</button>
+      <button class="top-btn btn-tag" id="tagBtn">🏷️ 태그 Excel</button>
       <button class="top-btn btn-clear" id="clearBtn">전체 삭제</button>
     </div>
   </div>
   <div class="summary" id="summary"></div>
   <div id="content"></div>
+  <div class="img-zoom" id="imgZoom"><div class="img-zoom-inner"><img id="imgZoomImg" src="" alt=""></div></div>
 
   <script src="results.js"></script>
 </body>

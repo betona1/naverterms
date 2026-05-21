@@ -13,6 +13,15 @@
     const msg = event.data;
     if (!msg || !msg.type) return;
 
+    // ── 구매수 추적 ──
+    if (msg.type === 'PURCHASE_TRACK_START' || msg.type === 'PURCHASE_TRACK_STOP' || msg.type === 'PURCHASE_TRACK_STATUS') {
+      chrome.runtime.sendMessage(msg, (response) => {
+        if (chrome.runtime.lastError) return;
+        window.postMessage({ type: msg.type + '_RESPONSE', data: response }, '*');
+      });
+      return;
+    }
+
     // ── 네이버 Term ──
     switch (msg.type) {
       case 'NAVER_START_TERM_SEARCH':
@@ -115,6 +124,12 @@
 
     // 네이버
     if (msg.type.startsWith('NAVER_')) {
+      window.postMessage(msg, '*');
+      return;
+    }
+
+    // 구매수 추적
+    if (msg.type.startsWith('PURCHASE_') || msg.type === 'NAVER_PURCHASE_TRACK_PROGRESS' || msg.type === 'NAVER_PURCHASE_TRACK_COMPLETE') {
       window.postMessage(msg, '*');
       return;
     }

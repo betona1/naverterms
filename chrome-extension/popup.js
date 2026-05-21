@@ -1,4 +1,4 @@
-// popup.js v3.0.0 — 내부/외부 모드 통합
+// popup.js v3.0.26 — 내부/외부 모드 통합
 document.addEventListener('DOMContentLoaded', () => {
   const INTERNAL_API = 'http://192.168.219.100:8901/api/naver';
   const $ = id => document.getElementById(id);
@@ -193,61 +193,6 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // ══════════════════════════════════════════
-  // 외부용: CSV 내보내기
-  // ══════════════════════════════════════════
-  function exportCsv() {
-    chrome.runtime.sendMessage({ type: 'GET_RESULTS' }, r => {
-      if (!r?.results?.length) {
-        addLog('y', '내보낼 데이터 없음');
-        return;
-      }
-
-      const BOM = '\uFEFF';
-      const headers = ['키워드', '탭', '전체수', 'Term수', 'Terms', '순위', '상품명', '스토어', '가격', '리뷰수', '상품ID'];
-      const rows = [headers.join(',')];
-
-      for (const kw of r.results) {
-        for (const [tabType, data] of Object.entries(kw.tabs)) {
-          const termsStr = (data.terms || []).map(t => t.value || t).join('|');
-          const products = data.products || [];
-          if (products.length === 0) {
-            rows.push(csvRow([kw.keyword, tabType, data.total, data.termCount, termsStr, '', '', '', '', '', '']));
-          } else {
-            products.forEach((p, i) => {
-              rows.push(csvRow([
-                kw.keyword, tabType, data.total, data.termCount, termsStr,
-                i + 1,
-                p.productName || p.productTitle || '',
-                p.mallName || '',
-                p.lowPrice || p.price || '',
-                p.reviewCount || 0,
-                p.nvMid || p.id || '',
-              ]));
-            });
-          }
-        }
-      }
-
-      const csv = BOM + rows.join('\n');
-      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const ts = new Date().toISOString().slice(0, 10);
-      chrome.downloads.download({ url, filename: `term-수집-${ts}.csv`, saveAs: true });
-      addLog('g', `CSV 내보내기: ${r.results.length}개 키워드`);
-    });
-  }
-
-  function csvRow(vals) {
-    return vals.map(v => {
-      const s = String(v ?? '');
-      if (s.includes(',') || s.includes('"') || s.includes('\n')) {
-        return '"' + s.replace(/"/g, '""') + '"';
-      }
-      return s;
-    }).join(',');
-  }
-
-  // ══════════════════════════════════════════
   // 수집 시작 / 중지
   // ══════════════════════════════════════════
   $('go').addEventListener('click', () => {
@@ -293,7 +238,6 @@ document.addEventListener('DOMContentLoaded', () => {
     chrome.tabs.create({ url: chrome.runtime.getURL('results.html') });
     window.close();
   });
-  $('btnCsv').addEventListener('click', exportCsv);
   $('btnClear').addEventListener('click', () => {
     if (!confirm('수집된 Term 데이터를 모두 삭제합니다.\n\n진행하시겠습니까?')) return;
     chrome.runtime.sendMessage({ type: 'CLEAR_RESULTS' }, () => {

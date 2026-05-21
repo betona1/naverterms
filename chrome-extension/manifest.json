@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "쇼핑 통합 도우미",
-  "version": "3.0.0",
+  "version": "3.0.26",
   "description": "네이버쇼핑 Term 수집 (내부/외부 모드) + 순위추적 + 로하스 + 지마켓",
   "permissions": [
     "tabs",
@@ -9,6 +9,7 @@
     "alarms",
     "storage",
     "downloads",
+    "notifications",
     "system.display"
   ],
   "host_permissions": [
