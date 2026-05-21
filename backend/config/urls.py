@@ -6,4 +6,5 @@ urlpatterns = [
     path('api/naver/', include('naver.urls')),
     path('api/smartstore/', include('smartstore.urls')),
     path('api/ownerclan/', include('ownerclan.urls')),
+    path('api/power/', include('smartstore.power_urls')),
 ] + static(settings.STATIC_URL, document_root=settings.STATICFILES_DIRS[0])
