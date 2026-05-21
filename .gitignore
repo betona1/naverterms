@@ -21,3 +21,19 @@ frontend/dist/
 
 # Build artifacts
 *.zip
+
+# Claude Code 세션
+.claude/
+
+# 크롬 자동화 프로필 (대용량 바이너리)
+backend/chrome_profiles/
+
+# 런타임 산출물
+backend/exports/
+backend/logs/
+backend/sync_soldout_result.json
+backend/wcodes_backup.txt
+
+# 백업 파일
+*.bak
+*.bak.*
