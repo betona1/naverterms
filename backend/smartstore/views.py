@@ -11,6 +11,12 @@ from . import smartstore_product_service
 from . import smartstore_order_service
 from . import smartstore_analytics_service
 from . import product_audit_service
+from . import attr_analytics_service
+from . import missing_attrs_service
+from . import worker_dashboard_service
+from . import naver_my_product_service
+from . import naver_name_generator
+from . import naver_vision_analyzer
 
 
 # ── 스마트스토어 상점 관리 ──
@@ -739,3 +745,332 @@ class ZeroMarginLogDetailView(APIView):
     def get(self, request, pk):
         items = smartstore_product_service.zero_margin_log_detail(pk)
         return Response({'items': items})
+
+
+# ── 상품속성 분석 (크롤 결과 조회) ──
+
+class AttrStatsView(APIView):
+    def get(self, request):
+        return Response(attr_analytics_service.get_stats())
+
+
+class AttrProductsListView(APIView):
+    def get(self, request):
+        q = request.query_params
+        page = int(q.get('page', 1))
+        per_page = min(int(q.get('per_page', 50)), 200)
+        store_id = q.get('store_id')
+        needs_review = q.get('needs_review')
+        has_quality = q.get('has_quality')
+        return Response(attr_analytics_service.list_products(
+            page=page, per_page=per_page, search=q.get('search', ''),
+            store_id=int(store_id) if store_id else None,
+            needs_review=int(needs_review) if needs_review else None,
+            has_quality=int(has_quality) if has_quality else None,
+        ))
+
+
+class AttrProductDetailView(APIView):
+    def get(self, request, seller_code):
+        store_id = request.query_params.get('store_id')
+        data = attr_analytics_service.get_product_detail(
+            seller_code, int(store_id) if store_id else None
+        )
+        if not data:
+            return Response({'error': 'not found'}, status=404)
+        return Response(data)
+
+
+class AttrTopTagsView(APIView):
+    def get(self, request):
+        q = request.query_params
+        return Response({'items': attr_analytics_service.top_tags(
+            limit=min(int(q.get('limit', 30)), 200),
+            by=q.get('by', 'count'),
+            category_id=q.get('category_id') or None,
+        )})
+
+
+class AttrQualityIssuesView(APIView):
+    def get(self, request):
+        limit = min(int(request.query_params.get('limit', 200)), 1000)
+        return Response({'items': attr_analytics_service.quality_issues(limit)})
+
+
+class AttrCategorySummaryView(APIView):
+    def get(self, request):
+        limit = min(int(request.query_params.get('limit', 50)), 500)
+        return Response({'items': attr_analytics_service.category_summary(limit)})
+
+
+# ── 빈 속성 검토 + 등록 ──
+
+class MissingAttrsSummaryView(APIView):
+    def get(self, request):
+        return Response(missing_attrs_service.get_summary())
+
+
+class MissingAttrsListView(APIView):
+    def get(self, request):
+        q = request.query_params
+        return Response(missing_attrs_service.list_attributes(
+            page=int(q.get('page', 1)),
+            per_page=min(int(q.get('per_page', 50)), 200),
+            search=q.get('search', ''),
+            kind=q.get('kind', 'all'),
+            status=q.get('status', 'pending'),
+            sort=q.get('sort', 'count'),
+        ))
+
+
+class MissingAttrsSkusView(APIView):
+    def get(self, request, attribute_seq):
+        q = request.query_params
+        return Response(missing_attrs_service.list_skus_for_attribute(
+            attribute_seq=int(attribute_seq),
+            page=int(q.get('page', 1)),
+            per_page=min(int(q.get('per_page', 100)), 500),
+            store_id=q.get('store_id'),
+            category_id=q.get('category_id') or None,
+            status=q.get('status', 'pending'),
+            search=q.get('search', ''),
+        ))
+
+
+class MissingAttrsRegisterFilteredView(APIView):
+    """필터 매칭 모든 SKU 에 일괄 등록 — body: {attribute_seq, value_seq, value_text, store_id, category_id, search, dry_run, max_skus}"""
+    def post(self, request):
+        d = request.data or {}
+        try:
+            r = missing_attrs_service.register_filtered(
+                attribute_seq=int(d['attribute_seq']),
+                value_seq=int(d.get('value_seq', 0)),
+                value_text=d.get('value_text'),
+                store_id=d.get('store_id'),
+                category_id=d.get('category_id') or None,
+                search=d.get('search', ''),
+                max_skus=int(d.get('max_skus', 2000)),
+                dry_run=bool(d.get('dry_run', False)),
+            )
+            return Response(r)
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
+
+
+class MissingAttrsRefreshSummaryView(APIView):
+    """attr_missing_summary + sku_missing_summary 재계산."""
+    def post(self, request):
+        from django.db import connections
+        attr_count = missing_attrs_service.refresh_attr_summary()
+        with connections['myproduct'].cursor() as c:
+            c.execute("DELETE FROM smartstore_sku_missing_summary")
+            c.execute("""
+                INSERT INTO smartstore_sku_missing_summary
+                  (seller_management_code, store_id, category_id,
+                   missing_count, auto_count, free_count, registered_count, pending_count)
+                SELECT
+                  m.seller_management_code, m.store_id, MAX(m.category_id),
+                  COUNT(*),
+                  SUM(CASE WHEN m.candidate_count=1 AND m.status='pending' THEN 1 ELSE 0 END),
+                  SUM(CASE WHEN m.candidate_count=0 THEN 1 ELSE 0 END),
+                  SUM(CASE WHEN m.status='registered' THEN 1 ELSE 0 END),
+                  SUM(CASE WHEN m.status='pending' THEN 1 ELSE 0 END)
+                FROM smartstore_product_missing_attrs m
+                GROUP BY m.seller_management_code, m.store_id
+            """)
+            sku_count = c.rowcount
+        return Response({'attr_summary_rows': attr_count, 'sku_summary_rows': sku_count})
+
+
+class MissingAttrsDetailView(APIView):
+    def get(self, request, attribute_seq):
+        return Response(missing_attrs_service.get_attribute_detail(int(attribute_seq)))
+
+
+class MissingAttrsRegisterView(APIView):
+    """일괄 등록 — body: {attribute_seq, value_seq, value_text, skus: [{...}], dry_run}"""
+    def post(self, request):
+        d = request.data or {}
+        skus = d.get('skus', [])
+        if not skus:
+            return Response({'error': 'skus required'}, status=400)
+        try:
+            result = missing_attrs_service.register_bulk(
+                skus=skus,
+                attribute_seq=int(d['attribute_seq']),
+                value_seq=int(d['value_seq']),
+                value_text=d.get('value_text'),
+                dry_run=bool(d.get('dry_run', False)),
+            )
+            return Response(result)
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
+
+
+class MissingAttrsSkuListView(APIView):
+    """상품별 — 빈속성 개수 정렬"""
+    def get(self, request):
+        q = request.query_params
+        store_id = q.get('store_id')
+        return Response(missing_attrs_service.list_skus(
+            page=int(q.get('page', 1)),
+            per_page=min(int(q.get('per_page', 50)), 200),
+            search=q.get('search', ''),
+            store_id=int(store_id) if store_id else None,
+            status=q.get('status', 'pending'),
+            category_id=q.get('category_id') or None,
+        ))
+
+
+class MissingAttrsForSkuView(APIView):
+    """단일 SKU 의 빈속성 (모달용)"""
+    def get(self, request, seller_code):
+        store_id = int(request.query_params.get('store_id', 0))
+        return Response(missing_attrs_service.get_missing_for_sku(seller_code, store_id))
+
+
+class MissingAttrsRegisterSkuView(APIView):
+    """단일 SKU 다중 속성 일괄 등록 — body: {store_id, selections, dry_run}"""
+    def post(self, request, seller_code):
+        d = request.data or {}
+        try:
+            r = missing_attrs_service.register_for_sku(
+                seller_management_code=seller_code,
+                store_id=int(d['store_id']),
+                selections=d.get('selections', []),
+                dry_run=bool(d.get('dry_run', False)),
+            )
+            return Response(r)
+        except Exception as e:
+            return Response({'ok': False, 'error': str(e)}, status=500)
+
+
+class MissingAttrsMarkView(APIView):
+    """skipped/reviewed 마킹 — body: {attribute_seq, status, skus: [{seller, store_id}]}"""
+    def post(self, request):
+        d = request.data or {}
+        skus = [(s['seller_management_code'], s['store_id']) for s in d.get('skus', [])]
+        if not skus:
+            return Response({'error': 'skus required'}, status=400)
+        result = missing_attrs_service.mark_status(
+            seller_codes_with_store=skus,
+            attribute_seq=int(d['attribute_seq']),
+            status=d.get('status', 'skipped'),
+            value_seq=d.get('value_seq'),
+            value_text=d.get('value_text'),
+        )
+        return Response(result)
+
+
+# ── 워커 대시보드 ──
+
+class WorkerDashboardView(APIView):
+    def get(self, request):
+        return Response({
+            'workers': worker_dashboard_service.get_workers_status(),
+            'aggregate': worker_dashboard_service.get_aggregate_status(),
+        })
+
+
+class AttrTopAttributesView(APIView):
+    def get(self, request):
+        q = request.query_params
+        return Response({'items': attr_analytics_service.top_attributes(
+            limit=min(int(q.get('limit', 200)), 1000),
+            section=q.get('section') or None,
+            category_id=q.get('category_id') or None,
+        )})
+
+
+class AttrValuesView(APIView):
+    def get(self, request):
+        q = request.query_params
+        attr_label = q.get('attr_label')
+        if not attr_label:
+            return Response({'error': 'attr_label required'}, status=400)
+        return Response({'items': attr_analytics_service.attribute_values(
+            attr_label=attr_label,
+            section=q.get('section') or None,
+            category_id=q.get('category_id') or None,
+            limit=min(int(q.get('limit', 100)), 500),
+        )})
+
+
+# ── 네이버 나의상품 (11번가 my_product 미러) ──────────────────────
+
+class NaverMyProductFolderListView(APIView):
+    def get(self, request):
+        return Response({'items': naver_my_product_service.list_folders()})
+
+
+class NaverMyProductFolderSyncView(APIView):
+    """smartstoreIdList 스토어 → 폴더 자동 생성."""
+    def post(self, request):
+        return Response(naver_my_product_service.ensure_folders_from_stores())
+
+
+class NaverMyProductImportFrom11stView(APIView):
+    """[11번가 나의상품 가져오기] 버튼.
+    백그라운드로 ads.my_product 전체를 naverdb.naver_my_product 로 UPSERT.
+    """
+    def post(self, request):
+        batch_size = int(request.data.get('batch_size', 1000)) if request.data else 1000
+        return Response(naver_my_product_service.start_import_from_11st(batch_size=batch_size))
+
+
+class NaverMyProductImportStatusView(APIView):
+    def get(self, request):
+        return Response(naver_my_product_service.get_import_status())
+
+
+class NaverMyProductListView(APIView):
+    def get(self, request):
+        q = request.query_params
+        folder_id = q.get('folder_id')
+        return Response(naver_my_product_service.get_products(
+            page=int(q.get('page', 1)),
+            per_page=int(q.get('per_page', 50)),
+            folder_id=int(folder_id) if folder_id not in (None, '', 'all') else None,
+            search=q.get('search') or None,
+        ))
+
+
+class NaverMyProductGenerateNameView(APIView):
+    """단건 네이버 상품명 생성 (이미지 분석 캐싱 + Ollama 텍스트, 동기)."""
+    def post(self, request, pk):
+        use_vision = (request.data or {}).get('use_vision', True) if request.data else True
+        result = naver_name_generator.generate_naver_name(int(pk), use_vision=use_vision)
+        status = 200 if result.get('ok') else 502
+        return Response(result, status=status)
+
+
+class NaverMyProductAnalyzeImageView(APIView):
+    """단건 이미지 분석만 (비전 모델). 캐시 우선, ?force=1 이면 재분석."""
+    def post(self, request, pk):
+        force = (request.data or {}).get('force', False) if request.data else False
+        result = naver_vision_analyzer.analyze_product_image(int(pk), force=bool(force))
+        status = 200 if result.get('ok') else 502
+        return Response(result, status=status)
+
+
+class NaverMyProductEnqueueView(APIView):
+    """일괄 enqueue (ads.ai_keyword_task, platform='naver'). 워커 11개가 분산 처리.
+    body: {ids:[...]} 또는 {folder_id: N} 또는 {} (=빠진 전체).
+    """
+    def post(self, request):
+        d = request.data or {}
+        ids = d.get('ids')
+        folder_id = d.get('folder_id')
+        only_missing = d.get('only_missing', True)
+        result = naver_my_product_service.enqueue_products(
+            ids=ids,
+            folder_id=int(folder_id) if folder_id is not None else None,
+            only_missing=bool(only_missing),
+        )
+        return Response(result)
+
+
+class NaverMyProductQueueStatusView(APIView):
+    """큐 상태 + 워커별 처리 현황 (최근 1시간)."""
+    def get(self, request):
+        return Response(naver_my_product_service.get_queue_status())

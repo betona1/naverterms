@@ -63,4 +63,41 @@ urlpatterns = [
     path('products/<int:opno>/detail/', views.ProductFullDetailView.as_view()),
     path('products/<int:opno>/update/', views.ProductUpdateView.as_view()),
     path('products/upload-image/', views.ProductImageUploadView.as_view()),
+
+    # 상품속성 분석 (Stage A/B/C 크롤 결과)
+    path('attr/stats/', views.AttrStatsView.as_view()),
+    path('attr/products/', views.AttrProductsListView.as_view()),
+    path('attr/products/<str:seller_code>/', views.AttrProductDetailView.as_view()),
+    path('attr/tags/top/', views.AttrTopTagsView.as_view()),
+    path('attr/quality/issues/', views.AttrQualityIssuesView.as_view()),
+    path('attr/categories/', views.AttrCategorySummaryView.as_view()),
+    path('attr/attributes/top/', views.AttrTopAttributesView.as_view()),
+    path('attr/attributes/values/', views.AttrValuesView.as_view()),
+
+    # 빈 속성 검토 + 등록
+    path('missing-attrs/summary/', views.MissingAttrsSummaryView.as_view()),
+    path('missing-attrs/refresh-summary/', views.MissingAttrsRefreshSummaryView.as_view()),
+    path('missing-attrs/', views.MissingAttrsListView.as_view()),
+    path('missing-attrs/skus/', views.MissingAttrsSkuListView.as_view()),
+    path('missing-attrs/skus/<str:seller_code>/', views.MissingAttrsForSkuView.as_view()),
+    path('missing-attrs/skus/<str:seller_code>/register/', views.MissingAttrsRegisterSkuView.as_view()),
+    path('missing-attrs/<int:attribute_seq>/', views.MissingAttrsDetailView.as_view()),
+    path('missing-attrs/<int:attribute_seq>/skus/', views.MissingAttrsSkusView.as_view()),
+    path('missing-attrs/register/', views.MissingAttrsRegisterView.as_view()),
+    path('missing-attrs/register-filtered/', views.MissingAttrsRegisterFilteredView.as_view()),
+    path('missing-attrs/mark/', views.MissingAttrsMarkView.as_view()),
+
+    # 워커 대시보드
+    path('workers/', views.WorkerDashboardView.as_view()),
+
+    # 네이버 나의상품 (11번가 my_product 미러)
+    path('naver-products/', views.NaverMyProductListView.as_view()),
+    path('naver-products/folders/', views.NaverMyProductFolderListView.as_view()),
+    path('naver-products/folders/sync/', views.NaverMyProductFolderSyncView.as_view()),
+    path('naver-products/import-from-11st/', views.NaverMyProductImportFrom11stView.as_view()),
+    path('naver-products/import-status/', views.NaverMyProductImportStatusView.as_view()),
+    path('naver-products/<int:pk>/generate-name/', views.NaverMyProductGenerateNameView.as_view()),
+    path('naver-products/<int:pk>/analyze-image/', views.NaverMyProductAnalyzeImageView.as_view()),
+    path('naver-products/enqueue/', views.NaverMyProductEnqueueView.as_view()),
+    path('naver-products/queue-status/', views.NaverMyProductQueueStatusView.as_view()),
 ]

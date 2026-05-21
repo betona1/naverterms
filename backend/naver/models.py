@@ -10,6 +10,7 @@ class NaverKeyword(models.Model):
     price_compare_count = models.IntegerField(default=0)
     last_searched_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    is_favorite = models.BooleanField(default=False, db_index=True)
 
     class Meta:
         db_table = 'naver_keyword'
@@ -147,6 +148,26 @@ class KeywordEnrichCache(models.Model):
         db_table = 'naver_keyword_enrich_cache'
 
 
+class NaverCrawlLog(models.Model):
+    """수집 로그 — 확장프로그램 진행 메시지 DB 저장"""
+    LOG_TYPES = [
+        ('info', 'info'), ('success', 'success'), ('error', 'error'),
+        ('progress', 'progress'), ('tab', 'tab'), ('captcha', 'captcha'),
+    ]
+    timestamp = models.DateTimeField(auto_now_add=True, db_index=True)
+    type = models.CharField(max_length=20, default='info')
+    message = models.TextField()
+    keyword = models.CharField(max_length=200, blank=True, default='')
+    session_id = models.CharField(max_length=64, blank=True, default='', db_index=True)
+
+    class Meta:
+        db_table = 'naver_crawl_log'
+        ordering = ['-timestamp']
+        indexes = [
+            models.Index(fields=['-timestamp']),
+        ]
+
+
 class NaverReport(models.Model):
     REPORT_TYPES = [
         ('monthly', '월간보고서'),
@@ -163,3 +184,76 @@ class NaverReport(models.Model):
 
     def __str__(self):
         return self.title
+
+
+# ══════════════════════════════════════════
+# 구매수 추적
+# ══════════════════════════════════════════
+
+class NaverPurchaseTarget(models.Model):
+    """구매수 추적 대상 상품"""
+    nv_mid = models.CharField(max_length=50, unique=True, db_index=True)
+    product_name = models.CharField(max_length=500)
+    store_name = models.CharField(max_length=200, blank=True, default='')
+    image_url = models.URLField(max_length=500, blank=True, default='')
+    category = models.CharField(max_length=500, blank=True, default='')
+    source_keyword = models.CharField(max_length=200, blank=True, default='')
+    source_rank = models.IntegerField(null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+    auto_track = models.BooleanField(default=False)
+    auto_track_time = models.CharField(max_length=10, blank=True, default='09:00')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'naver_purchase_target'
+
+    def __str__(self):
+        return f'{self.product_name} ({self.nv_mid})'
+
+
+class NaverPurchaseHistory(models.Model):
+    """구매수 추적 이력"""
+    target = models.ForeignKey(NaverPurchaseTarget, on_delete=models.CASCADE, related_name='history')
+    purchase_count = models.IntegerField(null=True, blank=True)
+    review_count = models.IntegerField(null=True, blank=True)
+    keep_count = models.IntegerField(null=True, blank=True)
+    price = models.IntegerField(null=True, blank=True)
+    crawl_success = models.BooleanField(default=True)
+    error_message = models.CharField(max_length=500, blank=True, default='')
+    tracked_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'naver_purchase_history'
+        indexes = [
+            models.Index(fields=['target', 'tracked_at']),
+        ]
+
+
+# ══════════════════════════════════════════
+# 동의어 (키워드별)
+# ══════════════════════════════════════════
+
+class NaverSynonym(models.Model):
+    SOURCE_CHOICES = [
+        ('naver_dict', '네이버사전'),
+        ('autocomplete', '자동완성'),
+        ('manual', '직접입력'),
+    ]
+    keyword = models.ForeignKey(NaverKeyword, on_delete=models.CASCADE, related_name='synonyms')
+    word = models.CharField(max_length=200)
+    source = models.CharField(max_length=20, choices=SOURCE_CHOICES, default='manual')
+    is_confirmed = models.BooleanField(null=True, blank=True)  # True=동의어, False=아님, null=미확정
+    verification_score = models.FloatField(null=True, blank=True)
+    verification_data = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'naver_synonym'
+        unique_together = [('keyword', 'word')]
+        indexes = [
+            models.Index(fields=['keyword', 'is_confirmed']),
+        ]
+
+    def __str__(self):
+        return f'{self.keyword.keyword} ↔ {self.word}'

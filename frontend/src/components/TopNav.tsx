@@ -2,16 +2,26 @@ interface Props {
   page: string;
   onPageChange: (page: string) => void;
   onStoreSettings: () => void;
+  onPowerControl: () => void;
   dark: boolean;
   onToggleTheme: () => void;
 }
 
 const NAV_ITEMS = [
   { key: 'products', label: '스마트스토어상품', color: '#03c75a' },
+  { key: 'naver-products', label: '네이버상품', color: '#22c55e', isNew: true },
   { key: 'analytics', label: '스토어분석', color: '#10b981' },
+  { key: 'attr-analytics', label: '상품속성분석', color: '#14b8a6' },
+  { key: 'missing-attrs', label: '빈속성검토', color: '#ef4444' },
+  { key: 'attr-register', label: '속성별등록', color: '#dc2626', isNew: true },
+  { key: 'workers', label: '워커', color: '#6b7280' },
   { key: 'terms', label: 'Term 분석', color: '#0078d7' },
+  { key: 'synonyms', label: '동의어', color: '#a855f7' },
+  { key: 'autocomplete', label: '자동완성', color: '#0ea5e9' },
+  { key: 'results', label: '결과보기', color: '#22c55e' },
   { key: 'rank', label: '순위추적', color: '#f59e0b' },
   { key: 'cunning', label: '순위컨닝', color: '#ec4899' },
+  { key: 'purchase', label: '구매추적', color: '#f97316' },
   { key: 'keywords', label: '연관키워드', color: '#06b6d4' },
   { key: 'catkeywords', label: '카테고리키워드', color: '#e879f9' },
   { key: 'ownerclan', label: '오너클랜상품', color: '#ff6b35' },
@@ -19,7 +29,7 @@ const NAV_ITEMS = [
   { key: 'extension', label: '도우미프로그램', color: '#8b5cf6' },
 ] as const;
 
-export default function TopNav({ page, onPageChange, onStoreSettings, dark, onToggleTheme }: Props) {
+export default function TopNav({ page, onPageChange, onStoreSettings, onPowerControl, dark, onToggleTheme }: Props) {
   return (
     <header className={`sticky top-0 z-50 ${dark ? 'bg-[#1a1a2e]' : 'bg-white border-b border-gray-200'}`}>
       <div className="h-[42px] flex items-center px-4 gap-1">
@@ -36,16 +46,22 @@ export default function TopNav({ page, onPageChange, onStoreSettings, dark, onTo
         <nav className="flex items-center gap-0.5 overflow-x-auto scrollbar-hide">
           {NAV_ITEMS.map(item => {
             const active = page === item.key;
+            const isNew = 'isNew' in item && item.isNew;
             return (
               <button key={item.key}
                       onClick={() => onPageChange(item.key)}
-                      className={`px-3 pb-[10px] pt-[11px] text-[13px] font-medium whitespace-nowrap border-b-2 transition-colors
+                      className={`relative px-3 pb-[10px] pt-[11px] text-[13px] font-medium whitespace-nowrap border-b-2 transition-colors
                         ${active
                           ? `${dark ? 'text-white' : 'text-gray-900'}`
                           : `border-transparent ${dark ? 'text-gray-400 hover:text-gray-200' : 'text-gray-500 hover:text-gray-700'}`
                         }`}
                       style={active ? { borderBottomColor: item.color } : undefined}>
                 {item.label}
+                {isNew && (
+                  <span className="ml-1 inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-red-500 text-white align-middle">
+                    NEW
+                  </span>
+                )}
               </button>
             );
           })}
@@ -77,6 +93,18 @@ export default function TopNav({ page, onPageChange, onStoreSettings, dark, onTo
                       d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/>
               </svg>
             )}
+          </button>
+          {/* 원격 전원 관리 — 우측 끝 */}
+          <button onClick={onPowerControl}
+                  title="원격 전원 관리 (Wake-on-LAN / Shutdown)"
+                  className={`p-1.5 rounded transition-all
+                    ${dark
+                      ? 'text-violet-400 hover:text-violet-200 hover:bg-violet-900/30'
+                      : 'text-violet-600 hover:text-violet-700 hover:bg-violet-50'}`}>
+            <svg className="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v9" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="M18.36 6.64a9 9 0 11-12.73 0" />
+            </svg>
           </button>
         </div>
       </div>

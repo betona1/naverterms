@@ -2,6 +2,8 @@ from rest_framework import serializers
 from .models import (
     NaverKeyword, NaverSearchSnapshot, NaverTermAnalysis,
     NaverRankTarget, NaverRankHistory, NaverTrackingSchedule,
+    NaverPurchaseTarget, NaverPurchaseHistory,
+    NaverSynonym,
 )
 
 
@@ -58,3 +60,24 @@ class NaverTrackingScheduleSerializer(serializers.ModelSerializer):
     class Meta:
         model = NaverTrackingSchedule
         fields = '__all__'
+
+
+class NaverPurchaseTargetSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = NaverPurchaseTarget
+        fields = '__all__'
+
+
+class NaverPurchaseHistorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = NaverPurchaseHistory
+        fields = '__all__'
+
+
+class NaverSynonymSerializer(serializers.ModelSerializer):
+    keyword_text = serializers.CharField(source='keyword.keyword', read_only=True)
+
+    class Meta:
+        model = NaverSynonym
+        fields = '__all__'
+        extra_fields = ['keyword_text']

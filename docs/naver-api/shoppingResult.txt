@@ -1,0 +1,38 @@
+shoppingResult
+├── status
+│   ├── code: "0"                    # 0: 정상 처리
+│   └── message: "OK"
+├── query: "매트리스"                # 실제 검색어
+├── stopwordQuery: "매트리스"       # 불용어 필터링 이후 남은 검색어
+├── strQueryType: "카테고리"         # 검색어 인식 타입
+├── nluTerms[]                      # 자연어 분석된 키워드 정보
+│   └── keyword: "매트리스"
+│       └── type: "카테고리"
+├── brandNo / makerNo: ""           # 브랜드/제조사 번호 (없으면 빈 값)
+├── mallNo: "819417 7637325"        # 쇼핑몰 고유 번호(복수 가능)
+├── isModelNameSearch: 0            # 모델명 검색 여부
+├── start: 1                        # 시작 인덱스 (1부터 시작)
+├── productCount: 100               # 현재 페이지 내 상품 수
+├── total: 73065                    # 현재 조건의 전체 상품 수
+├── orgQueryTotal: 1939502          # 전체 검색어 기반 원 상품 수
+├── termCount: 1                    # 검색어 수
+├── terms[]: ["매트리스"]           # 검색된 단어들
+├── intersectionTermCount: 0        # 교집합 검색어 수
+├── exclusionTermCount: 0           # 제외어 수
+├── searchTime: 0.081981            # 검색 응답 시간 (초)
+├── switch_version_bt_on: "1"       # 내부 실험 버전 여부
+├── qlty_imp_version: ...           # 품질 개선 버전 식별자
+├── partialSearch / qrSearch / deepSearch: 0
+├── preferTag: ""                   # 선호 태그 (없으면 빈 값)
+├── priceRecognize                  # 가격 인식 필터 결과
+│   ├── prQuery: "매트리스"
+│   ├── minValue: "0"
+│   └── maxValue: "0"
+├── cmp                              # 네이버 자체 분류 카테고리
+│   └── category4: [ID, name, relevance]
+├── cmpOrg                           # 실제 카테고리 체계
+│   ├── category1 (1차 대분류)
+│   ├── category2 (2차 중분류)
+│   ├── category3 (3차 소분류)
+│   └── category4 (4차 세분류)
+└── products[]                       # 상품 리스트 (상세 구조는 아래 참고)

@@ -12,7 +12,8 @@ from django.utils import timezone
 if not os.environ.get('DISPLAY'):
     os.environ['DISPLAY'] = ':0'
 
-TAB_ORDER = ['total', 'model', 'checkout']
+DEFAULT_TAB_ORDER = ['model', 'total', 'checkout']
+TAB_ORDER = DEFAULT_TAB_ORDER
 TAB_NAME = {'total': '전체', 'model': '가격비교', 'checkout': '네이버페이'}
 CHROME_BIN = '/home/joacham/.local/share/google-chrome/chrome'
 
@@ -174,6 +175,8 @@ def _crawl(keywords, headless=False):
         options.add_argument('--disable-gpu')
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--disable-crash-reporter')
+        options.add_argument('--disable-breakpad')
         options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
 
         driver = uc.Chrome(
@@ -307,8 +310,14 @@ def _crawl(keywords, headless=False):
             _state['running'] = False
 
 
-def start(keywords, headless=False):
+def start(keywords, headless=False, tab_order=None):
     """크롤링 시작 (백그라운드 스레드)"""
+    global TAB_ORDER
+    if tab_order and len(tab_order) == 3:
+        TAB_ORDER = tab_order
+    else:
+        TAB_ORDER = DEFAULT_TAB_ORDER
+
     with _lock:
         if _state['running']:
             return False, '이미 실행중'

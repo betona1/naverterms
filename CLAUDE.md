@@ -26,8 +26,8 @@
 
 | 서비스 | 포트 | PM2 프로세스명 |
 |--------|------|----------------|
-| Django 백엔드 | **8900** | naverterms-backend |
-| Vite 프론트 개발서버 | **5174** | naverterms-frontend |
+| Django 백엔드 | **8901** | naverterms-backend |
+| Vite 프론트 개발서버 | **8900** | naverterms-frontend |
 
 ### 1.2 디렉토리 구조
 

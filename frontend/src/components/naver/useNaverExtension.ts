@@ -112,8 +112,8 @@ export function useNaverExtension() {
     };
   }, [checkConnection]);
 
-  const startTermSearch = useCallback((keywords: string[]) => {
-    window.postMessage({ type: 'NAVER_START_TERM_SEARCH', keywords }, '*');
+  const startTermSearch = useCallback((keywords: string[], tabOrder?: string[]) => {
+    window.postMessage({ type: 'NAVER_START_TERM_SEARCH', keywords, tabOrder }, '*');
   }, []);
 
   const startRankTracking = useCallback((targets: any[]) => {

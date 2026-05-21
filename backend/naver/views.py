@@ -8,12 +8,16 @@ from rest_framework import status
 from .models import (
     NaverKeyword, NaverSearchSnapshot, NaverTermAnalysis,
     NaverRankTarget, NaverRankHistory, NaverTrackingSchedule,
-    NaverReport,
+    NaverReport, NaverCrawlLog,
+    NaverPurchaseTarget, NaverPurchaseHistory,
+    NaverSynonym,
 )
 from .serializers import (
     NaverKeywordSerializer, NaverTermAnalysisSerializer,
     NaverRankTargetSerializer, NaverRankHistorySerializer,
     NaverTrackingScheduleSerializer,
+    NaverPurchaseTargetSerializer, NaverPurchaseHistorySerializer,
+    NaverSynonymSerializer,
 )
 from . import services
 from . import uc_crawler
@@ -44,6 +48,200 @@ class KeywordDetailView(APIView):
             return Response(status=204)
         except NaverKeyword.DoesNotExist:
             return Response({'error': 'not found'}, status=404)
+
+
+class KeywordFavoriteView(APIView):
+    """즐겨찾기 토글 (PATCH). body 없이 호출하면 flip, {"is_favorite": true/false} 로 명시 가능"""
+    def patch(self, request, pk):
+        try:
+            kw = NaverKeyword.objects.get(id=pk)
+        except NaverKeyword.DoesNotExist:
+            return Response({'error': 'not found'}, status=404)
+        want = request.data.get('is_favorite')
+        kw.is_favorite = (not kw.is_favorite) if want is None else bool(want)
+        kw.save(update_fields=['is_favorite'])
+        return Response({'id': kw.id, 'is_favorite': kw.is_favorite})
+
+
+class CrawlLogView(APIView):
+    """수집 로그 조회/추가/전체삭제"""
+    def get(self, request):
+        limit = int(request.query_params.get('limit', 200))
+        since_id = request.query_params.get('since_id')
+        qs = NaverCrawlLog.objects.all()
+        if since_id:
+            qs = qs.filter(id__gt=int(since_id)).order_by('id')
+        else:
+            qs = qs.order_by('-id')[:limit]
+        return Response({'logs': [
+            {
+                'id': l.id,
+                'timestamp': l.timestamp.isoformat(),
+                'type': l.type,
+                'message': l.message,
+                'keyword': l.keyword,
+                'session_id': l.session_id,
+            } for l in qs
+        ]})
+
+    def post(self, request):
+        body = request.data
+        items = body if isinstance(body, list) else [body]
+        created_ids = []
+        for item in items:
+            log = NaverCrawlLog.objects.create(
+                type=(item.get('type') or 'info')[:20],
+                message=str(item.get('message', '')),
+                keyword=str(item.get('keyword', ''))[:200],
+                session_id=str(item.get('session_id', ''))[:64],
+            )
+            created_ids.append(log.id)
+        return Response({'count': len(items), 'ids': created_ids}, status=201)
+
+    def delete(self, request):
+        n, _ = NaverCrawlLog.objects.all().delete()
+        return Response({'deleted': n})
+
+
+class ResultsKeywordListView(APIView):
+    """결과보기 전용 — 모든 키워드 + 그룹별 분류 + 탭별 수집 상태 + 최근 업데이트 순
+
+    응답 구조:
+    {
+      "keywords": [
+        {
+          "id", "keyword", "is_favorite", "last_searched_at",
+          "total_count", "term_count",
+          "collected": { "total": {count, total, collected_at}, "model": {...}, "checkout": {...} },
+          "has_data": bool
+        }, ...
+      ]
+    }
+    """
+    def get(self, request):
+        qs = NaverKeyword.objects.exclude(
+            snapshots__isnull=True, analyses__isnull=True, rank_targets__isnull=False
+        ).distinct()
+        # 최근 업데이트 순 — last_searched_at 우선, 없으면 created_at
+        from django.db.models.functions import Coalesce
+        qs = qs.annotate(
+            sort_key=Coalesce('last_searched_at', 'created_at')
+        ).order_by('-sort_key')
+
+        kw_ids = list(qs.values_list('id', flat=True))
+        # 각 키워드의 탭별 최신 스냅샷 한번에 조회
+        snap_map = defaultdict(dict)  # {kw_id: {tab_type: snapshot}}
+        for snap in (NaverSearchSnapshot.objects
+                     .filter(keyword_id__in=kw_ids)
+                     .order_by('keyword_id', 'tab_type', '-collected_at')):
+            if snap.tab_type not in snap_map[snap.keyword_id]:
+                snap_map[snap.keyword_id][snap.tab_type] = snap
+
+        results = []
+        for kw in qs:
+            collected = {}
+            tab_snaps = snap_map.get(kw.id, {})
+            for tab_type in ('total', 'model', 'checkout'):
+                s = tab_snaps.get(tab_type)
+                if s:
+                    collected[tab_type] = {
+                        'count': len(s.products) if s.products else 0,
+                        'total': s.total,
+                        'collected_at': s.collected_at,
+                    }
+            has_data = any(v.get('count', 0) > 0 for v in collected.values())
+            results.append({
+                'id': kw.id,
+                'keyword': kw.keyword,
+                'is_favorite': kw.is_favorite,
+                'last_searched_at': kw.last_searched_at,
+                'created_at': kw.created_at,
+                'total_count': kw.total_count,
+                'term_count': kw.term_count,
+                'terms': kw.terms or [],
+                'collected': collected,
+                'has_data': has_data,
+            })
+        return Response({'keywords': results})
+
+
+class SnapshotListView(APIView):
+    """키워드의 시간순 스냅샷 메타 (시계열 슬라이더용)
+    GET /api/naver/snapshots/<kw_id>/?tab=total&limit=20
+    """
+    def get(self, request, keyword_id):
+        tab = request.query_params.get('tab', 'total')
+        limit = min(int(request.query_params.get('limit', 30)), 100)
+        qs = (NaverSearchSnapshot.objects
+              .filter(keyword_id=keyword_id, tab_type=tab)
+              .order_by('-collected_at')[:limit])
+        return Response({'snapshots': [
+            {
+                'id': s.id,
+                'collected_at': s.collected_at.isoformat(),
+                'tab_type': s.tab_type,
+                'total': s.total,
+                'product_count': len(s.products) if s.products else 0,
+            } for s in qs
+        ]})
+
+
+class ProductHistoryView(APIView):
+    """특정 상품(id/nvMid) 의 시계열 변동
+    GET /api/naver/product-history/<kw_id>/?product_id=12345&tab=total&limit=20
+    응답: 시간순(오래된→최근)으로 변동 행 + 직전 대비 변화 플래그
+    """
+    def get(self, request, keyword_id):
+        tab = request.query_params.get('tab', 'total')
+        product_id = (request.query_params.get('product_id') or '').strip()
+        limit = min(int(request.query_params.get('limit', 30)), 60)
+        if not product_id:
+            return Response({'error': 'product_id 필요'}, status=400)
+
+        snaps = (NaverSearchSnapshot.objects
+                 .filter(keyword_id=keyword_id, tab_type=tab)
+                 .order_by('-collected_at')[:limit])
+        # 시간순 (오래된 → 최근)
+        snaps = list(snaps)[::-1]
+
+        history = []
+        for s in snaps:
+            for i, p in enumerate(s.products or []):
+                pid = str(p.get('nvMid') or p.get('id') or '')
+                if pid == str(product_id):
+                    history.append({
+                        'snapshot_id': s.id,
+                        'collected_at': s.collected_at.isoformat(),
+                        'rank': i + 1,
+                        'productName': p.get('productName') or p.get('productTitle') or '',
+                        'mallName': p.get('mallName') or '',
+                        'lowPrice': p.get('lowPrice') or p.get('price') or 0,
+                        'reviewCount': p.get('reviewCount') or 0,
+                        'imageUrl': p.get('imageUrl') or '',
+                    })
+                    break  # 같은 스냅샷 안에 같은 상품은 1번만
+
+        # 직전 대비 변동 계산
+        for idx, h in enumerate(history):
+            if idx == 0:
+                h['delta'] = {'rank': 0, 'price': 0, 'name_changed': False, 'image_changed': False}
+            else:
+                prev = history[idx - 1]
+                p_now = int(h['lowPrice']) if h['lowPrice'] else 0
+                p_prev = int(prev['lowPrice']) if prev['lowPrice'] else 0
+                h['delta'] = {
+                    'rank': prev['rank'] - h['rank'],  # 양수면 순위 상승
+                    'price': p_now - p_prev,
+                    'name_changed': prev['productName'] != h['productName'],
+                    'image_changed': prev['imageUrl'] != h['imageUrl'],
+                }
+
+        return Response({
+            'product_id': product_id,
+            'tab': tab,
+            'history': history,
+            'count': len(history),
+        })
 
 
 # ──── 확장프로그램 → 검색결과 저장 ────
@@ -494,6 +692,176 @@ class RankToggleAutoView(APIView):
 
 # ──── 엑셀 다운로드 ────
 
+def _fmt_store(p):
+    return (
+        p.get('mallName')
+        or ((p.get('lowMallList') or [{}])[0].get('name'))
+        or ((p.get('lowMallList') or [{}])[0].get('mallName'))
+        or ''
+    )
+
+def _fmt_category(p):
+    return ' > '.join([
+        str(p.get(k) or '') for k in ('category1Name', 'category2Name', 'category3Name', 'category4Name')
+        if p.get(k)
+    ])
+
+def _fmt_pipe(v):
+    if not v:
+        return ''
+    if isinstance(v, list):
+        return '|'.join(str(x) for x in v)
+    return str(v)
+
+def _fmt_tag(v):
+    if not v:
+        return ''
+    if isinstance(v, list):
+        return ','.join(
+            x if isinstance(x, str) else (x.get('name') or x.get('value') or x.get('text') or '')
+            for x in v if x
+        )
+    return str(v)
+
+def _fmt_date(d):
+    if not d:
+        return ''
+    s = str(d)
+    if len(s) >= 8 and s[:8].isdigit():
+        return f'{s[:4]}-{s[4:6]}-{s[6:8]}'
+    return s
+
+def _product_row(p):
+    return [
+        p.get('productName') or p.get('productTitle') or '',
+        _fmt_store(p),
+        _fmt_category(p),
+        _fmt_pipe(p.get('attributeValue')),
+        _fmt_pipe(p.get('characterValue')),
+        _fmt_tag(p.get('manuTag')),
+        p.get('brand') or '',
+        p.get('maker') or '',
+        int(p.get('reviewCount') or 0),
+        _fmt_date(p.get('openDate')),
+        p.get('imageUrl') or '',
+    ]
+
+
+class ExportProductsView(APIView):
+    """키워드별 상품 상세 — 3시트 xlsx (전체/가격비교/네이버페이)
+    ?images=true → 각 행 끝에 이미지 임베드 (~90px 리사이즈)
+    """
+    COLS = ['상품명', '스토어명', '카테고리명', '속성항목', '속성값', '태그',
+            '브랜드', '제조사', '리뷰수', '등록일', '이미지URL']
+    COLS_WITH_IMG = COLS + ['이미지']
+    TABS = [('total', '전체'), ('model', '가격비교'), ('checkout', '네이버페이')]
+
+    def get(self, request, keyword_id):
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment
+        from django.http import HttpResponse
+
+        with_images = (request.query_params.get('images', 'false').lower() in ('1', 'true', 'yes'))
+
+        try:
+            kw = NaverKeyword.objects.get(id=keyword_id)
+        except NaverKeyword.DoesNotExist:
+            return Response({'error': 'not found'}, status=404)
+
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+
+        hdr_font = Font(bold=True, color='FFFFFFFF')
+        hdr_fill = PatternFill('solid', fgColor='FF03C75A')
+        hdr_align = Alignment(horizontal='center', vertical='center')
+        widths = [42, 22, 30, 28, 28, 30, 14, 14, 10, 14, 46]
+        cols = self.COLS_WITH_IMG if with_images else self.COLS
+        if with_images:
+            widths = widths + [16]  # 이미지 컬럼 너비
+
+        for tab_key, tab_name in self.TABS:
+            ws = wb.create_sheet(title=tab_name)
+            ws.append(cols)
+            for c, w in zip(ws[1], widths):
+                c.font = hdr_font
+                c.fill = hdr_fill
+                c.alignment = hdr_align
+            for i, w in enumerate(widths, 1):
+                ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+
+            snapshot = NaverSearchSnapshot.objects.filter(
+                keyword=kw, tab_type=tab_key
+            ).order_by('-collected_at').first()
+            if not snapshot or not snapshot.products:
+                continue
+
+            for idx, p in enumerate(snapshot.products):
+                row = _product_row(p)
+                if with_images:
+                    row = row + ['']
+                ws.append(row)
+
+            # 이미지 임베드
+            if with_images:
+                _embed_product_images(ws, snapshot.products, image_col_idx=len(cols))
+
+        from urllib.parse import quote
+        suffix = '_전체+이미지' if with_images else '_전체'
+        fname = quote(f'{kw.keyword}{suffix}.xlsx')
+        response = HttpResponse(
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+        response['Content-Disposition'] = f"attachment; filename*=UTF-8''{fname}"
+        wb.save(response)
+        return response
+
+
+def _embed_product_images(ws, products, image_col_idx, max_size=90, timeout=4):
+    """openpyxl 워크시트에 상품 이미지를 fetch + 리사이즈해 셀에 임베드.
+    동시 다운로드(ThreadPoolExecutor) 후 직렬로 임베드 (openpyxl 은 thread-safe 아님).
+    """
+    import requests as req_mod
+    from io import BytesIO
+    from PIL import Image as PILImage
+    from openpyxl.drawing.image import Image as XLImage
+    from openpyxl.utils import get_column_letter
+    from concurrent.futures import ThreadPoolExecutor
+
+    def fetch_and_resize(url):
+        try:
+            r = req_mod.get(url, timeout=timeout)
+            if not r.ok or len(r.content) < 200:
+                return None
+            pil = PILImage.open(BytesIO(r.content))
+            pil.thumbnail((max_size, max_size))
+            if pil.mode in ('RGBA', 'P'):
+                pil = pil.convert('RGB')
+            buf_out = BytesIO()
+            pil.save(buf_out, format='JPEG', quality=78)
+            buf_out.seek(0)
+            return buf_out
+        except Exception:
+            return None
+
+    urls = [p.get('imageUrl') or '' for p in products]
+    bufs = [None] * len(urls)
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        for i, buf in enumerate(ex.map(lambda u: fetch_and_resize(u) if u else None, urls)):
+            bufs[i] = buf
+
+    col_letter = get_column_letter(image_col_idx)
+    row_height_pt = max_size * 0.75 + 4
+    for i, buf in enumerate(bufs):
+        if not buf:
+            continue
+        try:
+            xl_img = XLImage(buf)
+            ws.add_image(xl_img, f'{col_letter}{i + 2}')
+            ws.row_dimensions[i + 2].height = row_height_pt
+        except Exception:
+            continue
+
+
 class ExportTermsView(APIView):
     def get(self, request):
         import openpyxl
@@ -805,7 +1173,8 @@ class UCStartView(APIView):
         if not keywords:
             return Response({'error': '키워드를 입력하세요'}, status=400)
         headless = request.data.get('headless', False)
-        ok, msg = uc_crawler.start(keywords, headless=headless)
+        tab_order = request.data.get('tab_order', None)
+        ok, msg = uc_crawler.start(keywords, headless=headless, tab_order=tab_order)
         if not ok:
             return Response({'ok': False, 'message': msg}, status=409)
         return Response({'ok': True, 'message': msg, 'count': len(keywords)})
@@ -939,3 +1308,371 @@ class RankCunningDetailView(APIView):
         cur.execute('DELETE FROM rank_cunning_product WHERE id=%s', (pk,))
         conn.close()
         return Response(status=204)
+
+
+# ══════════════════════════════════════════
+# 구매수 추적
+# ══════════════════════════════════════════
+
+class PurchaseTargetListView(APIView):
+    def get(self, request):
+        targets = NaverPurchaseTarget.objects.filter(is_active=True).order_by('-created_at')
+        data = NaverPurchaseTargetSerializer(targets, many=True).data
+        return Response(data)
+
+    def post(self, request):
+        nv_mid = request.data.get('nv_mid', '').strip()
+        if not nv_mid:
+            return Response({'error': 'nv_mid 필수'}, status=400)
+        target, created = NaverPurchaseTarget.objects.get_or_create(
+            nv_mid=nv_mid,
+            defaults={
+                'product_name': request.data.get('product_name', ''),
+                'store_name': request.data.get('store_name', ''),
+                'image_url': request.data.get('image_url', ''),
+                'category': request.data.get('category', ''),
+                'source_keyword': request.data.get('source_keyword', ''),
+                'source_rank': request.data.get('source_rank'),
+            },
+        )
+        if not created:
+            target.is_active = True
+            target.save(update_fields=['is_active'])
+        return Response(NaverPurchaseTargetSerializer(target).data, status=201 if created else 200)
+
+
+class PurchaseTargetDetailView(APIView):
+    def put(self, request, pk):
+        try:
+            target = NaverPurchaseTarget.objects.get(pk=pk)
+        except NaverPurchaseTarget.DoesNotExist:
+            return Response(status=404)
+        for f in ['product_name', 'store_name', 'is_active', 'auto_track', 'auto_track_time']:
+            if f in request.data:
+                setattr(target, f, request.data[f])
+        target.save()
+        return Response(NaverPurchaseTargetSerializer(target).data)
+
+    def delete(self, request, pk):
+        NaverPurchaseTarget.objects.filter(pk=pk).delete()
+        return Response(status=204)
+
+
+class RunPurchaseTrackingView(APIView):
+    def post(self, request):
+        from . import purchase_crawler
+
+        target_ids = request.data.get('target_ids')
+        headless = request.data.get('headless', True)
+
+        if target_ids:
+            targets = NaverPurchaseTarget.objects.filter(pk__in=target_ids, is_active=True)
+        else:
+            targets = NaverPurchaseTarget.objects.filter(is_active=True)
+
+        if not targets.exists():
+            return Response({'ok': False, 'message': '추적 대상 없음'})
+
+        ok, msg = purchase_crawler.start(targets, headless=headless)
+        return Response({'ok': ok, 'message': msg, 'count': targets.count()})
+
+
+class PurchaseTrackStatusView(APIView):
+    def get(self, request):
+        from . import purchase_crawler
+        log_since = int(request.query_params.get('logSince', 0))
+        return Response(purchase_crawler.get_status(log_since))
+
+
+class PurchaseTrackStopView(APIView):
+    def post(self, request):
+        from . import purchase_crawler
+        purchase_crawler.stop()
+        return Response({'ok': True})
+
+
+class PurchaseHistoryView(APIView):
+    def get(self, request):
+        target_id = request.query_params.get('target_id')
+        days = int(request.query_params.get('days', 30))
+        since = timezone.now() - timedelta(days=days)
+
+        qs = NaverPurchaseHistory.objects.filter(tracked_at__gte=since)
+        if target_id:
+            qs = qs.filter(target_id=target_id)
+        qs = qs.select_related('target').order_by('-tracked_at')[:500]
+
+        data = []
+        for h in qs:
+            data.append({
+                'id': h.id,
+                'target_id': h.target_id,
+                'target_name': h.target.product_name,
+                'target_nv_mid': h.target.nv_mid,
+                'purchase_count': h.purchase_count,
+                'review_count': h.review_count,
+                'keep_count': h.keep_count,
+                'price': h.price,
+                'crawl_success': h.crawl_success,
+                'error_message': h.error_message,
+                'tracked_at': h.tracked_at.isoformat(),
+            })
+        return Response(data)
+
+
+class PurchaseSummaryView(APIView):
+    def get(self, request):
+        targets = NaverPurchaseTarget.objects.filter(is_active=True).order_by('-created_at')
+        result = []
+        for t in targets:
+            records = list(t.history.filter(crawl_success=True).order_by('-tracked_at')[:2])
+            curr = records[0] if records else None
+            prev = records[1] if len(records) > 1 else None
+            delta = None
+            if curr and prev and curr.purchase_count is not None and prev.purchase_count is not None:
+                delta = curr.purchase_count - prev.purchase_count
+
+            result.append({
+                'id': t.id,
+                'nv_mid': t.nv_mid,
+                'product_name': t.product_name,
+                'store_name': t.store_name,
+                'image_url': t.image_url,
+                'category': t.category,
+                'source_keyword': t.source_keyword,
+                'source_rank': t.source_rank,
+                'current_purchase_count': curr.purchase_count if curr else None,
+                'previous_purchase_count': prev.purchase_count if prev else None,
+                'purchase_delta': delta,
+                'current_review_count': curr.review_count if curr else None,
+                'current_keep_count': curr.keep_count if curr else None,
+                'current_price': curr.price if curr else None,
+                'last_tracked_at': curr.tracked_at.isoformat() if curr else None,
+                'auto_track': t.auto_track,
+                'auto_track_time': t.auto_track_time,
+            })
+        return Response(result)
+
+
+class PurchaseToggleAutoView(APIView):
+    def post(self, request):
+        target_id = request.data.get('target_id')
+        enabled = request.data.get('enabled', False)
+        track_time = request.data.get('time', '09:00')
+        try:
+            target = NaverPurchaseTarget.objects.get(pk=target_id)
+        except NaverPurchaseTarget.DoesNotExist:
+            return Response({'error': '대상 없음'}, status=404)
+        target.auto_track = enabled
+        target.auto_track_time = track_time
+        target.save(update_fields=['auto_track', 'auto_track_time'])
+        return Response({'ok': True})
+
+
+# ══════════════════════════════════════════
+# 동의어 (키워드별)
+# ══════════════════════════════════════════
+
+class SynonymListView(APIView):
+    """키워드별 동의어 목록 조회 + 신규 추가 (수동/자동완성/사전 출처)"""
+    def get(self, request, keyword_id):
+        try:
+            NaverKeyword.objects.get(id=keyword_id)
+        except NaverKeyword.DoesNotExist:
+            return Response({'error': 'keyword not found'}, status=404)
+        qs = NaverSynonym.objects.filter(keyword_id=keyword_id).order_by(
+            '-is_confirmed', '-verification_score', 'word'
+        )
+        return Response(NaverSynonymSerializer(qs, many=True).data)
+
+    def post(self, request, keyword_id):
+        try:
+            kw = NaverKeyword.objects.get(id=keyword_id)
+        except NaverKeyword.DoesNotExist:
+            return Response({'error': 'keyword not found'}, status=404)
+        word = (request.data.get('word') or '').strip()
+        if not word:
+            return Response({'error': 'word 필요'}, status=400)
+        if word == kw.keyword:
+            return Response({'error': '같은 단어는 추가할 수 없습니다'}, status=400)
+        source = request.data.get('source') or 'manual'
+        is_confirmed = request.data.get('is_confirmed')
+
+        defaults = {'source': source}
+        if is_confirmed is not None:
+            defaults['is_confirmed'] = bool(is_confirmed)
+        syn, created = NaverSynonym.objects.get_or_create(
+            keyword=kw, word=word, defaults=defaults,
+        )
+        if not created and is_confirmed is not None:
+            syn.is_confirmed = bool(is_confirmed)
+            syn.save(update_fields=['is_confirmed', 'updated_at'])
+        return Response(NaverSynonymSerializer(syn).data, status=201 if created else 200)
+
+
+class SynonymDetailView(APIView):
+    """동의어 확정여부 변경/삭제"""
+    def patch(self, request, pk):
+        try:
+            syn = NaverSynonym.objects.get(id=pk)
+        except NaverSynonym.DoesNotExist:
+            return Response({'error': 'not found'}, status=404)
+        if 'is_confirmed' in request.data:
+            v = request.data['is_confirmed']
+            syn.is_confirmed = None if v is None else bool(v)
+        syn.save()
+        return Response(NaverSynonymSerializer(syn).data)
+
+    def delete(self, request, pk):
+        try:
+            NaverSynonym.objects.get(id=pk).delete()
+            return Response(status=204)
+        except NaverSynonym.DoesNotExist:
+            return Response({'error': 'not found'}, status=404)
+
+
+class SynonymLookupView(APIView):
+    """네이버 사전 + 자동완성에서 동의어 후보를 가져와 미확정으로 등록.
+    POST /api/naver/synonyms/<kw>/lookup/
+    body: {"include_autocomplete": true|false}
+    """
+    def post(self, request, keyword_id):
+        try:
+            kw = NaverKeyword.objects.get(id=keyword_id)
+        except NaverKeyword.DoesNotExist:
+            return Response({'error': 'keyword not found'}, status=404)
+
+        include_ac = request.data.get('include_autocomplete', True)
+
+        candidates = {}  # word → source
+
+        # 1. 네이버 사전
+        try:
+            for w in services.fetch_naver_dict_synonyms(kw.keyword):
+                if w != kw.keyword:
+                    candidates.setdefault(w, 'naver_dict')
+        except Exception:
+            pass
+
+        # 2. 자동완성 (옵션)
+        ac_words = []
+        if include_ac:
+            try:
+                ac_words = services.fetch_autocomplete_naver(kw.keyword)
+            except Exception:
+                ac_words = []
+            for w in ac_words:
+                # "강아지 사료" 처럼 원 키워드로 시작하는 복합어는 동의어 후보 아님 → 제외
+                if kw.keyword in w and w != kw.keyword:
+                    continue
+                if w in (kw.keyword,):
+                    continue
+                candidates.setdefault(w, 'autocomplete')
+
+        added = []
+        for word, source in candidates.items():
+            syn, created = NaverSynonym.objects.get_or_create(
+                keyword=kw, word=word, defaults={'source': source},
+            )
+            if created:
+                added.append(syn)
+
+        all_qs = NaverSynonym.objects.filter(keyword=kw).order_by(
+            '-is_confirmed', '-verification_score', 'word'
+        )
+        return Response({
+            'added': len(added),
+            'candidates_count': len(candidates),
+            'autocomplete_count': len(ac_words),
+            'synonyms': NaverSynonymSerializer(all_qs, many=True).data,
+        })
+
+
+class SynonymVerifyView(APIView):
+    """네이버쇼핑 검색으로 동의어 검증.
+    POST /api/naver/synonyms/<kw>/verify/  body: {"word": "..."}  (이미 등록된 후보)
+    또는 body: {"synonym_id": 123}
+    검증결과를 verification_score/verification_data 에 저장.
+    """
+    def post(self, request, keyword_id):
+        try:
+            kw = NaverKeyword.objects.get(id=keyword_id)
+        except NaverKeyword.DoesNotExist:
+            return Response({'error': 'keyword not found'}, status=404)
+
+        synonym_id = request.data.get('synonym_id')
+        word = (request.data.get('word') or '').strip()
+
+        syn = None
+        if synonym_id:
+            try:
+                syn = NaverSynonym.objects.get(id=synonym_id, keyword=kw)
+                word = syn.word
+            except NaverSynonym.DoesNotExist:
+                return Response({'error': 'synonym not found'}, status=404)
+        elif word:
+            syn = NaverSynonym.objects.filter(keyword=kw, word=word).first()
+
+        if not word:
+            return Response({'error': 'word 또는 synonym_id 필요'}, status=400)
+
+        try:
+            result = services.verify_synonym_in_shopping(kw.keyword, word)
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
+
+        if 'error' in result:
+            return Response({'error': result['error']}, status=502)
+
+        # 저장 (없으면 생성)
+        if syn is None:
+            syn = NaverSynonym.objects.create(keyword=kw, word=word, source='manual')
+        syn.verification_score = result.get('score')
+        syn.verification_data = result
+        syn.save(update_fields=['verification_score', 'verification_data', 'updated_at'])
+
+        data = NaverSynonymSerializer(syn).data
+        data['verification'] = result
+        return Response(data)
+
+
+class AutocompleteView(APIView):
+    """마켓별 자동완성 조회 (현재 1단계: 네이버, 쿠팡)
+    POST /api/naver/autocomplete/
+    body: {"query": "강아지", "markets": ["naver","coupang"]}
+    응답: {"query":..., "results": {"naver": {"keywords":[...], "error":null}, ...}}
+    """
+    def post(self, request):
+        query = (request.data.get('query') or '').strip()
+        markets = request.data.get('markets') or ['naver', 'coupang']
+        if not query:
+            return Response({'error': 'query 필요'}, status=400)
+        if not isinstance(markets, list):
+            return Response({'error': 'markets는 배열이어야 합니다'}, status=400)
+
+        results = services.fetch_autocomplete_multi(query, markets)
+        return Response({'query': query, 'results': results})
+
+
+# ── 확장프로그램 → 구매수 결과 수신 ──
+class ExtPurchaseResultView(APIView):
+    def post(self, request):
+        target_id = request.data.get('target_id')
+        if not target_id:
+            return Response({'error': 'target_id 필수'}, status=400)
+        try:
+            target = NaverPurchaseTarget.objects.get(pk=target_id)
+        except NaverPurchaseTarget.DoesNotExist:
+            return Response({'error': 'target not found'}, status=404)
+
+        pc = request.data.get('purchase_count')
+        NaverPurchaseHistory.objects.create(
+            target=target,
+            purchase_count=pc,
+            review_count=request.data.get('review_count'),
+            keep_count=request.data.get('keep_count'),
+            price=request.data.get('price'),
+            crawl_success=pc is not None,
+            error_message=request.data.get('error', ''),
+        )
+        return Response({'ok': True, 'target_id': target_id}, status=201)

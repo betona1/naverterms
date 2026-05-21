@@ -101,7 +101,13 @@ class Command(BaseCommand):
         all_changes = self._fetch_all_changes(
             session, start_date, end_date, page_size,
         )
-        self.stdout.write(f'총 변동 건수: {len(all_changes)}건')
+        # W코드 기준 유니크 상품수
+        unique_codes = set()
+        for item in all_changes:
+            code = item.get('selfcode', '').strip()
+            if code and code.startswith('W'):
+                unique_codes.add(code)
+        self.stdout.write(f'총 변동: 이벤트 {len(all_changes)}건 / 상품 {len(unique_codes)}개 (W코드 기준)')
 
         # 3. 상품별 최신 변동 분석
         product_status = self._analyze_changes(all_changes)
@@ -121,7 +127,8 @@ class Command(BaseCommand):
             'synced_at': start_time.strftime('%Y-%m-%d %H:%M:%S'),
             'period': f'{start_date} ~ {end_date}',
             'elapsed': round(elapsed),
-            'total_changes': len(all_changes),
+            'total_changes': len(unique_codes),  # W코드 기준 유니크 상품수
+            'raw_events': len(all_changes),  # API 원본 이벤트 건수
             'status_changes': len(product_status),
             'transitions': transitions,
             'db_result': result,
@@ -294,15 +301,21 @@ class Command(BaseCommand):
         codes = list(product_status.keys())
         old_statuses = self._get_old_statuses(codes)
 
-        # 2) transition 계산
+        # 2) transition 계산 — 우리 DB에 있는 상품만 (W코드 기준)
         transitions = defaultdict(int)
+        not_in_db = 0
         for code, info in product_status.items():
-            old_s = old_statuses.get(code, 1)  # DB에 없으면 판매중(1) 가정
+            if code not in old_statuses:
+                not_in_db += 1
+                continue  # DB에 없는 상품은 transition 집계 제외
+            old_s = old_statuses[code]
             new_s = info['sale_status']
             if old_s != new_s:
                 old_label = STATUS_LABELS.get(old_s, f'상태{old_s}')
                 new_label = STATUS_LABELS.get(new_s, f'상태{new_s}')
                 transitions[f'{old_label}\u2192{new_label}'] += 1
+        if not_in_db:
+            self.stdout.write(f'  (DB 미등록 상품 {not_in_db}개 제외)')
 
         # 3) ownerclan_product 업데이트
         ownerclan_updated = 0
@@ -366,12 +379,14 @@ class Command(BaseCommand):
         return result, dict(transitions)
 
     def _get_transitions_dry(self, product_status):
-        """DRY-RUN: DB 변경 없이 transition만 계산"""
+        """DRY-RUN: DB 변경 없이 transition만 계산 (DB 등록 상품만)"""
         codes = list(product_status.keys())
         old_statuses = self._get_old_statuses(codes)
         transitions = defaultdict(int)
         for code, info in product_status.items():
-            old_s = old_statuses.get(code, 1)
+            if code not in old_statuses:
+                continue  # DB 미등록 제외
+            old_s = old_statuses[code]
             new_s = info['sale_status']
             if old_s != new_s:
                 old_label = STATUS_LABELS.get(old_s, f'상태{old_s}')
@@ -382,12 +397,13 @@ class Command(BaseCommand):
     def _build_summary(self, sync_result, dry_run=False):
         tr = sync_result['transitions']
         db = sync_result['db_result']
+        raw = sync_result.get('raw_events', sync_result['total_changes'])
         lines = [
             '오너클랜 품절/단종 동기화 완료',
             '━━━━━━━━━━━━━━━━━━',
             f'기간: {sync_result["period"]}',
-            f'총 변동: {sync_result["total_changes"]:,}건',
-            f'상태변경: {sync_result["status_changes"]:,}건',
+            f'변동 상품: {sync_result["total_changes"]:,}개 (이벤트 {raw:,}건)',
+            f'상태변경: {sync_result["status_changes"]:,}개',
             '━━━━━━━━━━━━━━━━━━',
         ]
         if tr:
@@ -423,10 +439,11 @@ class Command(BaseCommand):
             with connections['ads'].cursor() as cur:
                 cur.execute("""
                     INSERT INTO soldout_sync_log
-                    (sync_date, total_changes, status_changes, transitions, db_result, elapsed)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                    (sync_date, total_changes, raw_events, status_changes, transitions, db_result, elapsed)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     ON DUPLICATE KEY UPDATE
                     total_changes = VALUES(total_changes),
+                    raw_events = VALUES(raw_events),
                     status_changes = VALUES(status_changes),
                     transitions = VALUES(transitions),
                     db_result = VALUES(db_result),
@@ -434,6 +451,7 @@ class Command(BaseCommand):
                 """, [
                     sync_date,
                     sync_result.get('total_changes', 0),
+                    sync_result.get('raw_events', 0),
                     sync_result.get('status_changes', 0),
                     json.dumps(sync_result.get('transitions', {}), ensure_ascii=False),
                     json.dumps(sync_result.get('db_result', {}), ensure_ascii=False),

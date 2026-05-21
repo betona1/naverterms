@@ -1,853 +1,597 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useTheme } from '../hooks/useTheme';
 import * as naverApi from '../api/naverApi';
+import type { ResultKeyword, CrawlLogEntry } from '../api/naverApi';
 import { useNaverExtension } from '../components/naver/useNaverExtension';
-import ExtensionStatus from '../components/naver/ExtensionStatus';
-import ExtensionInstallGuide from '../components/naver/ExtensionInstallGuide';
-import { NaverLogo, NaverShoppingIcon } from '../components/naver/NaverIcon';
 import ProductPopup from '../components/naver/ProductPopup';
 
-interface Keyword {
-  id: number;
-  keyword: string;
-  terms: string[];
-  term_count: number;
-  total_count: number;
-  naverpay_count: number;
-  price_compare_count: number;
-  last_searched_at: string | null;
+const TAB_LABEL: Record<string, string> = { total: '전체', model: '가격비교', checkout: '네이버페이' };
+const TAB_ORDER = ['total', 'model', 'checkout'] as const;
+
+type GroupKey = 'fav' | 'all' | 'collected' | 'empty';
+
+function formatAgo(iso: string | null): string {
+  if (!iso) return '-';
+  const t = new Date(iso).getTime();
+  const diff = (Date.now() - t) / 1000;
+  if (diff < 60) return '방금';
+  if (diff < 3600) return `${Math.floor(diff / 60)}분 전`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}시간 전`;
+  if (diff < 86400 * 30) return `${Math.floor(diff / 86400)}일 전`;
+  return iso.slice(0, 10);
 }
 
-interface Analysis {
-  term1: string; term2: string; term3: string; term4: string;
-  order_weight: any; position_weight: any; name_weight: any;
-  part_weight: any; category_priority: any;
-}
-
-interface RowData {
-  keyword: Keyword;
-  analysis: Analysis | null;
-  productCount: number;
-}
-
-interface CrawlLog {
-  time: string;
-  type: 'info' | 'success' | 'error' | 'progress' | 'tab';
-  message: string;
-}
-
-interface CrawlState {
-  active: boolean;
-  mode: 'chrome' | 'uc' | 'smart' | 'api';
-  keywords: string[];
-  currentKeyword: string;
-  currentKeywordIdx: number;
-  currentTab: string;
-  completedSteps: number;
-  totalSteps: number;
-  tabs: { key: string; label: string; done: boolean; count?: number }[];
-  logs: CrawlLog[];
-  lastLogIdx: number;
-}
-
-const _TAB_LABELS: Record<string, string> = { total: '전체', model: '가격비교', checkout: '네이버페이' };
-void _TAB_LABELS;
-const TABS_ORDER = [
-  { key: 'model', label: '가격비교' },
-  { key: 'checkout', label: '네이버페이' },
-  { key: 'total', label: '전체' },
-];
-
-function timestamp() {
-  const d = new Date();
+function formatTime(iso: string): string {
+  const d = new Date(iso);
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
-}
-
-function logType(msg: string): CrawlLog['type'] {
-  if (msg.includes('★') || msg.includes('저장OK') || msg.includes('완료') || msg.includes('성공') || msg.includes('연결 OK')) return 'success';
-  if (msg.includes('실패') || msg.includes('오류') || msg.includes('에러') || msg.includes('연결실패')) return 'error';
-  if (msg.includes('시작') || msg.includes('──') || msg.includes('새 탭') || msg.includes('클릭')) return 'progress';
-  if (msg.includes('타임아웃') || msg.includes('스킵') || msg.includes('취소') || msg.includes('CAPTCHA')) return 'error';
-  if (msg.includes('상품') || msg.includes('데이터 수신')) return 'tab';
-  return 'info';
 }
 
 export default function NaverTermsPage() {
   const { dark } = useTheme();
-  const [keywords, setKeywords] = useState<Keyword[]>([]);
-  const [rows, setRows] = useState<RowData[]>([]);
+  const [results, setResults] = useState<ResultKeyword[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [pendingKws, setPendingKws] = useState<string[]>([]);
   const [inputText, setInputText] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set());
-  const [popup, setPopup] = useState<{ keywordId: number; keyword: string; terms: string[] } | null>(null);
-  const [crawl, setCrawl] = useState<CrawlState | null>(null);
-  const [installGuideOpen, setInstallGuideOpen] = useState(false);
-  const logEndRef = useRef<HTMLDivElement>(null);
-  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const { extStatus, progress, captcha, startTermSearch, cancel, onProgress } = useNaverExtension();
+  const [logs, setLogs] = useState<CrawlLogEntry[]>([]);
+  const [openSections, setOpenSections] = useState<Record<GroupKey, boolean>>({
+    fav: true, all: false, collected: false, empty: false,
+  });
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [popup, setPopup] = useState<{ keywordId: number; keyword: string; terms: string[]; initialTab?: string } | null>(null);
+  const lastLogIdRef = useRef<number>(0);
+  const sessionIdRef = useRef<string>('');
+  const { extStatus, startTermSearch, onProgress } = useNaverExtension();
 
-  const loadKeywords = useCallback(async () => {
-    try { setKeywords(await naverApi.getKeywords()); } catch (e) { console.error(e); }
+  // ── 데이터 로딩 ──
+  const loadResults = useCallback(async () => {
+    try {
+      const r = await naverApi.getResultsKeywords();
+      setResults(r.keywords);
+    } catch (e) { console.error(e); } finally { setLoading(false); }
   }, []);
 
-  const loadRowData = useCallback(async () => {
-    const rowData: RowData[] = [];
-    for (const kw of keywords) {
-      let analysis: Analysis | null = null;
-      let productCount = 0;
+  const loadLogs = useCallback(async () => {
+    try {
+      if (lastLogIdRef.current === 0) {
+        const r = await naverApi.getCrawlLogs({ limit: 100 });
+        const sorted = [...r.logs].sort((a, b) => a.id - b.id);
+        setLogs(sorted);
+        if (sorted.length) lastLogIdRef.current = sorted[sorted.length - 1].id;
+      } else {
+        const r = await naverApi.getCrawlLogs({ since_id: lastLogIdRef.current });
+        if (r.logs.length) {
+          setLogs(prev => [...prev, ...r.logs].slice(-300));
+          lastLogIdRef.current = r.logs[r.logs.length - 1].id;
+        }
+      }
+    } catch (e) {}
+  }, []);
+
+  useEffect(() => { loadResults(); }, [loadResults]);
+  useEffect(() => { loadLogs(); }, [loadLogs]);
+
+  // 수집 중에는 1.5초마다 로그 폴링
+  useEffect(() => {
+    const t = setInterval(loadLogs, extStatus.connected ? 1500 : 5000);
+    return () => clearInterval(t);
+  }, [extStatus.connected, loadLogs]);
+
+  // ── 확장프로그램 진행 메시지 → DB로 미러링 ──
+  useEffect(() => {
+    return onProgress(async (msg: any) => {
+      const text = msg?.message || msg?.status || msg?.type || '';
+      if (!text) return;
+      // 중복 방지용 간단한 dedupe (같은 메시지 1.5초 내 무시)
       try {
-        const analyses = await naverApi.getAnalysis(kw.id);
-        if (analyses.length > 0) analysis = analyses[0];
-        const products = await naverApi.getProducts(kw.id, 'total');
-        productCount = products.products?.length || 0;
+        await naverApi.postCrawlLog({
+          type: msg?.error ? 'error' : (msg?.type === 'NAVER_SEARCH_COMPLETE' ? 'success' : 'progress'),
+          message: typeof text === 'string' ? text : JSON.stringify(text).slice(0, 500),
+          keyword: msg?.keyword || '',
+          session_id: sessionIdRef.current,
+        });
       } catch (e) {}
-      rowData.push({ keyword: kw, analysis, productCount });
-    }
-    setRows(rowData);
-  }, [keywords]);
-
-  useEffect(() => { loadKeywords(); }, [loadKeywords]);
-  useEffect(() => { if (keywords.length > 0) loadRowData(); }, [keywords, loadRowData]);
-
-  // 로그 자동 스크롤
-  useEffect(() => {
-    logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [crawl?.logs.length]);
-
-  // ── ★ 확장프로그램 상태 폴링 (크롤링 중) ──
-  const _pollStatus = useCallback(() => {
-    window.postMessage({ type: 'NAVER_GET_STATUS', logSince: crawl?.lastLogIdx || 0 }, '*');
-  }, [crawl?.lastLogIdx]);
-  void _pollStatus;
-
-  // GET_STATUS 응답 처리
-  useEffect(() => {
-    const handler = (event: MessageEvent) => {
-      if (event.source !== window) return;
-      if (event.data?.type !== 'NAVER_GET_STATUS_RESPONSE') return;
-      const resp = event.data.data;
-      if (!resp || !crawl) return;
-
-      setCrawl(prev => {
-        if (!prev || prev.mode !== 'chrome') return prev;
-
-        // 로그 동기화
-        const newLogs = [...prev.logs];
-        let newLastLogIdx = prev.lastLogIdx;
-        if (resp.logs && resp.logs.length > 0) {
-          for (const entry of resp.logs) {
-            const t = new Date(entry.t).toLocaleTimeString('ko-KR', { hour12: false });
-            newLogs.push({ time: t, type: logType(entry.msg), message: entry.msg });
-            if (entry.i >= newLastLogIdx) newLastLogIdx = entry.i + 1;
-          }
-        }
-
-        // 완료 체크 (getStatus 반환값: running, steps, totalSteps, keyword, kwIdx)
-        const isComplete = resp.totalSteps > 0 && resp.steps >= resp.totalSteps && !resp.running;
-
-        return {
-          ...prev,
-          active: !isComplete && resp.running,
-          currentKeyword: resp.keyword || prev.currentKeyword,
-          currentKeywordIdx: resp.kwIdx || prev.currentKeywordIdx,
-          currentTab: prev.currentTab,
-          completedSteps: resp.steps || 0,
-          totalSteps: resp.totalSteps || prev.totalSteps,
-          logs: newLogs,
-          lastLogIdx: newLastLogIdx,
-        };
-      });
-    };
-    window.addEventListener('message', handler);
-    return () => window.removeEventListener('message', handler);
-  }, [crawl !== null]);
-
-  // Chrome 모드 폴링 시작/중지 (UC 모드에서는 비활성)
-  useEffect(() => {
-    if (crawl?.active && crawl?.mode === 'chrome') {
-      if (!pollTimerRef.current) {
-        pollTimerRef.current = setInterval(() => {
-          window.postMessage({ type: 'NAVER_GET_STATUS', logSince: 0 }, '*');
-        }, 1000);
-      }
-    } else {
-      if (pollTimerRef.current) {
-        clearInterval(pollTimerRef.current);
-        pollTimerRef.current = null;
-      }
-      if (crawl && !crawl.active && crawl.mode === 'chrome') {
-        setTimeout(() => {
-          window.postMessage({ type: 'NAVER_GET_STATUS', logSince: 0 }, '*');
-        }, 500);
-      }
-    }
-    return () => {
-      if (pollTimerRef.current) { clearInterval(pollTimerRef.current); pollTimerRef.current = null; }
-    };
-  }, [crawl?.active, crawl?.mode]);
-
-  // 확장프로그램 이벤트 → 탭 카드 업데이트 (Chrome 모드 전용)
-  useEffect(() => {
-    return onProgress((e) => {
-      if (e.type === 'NAVER_TAB_COMPLETE') {
-        setCrawl(prev => {
-          if (!prev || prev.mode !== 'chrome') return prev;
-          return {
-            ...prev,
-            tabs: prev.tabs.map(t =>
-              t.key === e.tabType ? { ...t, done: true, count: e.productCount } : t
-            ),
-          };
-        });
-      }
-
-      if (e.type === 'NAVER_SEARCH_COMPLETE') {
-        setCrawl(prev => {
-          if (!prev) return prev;
-          // 모든 탭 완료 표시 + 다음 키워드를 위해 탭 리셋
-          return {
-            ...prev,
-            tabs: prev.tabs.map(t => ({ ...t, done: false })),
-          };
-        });
-        loadKeywords();
-      }
-
-      if (e.type === 'NAVER_QUEUE_STATUS' && e.status === 'complete') {
-        setCrawl(prev => prev ? { ...prev, active: false } : prev);
-        loadKeywords();
-      }
-
-      if (e.type === 'NAVER_TRACKING_PROGRESS') {
-        setCrawl(prev => {
-          if (!prev) return prev;
-          return {
-            ...prev,
-            currentKeyword: e.keyword || prev.currentKeyword,
-            currentTab: e.tab || prev.currentTab,
-          };
-        });
+      // 완료 이벤트 시 키워드 목록 새로고침
+      if (msg?.type === 'NAVER_SEARCH_COMPLETE') {
+        setTimeout(loadResults, 500);
       }
     });
-  }, [onProgress, loadKeywords]);
+  }, [onProgress, loadResults]);
 
-  const handleAddKeywords = async () => {
-    const lines = inputText.split('\n').map(l => l.trim()).filter(Boolean);
-    if (!lines.length) return;
-    setLoading(true);
-    for (const kw of lines) await naverApi.addKeyword(kw);
+  // ── 검색어 입력 / 추가 / 검색 ──
+  const addKeyword = () => {
+    const text = inputText.trim();
+    if (!text) return;
+    const lines = text.split(/[\n,]/).map(s => s.trim()).filter(Boolean);
+    setPendingKws(prev => Array.from(new Set([...prev, ...lines])));
     setInputText('');
-    await loadKeywords();
-    setLoading(false);
   };
 
-  const handleClear = async () => {
-    for (const kw of keywords) await naverApi.deleteKeyword(kw.id);
-    setKeywords([]); setRows([]);
+  const removePending = (kw: string) => {
+    setPendingKws(prev => prev.filter(k => k !== kw));
   };
 
-  const getTargetKeywords = () => {
-    return selectedRows.size > 0
-      ? rows.filter((_, i) => selectedRows.has(i)).map(r => r.keyword.keyword)
-      : rows.map(r => r.keyword.keyword);
-  };
-
-  const handleSearch = () => {
-    const target = getTargetKeywords();
-    if (!target.length) return;
-
-    setCrawl({
-      active: true,
-      mode: 'chrome',
-      keywords: target,
-      currentKeyword: target[0],
-      currentKeywordIdx: 0,
-      currentTab: 'model',
-      completedSteps: 0,
-      totalSteps: target.length * 3,
-      tabs: TABS_ORDER.map(t => ({ ...t, done: false })),
-      logs: [{ time: timestamp(), type: 'info', message: `[Chrome] 크롤링 시작 — ${target.length}개 키워드: [${target.join(', ')}]` }],
-      lastLogIdx: 0,
+  const startSearch = async () => {
+    if (!extStatus.connected) {
+      // 확장프로그램 미설치 → 안내 페이지로
+      window.location.hash = 'extension';
+      return;
+    }
+    if (pendingKws.length === 0) return;
+    sessionIdRef.current = String(Date.now());
+    await naverApi.postCrawlLog({
+      type: 'info',
+      message: `── ${pendingKws.length}개 키워드 검색 시작 ──`,
+      session_id: sessionIdRef.current,
     });
-
-    startTermSearch(target);
+    startTermSearch(pendingKws);
+    setPendingKws([]);
+    loadLogs();
   };
 
-  // ── UC 검색 ──
-  const ucPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const ucLogIdxRef = useRef(0);
+  // ── 다시수집 — 확장프로그램 배치모드로 3탭 모두 재수집 ──
+  const onReCollect = useCallback((kw: string) => {
+    if (!extStatus.connected) {
+      if (confirm('확장프로그램이 연결되지 않았습니다. 설치 안내 페이지로 이동하시겠습니까?')) {
+        window.location.hash = 'extension';
+      }
+      return;
+    }
+    if (!confirm(`"${kw}" 키워드를 다시수집합니다.\n전체/가격비교/네이버페이 3개 탭 모두 재수집됩니다.\n\n진행하시겠습니까?`)) return;
+    sessionIdRef.current = String(Date.now());
+    naverApi.postCrawlLog({
+      type: 'info',
+      message: `🔄 "${kw}" 다시수집 시작`,
+      keyword: kw,
+      session_id: sessionIdRef.current,
+    }).catch(() => {});
+    startTermSearch([kw], ['model', 'total', 'checkout']);
+  }, [extStatus.connected, startTermSearch]);
 
-  const stopUCPoll = useCallback(() => {
-    if (ucPollRef.current) { clearInterval(ucPollRef.current); ucPollRef.current = null; }
+  // ── 즐겨찾기 토글 ──
+  const onToggleFav = useCallback(async (id: number, current: boolean) => {
+    setResults(prev => prev.map(k => k.id === id ? { ...k, is_favorite: !current } : k));
+    try { await naverApi.toggleFavorite(id, !current); }
+    catch (e) { setResults(prev => prev.map(k => k.id === id ? { ...k, is_favorite: current } : k)); }
   }, []);
 
-  const pollUCStatus = useCallback(async () => {
-    try {
-      const d = await naverApi.ucStatus(ucLogIdxRef.current);
-      setCrawl(prev => {
-        if (!prev || prev.mode !== 'uc') return prev;
-        const newLogs = [...prev.logs];
-        if (d.logs?.length > 0) {
-          for (const entry of d.logs) {
-            const t = entry.t ? new Date(entry.t).toLocaleTimeString('ko-KR', { hour12: false }) : timestamp();
-            newLogs.push({ time: t, type: logType(entry.msg), message: entry.msg });
-          }
-          ucLogIdxRef.current += d.logs.length;
-        }
-        const isComplete = !d.running && d.totalSteps > 0 && d.steps >= d.totalSteps;
-        const isDone = !d.running && prev.active;
-        if (isComplete || isDone) {
-          stopUCPoll();
-          loadKeywords();
-        }
-        return {
-          ...prev,
-          active: d.running,
-          currentKeyword: d.keyword || prev.currentKeyword,
-          currentKeywordIdx: d.kwIdx || prev.currentKeywordIdx,
-          completedSteps: d.steps || prev.completedSteps,
-          totalSteps: d.totalSteps || prev.totalSteps,
-          logs: newLogs,
-        };
-      });
-    } catch {
-      // 네트워크 오류 무시
-    }
-  }, [stopUCPoll, loadKeywords]);
-
-  const handleUCSearch = async () => {
-    const target = getTargetKeywords();
-    if (!target.length) return;
-
-    ucLogIdxRef.current = 0;
-    setCrawl({
-      active: true,
-      mode: 'uc',
-      keywords: target,
-      currentKeyword: target[0],
-      currentKeywordIdx: 0,
-      currentTab: '',
-      completedSteps: 0,
-      totalSteps: target.length * 3,
-      tabs: TABS_ORDER.map(t => ({ ...t, done: false })),
-      logs: [{ time: timestamp(), type: 'info', message: `[UC] 크롤링 시작 — ${target.length}개 키워드: [${target.join(', ')}]` }],
-      lastLogIdx: 0,
+  // ── 선택 체크박스 ──
+  const toggleSelect = (id: number) => {
+    setSelectedIds(prev => {
+      const n = new Set(prev);
+      if (n.has(id)) n.delete(id); else n.add(id);
+      return n;
     });
-
-    try {
-      const result = await naverApi.ucStart(target);
-      if (!result.ok) {
-        setCrawl(prev => prev ? {
-          ...prev,
-          active: false,
-          logs: [...prev.logs, { time: timestamp(), type: 'error', message: `UC 시작 실패: ${result.message || 'unknown'}` }],
-        } : null);
-        return;
-      }
-      // 폴링 시작
-      stopUCPoll();
-      ucPollRef.current = setInterval(pollUCStatus, 1000);
-      pollUCStatus();
-    } catch (e: any) {
-      setCrawl(prev => prev ? {
-        ...prev,
-        active: false,
-        logs: [...prev.logs, { time: timestamp(), type: 'error', message: `UC 연결 실패: ${e.message}` }],
-      } : null);
-    }
   };
-
-  // UC 폴링 정리
-  useEffect(() => {
-    return () => stopUCPoll();
-  }, [stopUCPoll]);
-
-  // ── 스마트 검색 (HTTP + auto fallback) ──
-  const handleSmartSearch = async (method: 'auto' | 'api' = 'auto') => {
-    const target = getTargetKeywords();
-    if (!target.length) return;
-
-    const modeLabel = method === 'api' ? 'API' : 'Smart';
-    const mode = method === 'api' ? 'api' as const : 'smart' as const;
-
-    setCrawl({
-      active: true,
-      mode,
-      keywords: target,
-      currentKeyword: target[0],
-      currentKeywordIdx: 0,
-      currentTab: '',
-      completedSteps: 0,
-      totalSteps: method === 'api' ? target.length : target.length * 3,
-      tabs: method === 'api' ? [] : TABS_ORDER.map(t => ({ ...t, done: false })),
-      logs: [{ time: timestamp(), type: 'info', message: `[${modeLabel}] 수집 시작 — ${target.length}개 키워드: [${target.join(', ')}]` }],
-      lastLogIdx: 0,
+  const selectAll = (kws: ResultKeyword[]) => {
+    setSelectedIds(prev => {
+      const n = new Set(prev);
+      const allSelected = kws.every(k => n.has(k.id));
+      if (allSelected) kws.forEach(k => n.delete(k.id));
+      else kws.forEach(k => n.add(k.id));
+      return n;
     });
+  };
 
-    try {
-      const result = await naverApi.smartCollect(target, method);
-
-      // HTTP 차단 → Chrome 확장 자동 전환
-      if (result.blocked && method !== 'api' && extStatus.connected) {
-        setCrawl(prev => {
-          if (!prev) return prev;
-          return {
-            ...prev,
-            active: true,
-            mode: 'chrome',
-            totalSteps: target.length * 3,
-            completedSteps: 0,
-            tabs: TABS_ORDER.map(t => ({ ...t, done: false })),
-            logs: [
-              ...prev.logs,
-              { time: timestamp(), type: 'error', message: `HTTP 차단 감지 (418)` },
-              { time: timestamp(), type: 'progress', message: `Chrome 확장 프로그램으로 자동 전환합니다...` },
-              { time: timestamp(), type: 'info', message: `[Chrome] 크롤링 시작 — ${target.length}개 키워드 (속성/리뷰/등록일 포함)` },
-            ],
-          };
-        });
-        startTermSearch(target);
-        return;
-      }
-
-      setCrawl(prev => {
-        if (!prev) return prev;
-        const newLogs = [...prev.logs];
-
-        // 결과 로그
-        for (const r of result.results || []) {
-          if (r.error) {
-            newLogs.push({ time: timestamp(), type: 'error', message: `"${r.keyword}" 오류: ${r.error}` });
-          } else {
-            const termsTag = r.has_terms ? ' [terms OK]' : ' [terms 없음]';
-            newLogs.push({ time: timestamp(), type: 'success', message: `"${r.keyword}" [${r.tab || 'total'}] ${r.count}개 저장 (total=${r.total})${termsTag}` });
-          }
-        }
-
-        // API fallback 결과
-        if (result.api_results) {
-          newLogs.push({ time: timestamp(), type: 'progress', message: `IP 차단 감지 → API 모드로 전환` });
-          for (const r of result.api_results) {
-            if (r.error) {
-              newLogs.push({ time: timestamp(), type: 'error', message: `"${r.keyword}" API 오류: ${r.error}` });
-            } else {
-              newLogs.push({ time: timestamp(), type: 'success', message: `"${r.keyword}" [API] ${r.count}개 저장` });
-            }
-          }
-        }
-
-        if (result.blocked) {
-          if (!extStatus.connected) {
-            newLogs.push({ time: timestamp(), type: 'error', message: `HTTP 차단됨. Chrome 확장 프로그램을 설치하면 속성/리뷰/등록일 + 가격비교/네이버페이 탭을 수집할 수 있습니다.` });
-          }
-          if (method === 'http') {
-            newLogs.push({ time: timestamp(), type: 'error', message: `IP 차단 감지 — HTTP 수집 중단됨` });
-          }
-        }
-
-        const total = (result.results?.length || 0) + (result.api_results?.length || 0);
-        newLogs.push({ time: timestamp(), type: 'success', message: `★ 수집 완료 — ${total}개 키워드 처리 (${result.method_used} 모드)` });
-
-        return {
-          ...prev,
-          active: false,
-          completedSteps: prev.totalSteps,
-          logs: newLogs,
-        };
-      });
-      loadKeywords();
-    } catch (e: any) {
-      setCrawl(prev => prev ? {
-        ...prev,
-        active: false,
-        logs: [...prev.logs, { time: timestamp(), type: 'error', message: `${modeLabel} 수집 실패: ${e.message}` }],
-      } : null);
+  const deleteSelected = async () => {
+    if (selectedIds.size === 0) return;
+    if (!confirm(`${selectedIds.size}개 키워드를 삭제합니다. 진행하시겠습니까?`)) return;
+    for (const id of selectedIds) {
+      try { await naverApi.deleteKeyword(id); } catch (e) {}
     }
+    setSelectedIds(new Set());
+    loadResults();
   };
 
-  const handleCancelCrawl = async () => {
-    if (crawl?.mode === 'uc') {
-      try { await naverApi.ucStop(); } catch {}
-      stopUCPoll();
-    } else if (crawl?.mode === 'chrome') {
-      cancel();
-    }
-    setCrawl(prev => prev ? {
-      ...prev,
-      active: false,
-      logs: [...prev.logs, { time: timestamp(), type: 'error', message: '사용자에 의해 중단됨' }],
-    } : null);
+  // ── 그룹 분류 (모두 최근업데이트순) ──
+  const groups = useMemo(() => {
+    const sorted = [...results]; // 백엔드가 이미 정렬
+    const fav = sorted.filter(k => k.is_favorite);
+    const all = sorted; // 즐겨찾기 포함 전체
+    const collected = sorted.filter(k => k.has_data);
+    const empty = sorted.filter(k => !k.has_data);
+    return { fav, all, collected, empty };
+  }, [results]);
+
+  const clearLogs = async () => {
+    if (!confirm('수집 로그를 모두 삭제합니다. 진행하시겠습니까?')) return;
+    await naverApi.clearCrawlLogs();
+    setLogs([]);
+    lastLogIdRef.current = 0;
   };
 
-  const handleAnalyze = async () => {
-    const targets = selectedRows.size > 0 ? rows.filter((_, i) => selectedRows.has(i)) : rows;
-    setLoading(true);
-    for (const r of targets) { try { await naverApi.runAnalysis(r.keyword.id); } catch (e) {} }
-    await loadKeywords();
-    setLoading(false);
-  };
-
-  const toggleRow = (idx: number) => {
-    setSelectedRows(prev => { const n = new Set(prev); n.has(idx) ? n.delete(idx) : n.add(idx); return n; });
-  };
-
-  const formatWeight = (weight: any): string => {
-    if (!weight || typeof weight !== 'object') return '-';
-    return Object.entries(weight).map(([, v]: [string, any]) => v?.label || '').filter(Boolean).join('\n') || '-';
-  };
-
-  const formatCat = (cat: any): string => {
-    if (!cat?.category) return '-';
-    return `${cat.category}\n${cat.count}/${cat.total}`;
-  };
-
-  // 스타일
+  // ── 스타일 ──
   const bg = dark ? 'bg-[#0f0f1a]' : 'bg-[#f7f8fa]';
-  const card = dark ? 'bg-[#1c1c2e] border-[#2a2a40]' : 'bg-white border-gray-200 shadow-sm';
-  const tHead = dark ? 'bg-[#1a2332]' : 'bg-[#f0f3f7]';
-  const tRow = dark ? 'border-[#2a2a40] hover:bg-[#222240]' : 'border-gray-100 hover:bg-[#f8fafb]';
-  const tSelected = dark ? 'bg-[#1a2a3a]' : 'bg-green-50';
+  const card = dark ? 'bg-[#1c1c2e] border-[#2a2a40]' : 'bg-white border-gray-200';
   const txt = dark ? 'text-gray-100' : 'text-gray-900';
-  const txtSub = dark ? 'text-gray-400' : 'text-gray-500';
-  const txtMuted = dark ? 'text-gray-500' : 'text-gray-400';
-  const inputBg = dark ? 'bg-[#1c1c2e] border-[#333] text-white placeholder-gray-500' : 'bg-white border-gray-300 text-gray-900 placeholder-gray-400';
-
-  // 프로그레스
-  const progressPct = crawl && crawl.totalSteps > 0
-    ? Math.round((crawl.completedSteps / crawl.totalSteps) * 100)
-    : 0;
+  const sub = dark ? 'text-gray-400' : 'text-gray-500';
+  const inputBg = dark
+    ? 'bg-[#16162a] border-[#2a2a40] text-gray-100'
+    : 'bg-white border-gray-200 text-gray-900';
 
   return (
-    <div className={`min-h-screen ${bg} transition-colors`} style={{ fontFamily: "'NanumSquare', 'Malgun Gothic', sans-serif" }}>
-      <div className="max-w-[1800px] mx-auto px-4 py-5 md:px-6">
+    <div className={`min-h-screen ${bg} ${txt}`}>
+      <div className="max-w-[1100px] mx-auto px-4 py-6">
 
-        {/* ── 헤더 ── */}
-        <div className="flex items-center gap-3 mb-5">
-          <NaverLogo size={32} />
-          <div>
-            <h1 className={`text-[18px] font-extrabold tracking-tight ${txt}`}>네이버쇼핑 Term 분석</h1>
-            <p className={`text-[12px] ${txtSub}`}>키워드의 term 구조 분석 및 가중치 평가</p>
-          </div>
-          <div className="ml-auto flex items-center gap-3">
-            <ExtensionStatus
-              dark={dark}
-              connected={extStatus.connected}
-              version={extStatus.version}
-              progress={progress}
-              captcha={captcha}
-              onInstallClick={() => setInstallGuideOpen(true)}
-            />
-          </div>
-        </div>
-
-        {/* ── 키워드 입력 카드 ── */}
+        {/* ── 상단: 검색어 입력 + 추가 + Terms 검색 ── */}
         <div className={`rounded-xl border p-4 mb-4 ${card}`}>
-          <div className="flex gap-3">
+          <div className="flex items-center gap-2 mb-3">
+            <h1 className="text-[18px] font-extrabold">Term 분석</h1>
+            <span className={`text-[11px] ${sub}`}>키워드 검색대상 추가 → Terms 검색으로 확장프로그램 수집</span>
+            <span className="ml-auto flex items-center gap-2 text-[11px]">
+              <span className={`w-2 h-2 rounded-full ${extStatus.connected ? 'bg-[#03c75a]' : 'bg-gray-400'}`} />
+              <span className={sub}>확장 {extStatus.connected ? `연결됨${extStatus.version ? ` v${extStatus.version}` : ''}` : '미연결'}</span>
+            </span>
+          </div>
+
+          <div className="flex gap-2 mb-3">
             <textarea
               value={inputText}
               onChange={e => setInputText(e.target.value)}
-              placeholder="키워드를 입력하세요 (엔터로 구분)"
+              placeholder="키워드를 입력 (쉼표 또는 줄바꿈으로 여러개)"
               rows={2}
-              className={`flex-1 rounded-lg border px-3 py-2.5 text-[13px] resize-none focus:outline-none focus:ring-2 focus:ring-[#03c75a]/50 transition ${inputBg}`}
+              className={`flex-1 px-3 py-2 text-[13px] rounded-lg border ${inputBg} resize-none`}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault(); addKeyword();
+                }
+              }}
             />
-            <div className="flex flex-col gap-1.5 shrink-0">
-              <button onClick={handleAddKeywords} disabled={loading}
-                className="px-5 py-2 bg-[#03c75a] text-white text-[12px] font-bold rounded-lg hover:bg-[#02b350] active:scale-[0.97] transition disabled:opacity-50">
-                <NaverShoppingIcon size={14} />&nbsp;검색어추가
-              </button>
-              <button onClick={handleClear}
-                className={`px-5 py-2 text-[12px] font-bold rounded-lg transition ${dark ? 'bg-[#333] text-gray-300 hover:bg-[#444]' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'}`}>
-                CLEAR
-              </button>
-              <button onClick={() => naverApi.downloadTermsExcel()}
-                className={`px-5 py-2 text-[12px] font-bold rounded-lg transition ${dark ? 'bg-[#1a3a5c] text-blue-300 hover:bg-[#1f4570]' : 'bg-blue-50 text-blue-600 hover:bg-blue-100'}`}>
-                엑셀저장
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* ── 테이블 카드 ── */}
-        <div className={`rounded-xl border overflow-hidden mb-4 ${card}`}>
-          <div className="overflow-x-auto">
-            <table className="w-full text-[12px]">
-              <thead>
-                <tr className={tHead}>
-                  <th className={`px-3 py-3 text-left font-bold ${txtSub} w-10`}>#</th>
-                  <th className={`px-3 py-3 text-left font-bold ${txtSub} min-w-[130px]`}>키워드</th>
-                  {['1term', '2term', '3term', '4term'].map(t => (
-                    <th key={t} className={`px-3 py-3 text-left font-bold min-w-[60px]`}>
-                      <span className="text-[#03c75a]">{t}</span>
-                    </th>
-                  ))}
-                  <th className={`px-3 py-3 text-left font-bold ${txtSub} min-w-[140px]`}>순서고정</th>
-                  <th className={`px-3 py-3 text-left font-bold ${txtSub} min-w-[100px]`}>위치</th>
-                  <th className={`px-3 py-3 text-left font-bold ${txtSub} min-w-[140px]`}>상품명</th>
-                  <th className={`px-3 py-3 text-left font-bold ${txtSub} min-w-[100px]`}>파트</th>
-                  <th className={`px-3 py-3 text-left font-bold ${txtSub} min-w-[130px]`}>카테고리</th>
-                  <th className={`px-3 py-3 text-right font-bold ${txtSub}`}>총검색수</th>
-                  <th className={`px-3 py-3 text-right font-bold ${txtSub}`}>상품수</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((row, idx) => {
-                  const terms = row.keyword.terms || [];
-                  const a = row.analysis;
-                  const sel = selectedRows.has(idx);
-                  return (
-                    <tr key={row.keyword.id}
-                      className={`border-t cursor-pointer transition-colors ${tRow} ${sel ? tSelected : ''}`}
-                      onClick={() => toggleRow(idx)}
-                      onDoubleClick={() => setPopup({ keywordId: row.keyword.id, keyword: row.keyword.keyword, terms })}>
-                      <td className={`px-3 py-2.5 ${txtMuted}`}>{idx + 1}</td>
-                      <td className={`px-3 py-2.5 font-bold ${txt}`}>
-                        <span className="flex items-center gap-1.5">
-                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                            terms.length > 0 ? 'bg-[#03c75a]' : 'bg-[#f59e0b]'
-                          }`} title={terms.length > 0 ? 'terms 수집됨' : 'terms 미수집 (API 분석 제한)'} />
-                          {row.keyword.keyword}
-                        </span>
-                      </td>
-                      {[0, 1, 2, 3].map(i => (
-                        <td key={i} className="px-3 py-2.5 text-[#03c75a] font-semibold">{terms[i] || ''}</td>
-                      ))}
-                      <td className={`px-3 py-2.5 whitespace-pre-line ${txtSub}`}>{a ? formatWeight(a.order_weight) : '-'}</td>
-                      <td className={`px-3 py-2.5 whitespace-pre-line ${txtSub}`}>{a ? formatWeight(a.position_weight) : '-'}</td>
-                      <td className={`px-3 py-2.5 whitespace-pre-line ${txtSub}`}>{a ? formatWeight(a.name_weight) : '-'}</td>
-                      <td className={`px-3 py-2.5 whitespace-pre-line ${txtSub}`}>{a?.part_weight && Object.keys(a.part_weight).length ? JSON.stringify(a.part_weight) : '-'}</td>
-                      <td className={`px-3 py-2.5 whitespace-pre-line ${txtSub}`}>{a ? formatCat(a.category_priority) : '-'}</td>
-                      <td className={`px-3 py-2.5 text-right font-medium ${txt}`}>{row.keyword.total_count?.toLocaleString() || '-'}</td>
-                      <td className={`px-3 py-2.5 text-right font-medium ${txt}`}>{row.productCount || '-'}</td>
-                    </tr>
-                  );
-                })}
-                {rows.length === 0 && (
-                  <tr><td colSpan={13} className={`text-center py-16 ${txtMuted}`}>
-                    <NaverShoppingIcon size={40} />
-                    <p className="mt-3 text-[14px]">키워드를 추가하세요</p>
-                    <p className="text-[12px] mt-1">상단 입력란에 키워드 입력 후 검색어추가 버튼 클릭</p>
-                  </td></tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        {/* ── 분석 버튼 바 ── */}
-        <div className={`rounded-xl border p-3 flex flex-wrap gap-2 ${card}`}>
-          <button onClick={() => handleSmartSearch('auto')}
-            className="px-5 py-2.5 bg-[#f59e0b] text-white text-[12px] font-bold rounded-lg hover:bg-[#d97706] active:scale-[0.97] transition flex items-center gap-1.5">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M12 2L4.5 20.29L5.21 21L12 18L18.79 21L19.5 20.29L12 2Z" fill="white"/></svg>
-            스마트검색
-          </button>
-          <button onClick={() => handleSmartSearch('api')}
-            className="px-5 py-2.5 bg-[#8b5cf6] text-white text-[12px] font-bold rounded-lg hover:bg-[#7c3aed] active:scale-[0.97] transition flex items-center gap-1.5">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M20 4H4C2.89 4 2 4.89 2 6V18C2 19.11 2.89 20 4 20H20C21.11 20 22 19.11 22 18V6C22 4.89 21.11 4 20 4ZM20 18H4V8L12 13L20 8V18ZM12 11L4 6H20L12 11Z" fill="white"/></svg>
-            API검색
-          </button>
-          <div className={`w-px h-8 self-center ${dark ? 'bg-[#2a2a40]' : 'bg-gray-200'}`} />
-          <button onClick={handleSearch}
-            className="px-5 py-2.5 bg-[#03c75a] text-white text-[12px] font-bold rounded-lg hover:bg-[#02b350] active:scale-[0.97] transition flex items-center gap-1.5">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M15.5 14H14.71L14.43 13.73C15.41 12.59 16 11.11 16 9.5C16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16C11.11 16 12.59 15.41 13.73 14.43L14 14.71V15.5L19 20.49L20.49 19L15.5 14ZM9.5 14C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14Z" fill="white"/></svg>
-            term검색
-          </button>
-          <button onClick={handleUCSearch}
-            className="px-5 py-2.5 bg-[#3b82f6] text-white text-[12px] font-bold rounded-lg hover:bg-[#2563eb] active:scale-[0.97] transition flex items-center gap-1.5">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M20 18C21.1 18 21.99 17.1 21.99 16L22 6C22 4.9 21.1 4 20 4H4C2.9 4 2 4.9 2 6V16C2 17.1 2.9 18 4 18H0V20H24V18H20ZM4 6H20V16H4V6Z" fill="white"/></svg>
-            UC검색
-          </button>
-          {['순서고정', '위치가중치', '상품명가중치', '파트가중치', '카테고리'].map(label => (
-            <button key={label} onClick={handleAnalyze}
-              className={`px-4 py-2.5 text-[12px] font-bold rounded-lg transition ${
-                dark ? 'bg-[#2a2a40] text-gray-300 hover:bg-[#333355]' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-              }`}>
-              {label}
+            <button
+              onClick={addKeyword}
+              disabled={!inputText.trim()}
+              className="shrink-0 px-4 py-2 text-[13px] font-bold rounded-lg bg-[#0078d7] hover:bg-[#0066b3] disabled:opacity-40 text-white"
+            >
+              + 검색어 추가
             </button>
-          ))}
-          <button onClick={handleAnalyze} disabled={loading}
-            className="px-5 py-2.5 bg-[#1a3a5c] text-blue-200 text-[12px] font-bold rounded-lg hover:bg-[#1f4570] active:scale-[0.97] transition disabled:opacity-50 ml-auto">
-            {loading ? '분석 중...' : '전체분석'}
-          </button>
-        </div>
-      </div>
+          </div>
 
-      {/* ── 크롤링 모달 ── */}
-      {crawl && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ fontFamily: "'NanumSquare', sans-serif" }}>
-          <div className="bg-black/60 absolute inset-0" onClick={() => !crawl.active && setCrawl(null)} />
-          <div className={`relative rounded-2xl border shadow-2xl w-full max-w-[700px] flex flex-col overflow-hidden ${
-            dark ? 'bg-[#141422] border-[#2a2a40]' : 'bg-white border-gray-200'
-          }`}>
-
-            {/* 모달 헤더 */}
-            <div className={`flex items-center gap-3 px-5 py-4 border-b ${dark ? 'border-[#2a2a40]' : 'border-gray-200'}`}>
-              <NaverShoppingIcon size={22} />
-              <div className="flex-1">
-                <h3 className={`text-[15px] font-extrabold ${txt}`}>
-                  Term 크롤링
-                  {crawl.mode === 'smart' && <span className="ml-2 text-[11px] font-bold text-[#f59e0b] bg-[#f59e0b]/10 px-2 py-0.5 rounded-full">Smart</span>}
-                  {crawl.mode === 'api' && <span className="ml-2 text-[11px] font-bold text-[#8b5cf6] bg-[#8b5cf6]/10 px-2 py-0.5 rounded-full">API</span>}
-                  {crawl.mode === 'uc' && <span className="ml-2 text-[11px] font-bold text-[#3b82f6] bg-[#3b82f6]/10 px-2 py-0.5 rounded-full">UC</span>}
-                  {crawl.mode === 'chrome' && <span className="ml-2 text-[11px] font-bold text-[#03c75a] bg-[#03c75a]/10 px-2 py-0.5 rounded-full">Chrome</span>}
-                </h3>
-                <p className={`text-[11px] mt-0.5 ${txtSub}`}>
-                  {crawl.active
-                    ? `${crawl.currentKeywordIdx || 1} / ${crawl.keywords.length} 키워드 수집 중`
-                    : progressPct >= 100
-                      ? `${crawl.keywords.length}개 키워드 수집 완료`
-                      : `${crawl.keywords.length}개 키워드 (중단됨)`
-                  }
-                </p>
-              </div>
-              {crawl.active ? (
-                <button onClick={handleCancelCrawl}
-                  className="px-4 py-1.5 bg-red-500 text-white text-[11px] font-bold rounded-lg hover:bg-red-600 transition">
-                  중단
-                </button>
+          {/* 검색대상어 미리보기 + Terms 검색 */}
+          <div className="flex items-start gap-2">
+            <div className="flex-1 min-h-[40px]">
+              {pendingKws.length === 0 ? (
+                <div className={`text-[12px] ${sub} pt-2`}>
+                  검색대상어가 없습니다. 위에서 키워드를 추가하세요.
+                </div>
               ) : (
-                <button onClick={() => setCrawl(null)}
-                  className={`w-8 h-8 flex items-center justify-center rounded-full transition ${dark ? 'hover:bg-[#333] text-gray-400' : 'hover:bg-gray-100 text-gray-500'}`}>
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
-                </button>
-              )}
-            </div>
-
-            {/* 현재 키워드 + 탭 진행 */}
-            <div className={`px-5 py-4 border-b ${dark ? 'border-[#2a2a40]' : 'border-gray-200'}`}>
-              {/* 현재 키워드 */}
-              <div className="flex items-center gap-3 mb-3">
-                <span className={`text-[11px] font-bold ${txtSub}`}>키워드</span>
-                <span className={`text-[15px] font-extrabold text-[#03c75a]`}>{crawl.currentKeyword}</span>
-                {crawl.active && <span className="w-2 h-2 bg-[#03c75a] rounded-full animate-pulse" />}
-                {!crawl.active && progressPct >= 100 && <span className="text-[#03c75a] text-[13px]">&#x2714;</span>}
-              </div>
-
-              {/* 3탭 진행 카드 (Smart/API 모드에서는 탭카드 숨김) */}
-              {crawl.tabs.length > 0 && (
-                <div className="flex gap-2">
-                  {crawl.tabs.map(tab => {
-                    const isCurrent = crawl.active && crawl.currentTab === tab.key && !tab.done;
-                    return (
-                      <div key={tab.key} className={`flex-1 rounded-xl px-3 py-2.5 border transition-all ${
-                        tab.done
-                          ? (dark ? 'bg-[#03c75a]/10 border-[#03c75a]/40' : 'bg-green-50 border-green-300')
-                          : isCurrent
-                            ? (dark ? 'bg-[#1a2a3a] border-[#03c75a]/60' : 'bg-blue-50 border-blue-300')
-                            : (dark ? 'bg-[#1c1c2e] border-[#2a2a40]' : 'bg-gray-50 border-gray-200')
-                      }`}>
-                        <div className="flex items-center gap-1.5 mb-1">
-                          {tab.done ? (
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="#03c75a"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z"/></svg>
-                          ) : isCurrent ? (
-                            <span className="w-3 h-3 border-2 border-[#03c75a] border-t-transparent rounded-full animate-spin" />
-                          ) : (
-                            <span className={`w-3 h-3 rounded-full ${dark ? 'bg-[#333]' : 'bg-gray-300'}`} />
-                          )}
-                          <span className={`text-[11px] font-bold ${
-                            tab.done ? 'text-[#03c75a]' : isCurrent ? (dark ? 'text-white' : 'text-gray-900') : txtMuted
-                          }`}>{tab.label}</span>
-                        </div>
-                        {tab.done && tab.count !== undefined && (
-                          <p className={`text-[10px] ml-5 ${txtSub}`}>{tab.count}개 상품</p>
-                        )}
-                        {isCurrent && (
-                          <div className="mt-1.5 ml-5">
-                            <div className={`h-1 rounded-full overflow-hidden ${dark ? 'bg-[#333]' : 'bg-gray-200'}`}>
-                              <div className="h-full bg-[#03c75a] rounded-full animate-pulse" style={{ width: '60%' }} />
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
+                <div className="flex flex-wrap gap-1.5">
+                  <span className={`text-[11px] font-bold ${sub} self-center`}>
+                    검색대상어 ({pendingKws.length})
+                  </span>
+                  {pendingKws.map(kw => (
+                    <span
+                      key={kw}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-[#0078d7]/15 text-[#0078d7] text-[11px] font-bold"
+                    >
+                      {kw}
+                      <button
+                        onClick={() => removePending(kw)}
+                        className="hover:opacity-70 text-[14px] leading-none"
+                        title="제거"
+                      >×</button>
+                    </span>
+                  ))}
                 </div>
               )}
-
-              {/* 전체 프로그래스바 */}
-              <div className="mt-3">
-                <div className="flex items-center justify-between mb-1">
-                  <span className={`text-[10px] font-bold ${txtSub}`}>
-                    {!crawl.active && progressPct >= 100 ? '수집 완료' : '전체 진행률'}
-                  </span>
-                  <span className={`text-[10px] font-bold ${!crawl.active && progressPct >= 100 ? 'text-[#03c75a]' : txt}`}>
-                    {crawl.completedSteps}/{crawl.totalSteps} ({progressPct}%)
-                  </span>
-                </div>
-                <div className={`h-2 rounded-full overflow-hidden ${dark ? 'bg-[#2a2a40]' : 'bg-gray-200'}`}>
-                  <div
-                    className={`h-full rounded-full transition-all duration-500 ${
-                      !crawl.active && progressPct >= 100
-                        ? 'bg-[#03c75a]'
-                        : 'bg-gradient-to-r from-[#03c75a] to-[#02e065]'
-                    }`}
-                    style={{ width: `${progressPct}%` }}
-                  />
-                </div>
-              </div>
             </div>
-
-            {/* 로그 영역 */}
-            <div className={`flex-1 max-h-[300px] overflow-y-auto px-5 py-3 ${dark ? 'bg-[#0d0d18]' : 'bg-[#fafbfc]'}`}>
-              {crawl.logs.map((log, i) => (
-                <div key={i} className={`flex items-start gap-2 py-1 text-[11px] leading-relaxed ${
-                  i === crawl.logs.length - 1 ? '' : (dark ? 'border-b border-[#1a1a2a]' : 'border-b border-gray-100')
-                }`}>
-                  <span className={`shrink-0 font-mono ${txtMuted}`}>{log.time}</span>
-                  <span className="shrink-0">
-                    {log.type === 'success' && <span className="text-[#03c75a]">&#x2714;</span>}
-                    {log.type === 'error' && <span className="text-red-400">&#x2718;</span>}
-                    {log.type === 'progress' && <span className="text-blue-400">&#x25B6;</span>}
-                    {log.type === 'tab' && <span className="text-yellow-400">&#x25CF;</span>}
-                    {log.type === 'info' && <span className={txtSub}>&#x25CB;</span>}
-                  </span>
-                  <span className={
-                    log.type === 'success' ? 'text-[#03c75a]'
-                    : log.type === 'error' ? 'text-red-400'
-                    : log.type === 'tab' ? (dark ? 'text-yellow-300' : 'text-yellow-600')
-                    : (dark ? 'text-gray-300' : 'text-gray-700')
-                  }>
-                    {log.message}
-                  </span>
-                </div>
-              ))}
-              <div ref={logEndRef} />
-            </div>
-
-            {/* 모달 푸터 */}
-            <div className={`flex items-center justify-between px-5 py-3 border-t ${dark ? 'border-[#2a2a40]' : 'border-gray-200'}`}>
-              <div className="flex items-center gap-4">
-                <span className={`text-[10px] ${txtSub}`}>
-                  스텝: <strong className={txt}>{crawl.completedSteps}/{crawl.totalSteps}</strong>
-                </span>
-                <span className={`text-[10px] ${txtSub}`}>
-                  로그: <strong className={txt}>{crawl.logs.length}</strong>건
-                </span>
-              </div>
-              {!crawl.active && (
-                <button onClick={() => setCrawl(null)}
-                  className="px-4 py-1.5 bg-[#03c75a] text-white text-[11px] font-bold rounded-lg hover:bg-[#02b350] transition">
-                  닫기
-                </button>
-              )}
-            </div>
+            <button
+              onClick={startSearch}
+              disabled={pendingKws.length === 0}
+              className={`shrink-0 px-5 py-2 text-[13px] font-bold rounded-lg text-white transition-colors ${
+                pendingKws.length === 0
+                  ? 'bg-gray-400 cursor-not-allowed'
+                  : extStatus.connected
+                    ? 'bg-[#03c75a] hover:bg-[#02a04a]'
+                    : 'bg-[#f59e0b] hover:bg-[#d97706]'
+              }`}
+              title={extStatus.connected ? 'Terms 검색 시작' : '확장프로그램 미연결 — 설치 안내로 이동'}
+            >
+              {extStatus.connected ? '🔍 Terms 검색' : '⚠ 확장 설치 안내'}
+            </button>
           </div>
         </div>
-      )}
+
+        {/* ── 수집 로그 ── */}
+        <div className={`rounded-xl border p-4 mb-4 ${card}`}>
+          <div className="flex items-center mb-2">
+            <h2 className="text-[14px] font-bold">📜 수집 로그</h2>
+            <span className={`ml-2 text-[11px] ${sub}`}>최근 {logs.length}개 (DB 저장)</span>
+            <button
+              onClick={clearLogs}
+              className={`ml-auto text-[11px] px-2 py-1 rounded ${dark ? 'bg-[#2a2a40] hover:bg-[#333355]' : 'bg-gray-200 hover:bg-gray-300'}`}
+            >
+              로그 비우기
+            </button>
+          </div>
+          <div
+            className={`max-h-[200px] overflow-y-auto rounded p-2 text-[11px] font-mono ${
+              dark ? 'bg-[#0f0f1a]' : 'bg-gray-50'
+            }`}
+            ref={el => { if (el) el.scrollTop = el.scrollHeight; }}
+          >
+            {logs.length === 0 ? (
+              <div className={sub}>로그 없음</div>
+            ) : (
+              logs.slice(-200).map(l => (
+                <div key={l.id} className="flex gap-2">
+                  <span className={sub}>[{formatTime(l.timestamp)}]</span>
+                  <span className={
+                    l.type === 'success' ? 'text-[#22c55e]' :
+                    l.type === 'error' ? 'text-[#ef4444]' :
+                    l.type === 'progress' ? 'text-[#60a5fa]' :
+                    l.type === 'captcha' ? 'text-[#f59e0b]' :
+                    txt
+                  }>
+                    {l.message}
+                  </span>
+                  {l.keyword && (
+                    <span className={`ml-auto text-[10px] ${sub}`}>"{l.keyword}"</span>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        {/* ── 4 섹션 ── */}
+        {loading && results.length === 0 && (
+          <div className={`text-center py-16 ${sub}`}>로딩 중...</div>
+        )}
+
+        {!loading && (
+          <>
+            <Section
+              title="⭐ 즐겨찾기"
+              accent="#ef4444"
+              items={groups.fav}
+              open={openSections.fav}
+              onToggle={() => setOpenSections(p => ({ ...p, fav: !p.fav }))}
+              onFav={onToggleFav}
+              onOpen={(k, tab) => setPopup({ keywordId: k.id, keyword: k.keyword, terms: k.terms || [], initialTab: tab })}
+              onReCollect={onReCollect}
+              dark={dark}
+            />
+            <Section
+              title="📋 모든키워드"
+              accent="#0078d7"
+              items={groups.all}
+              open={openSections.all}
+              onToggle={() => setOpenSections(p => ({ ...p, all: !p.all }))}
+              onFav={onToggleFav}
+              onOpen={(k, tab) => setPopup({ keywordId: k.id, keyword: k.keyword, terms: k.terms || [], initialTab: tab })}
+              onReCollect={onReCollect}
+              dark={dark}
+              showCheckbox
+              selectedIds={selectedIds}
+              onToggleSelect={toggleSelect}
+              onSelectAll={() => selectAll(groups.all)}
+              onDelete={deleteSelected}
+            />
+            <Section
+              title="✅ 수집키워드"
+              accent="#03c75a"
+              items={groups.collected}
+              open={openSections.collected}
+              onToggle={() => setOpenSections(p => ({ ...p, collected: !p.collected }))}
+              onFav={onToggleFav}
+              onOpen={(k, tab) => setPopup({ keywordId: k.id, keyword: k.keyword, terms: k.terms || [], initialTab: tab })}
+              onReCollect={onReCollect}
+              dark={dark}
+            />
+            <Section
+              title="∅ 미수집키워드"
+              accent="#6b7280"
+              items={groups.empty}
+              open={openSections.empty}
+              onToggle={() => setOpenSections(p => ({ ...p, empty: !p.empty }))}
+              onFav={onToggleFav}
+              onOpen={(k, tab) => setPopup({ keywordId: k.id, keyword: k.keyword, terms: k.terms || [], initialTab: tab })}
+              onReCollect={onReCollect}
+              dark={dark}
+            />
+          </>
+        )}
+      </div>
 
       {popup && (
         <ProductPopup
           keywordId={popup.keywordId}
           keyword={popup.keyword}
           terms={popup.terms}
+          initialTab={popup.initialTab}
           onClose={() => setPopup(null)}
         />
       )}
+    </div>
+  );
+}
 
-      <ExtensionInstallGuide
-        dark={dark}
-        open={installGuideOpen}
-        onClose={() => setInstallGuideOpen(false)}
-      />
+// ══════════════════════════════════════════
+// Section: collapsible 그룹
+// 접힘: "kw1, kw2, kw3, kw4, kw5 외 N개"
+// 펼침: 전체 키워드 행
+// ══════════════════════════════════════════
+function Section({
+  title, accent, items, open, onToggle, onFav, onOpen, onReCollect, dark,
+  showCheckbox, selectedIds, onToggleSelect, onSelectAll, onDelete,
+}: {
+  title: string; accent: string; items: ResultKeyword[];
+  open: boolean; onToggle: () => void;
+  onFav: (id: number, current: boolean) => void;
+  onOpen: (k: ResultKeyword, tab?: string) => void;
+  onReCollect: (kw: string) => void;
+  dark: boolean;
+  showCheckbox?: boolean;
+  selectedIds?: Set<number>;
+  onToggleSelect?: (id: number) => void;
+  onSelectAll?: () => void;
+  onDelete?: () => void;
+}) {
+  const hdr = dark ? 'bg-[#1c1c2e] border-[#2a2a40]' : 'bg-white border-gray-200';
+  const hover = dark ? 'hover:bg-[#22223a]' : 'hover:bg-gray-50';
+  const sub = dark ? 'text-gray-400' : 'text-gray-500';
+  const txt = dark ? 'text-gray-100' : 'text-gray-900';
+  const previewKws = items.slice(0, 5).map(k => k.keyword);
+  const restCount = Math.max(0, items.length - 5);
+  const selectedCount = selectedIds && showCheckbox
+    ? items.filter(k => selectedIds.has(k.id)).length
+    : 0;
+
+  return (
+    <div className="mb-3">
+      <button
+        onClick={onToggle}
+        className={`w-full rounded-t-lg border px-4 py-3 flex items-center gap-3 ${hdr} ${hover} transition-colors ${
+          !open ? 'rounded-b-lg' : ''
+        }`}
+        style={{ borderLeftWidth: 4, borderLeftColor: accent }}
+      >
+        <span className={`text-[11px] font-mono ${open ? 'rotate-90' : ''} transition-transform inline-block w-2`}>▶</span>
+        <span className="font-extrabold text-[14px]" style={{ color: accent }}>{title}</span>
+        <span className={`text-[11px] ${sub}`}>({items.length})</span>
+        {!open && items.length > 0 && (
+          <span className={`text-[11px] ${sub} truncate flex-1 text-left ml-2`}>
+            {previewKws.join(', ')}
+            {restCount > 0 && ` 외 ${restCount}개`}
+          </span>
+        )}
+        <span className={`ml-auto text-[10px] ${sub}`}>
+          {open ? '접기' : '펼치기'}
+        </span>
+      </button>
+      {open && (
+        <div className={`border border-t-0 rounded-b-lg ${hdr}`}>
+          {showCheckbox && items.length > 0 && (
+            <div className={`flex items-center gap-2 px-4 py-2 border-b ${dark ? 'border-[#2a2a40]' : 'border-gray-200'}`}>
+              <input
+                type="checkbox"
+                checked={selectedCount > 0 && selectedCount === items.length}
+                ref={el => { if (el) el.indeterminate = selectedCount > 0 && selectedCount < items.length; }}
+                onChange={onSelectAll}
+                className="cursor-pointer"
+              />
+              <span className={`text-[11px] ${sub}`}>
+                {selectedCount > 0 ? `${selectedCount}개 선택됨` : '전체 선택'}
+              </span>
+              {selectedCount > 0 && (
+                <button
+                  onClick={onDelete}
+                  className="ml-auto px-3 py-1 text-[11px] font-bold rounded bg-[#ef4444] hover:bg-[#dc2626] text-white"
+                >
+                  🗑️ 선택 삭제 ({selectedCount})
+                </button>
+              )}
+            </div>
+          )}
+          {items.length === 0 ? (
+            <div className={`px-4 py-4 text-[12px] ${sub}`}>키워드 없음</div>
+          ) : (
+            items.map(k => (
+              <KeywordRow
+                key={k.id}
+                k={k}
+                onFav={onFav}
+                onOpen={onOpen}
+                onReCollect={onReCollect}
+                dark={dark}
+                showCheckbox={showCheckbox}
+                checked={selectedIds?.has(k.id) ?? false}
+                onToggleSelect={onToggleSelect}
+                txt={txt}
+                sub={sub}
+                divider={dark ? 'border-[#2a2a40]' : 'border-gray-200'}
+              />
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function KeywordRow({
+  k, onFav, onOpen, onReCollect, dark, showCheckbox, checked, onToggleSelect, txt, sub, divider,
+}: {
+  k: ResultKeyword;
+  onFav: (id: number, current: boolean) => void;
+  onOpen: (k: ResultKeyword, tab?: string) => void;
+  onReCollect: (kw: string) => void;
+  dark: boolean;
+  showCheckbox?: boolean;
+  checked: boolean;
+  onToggleSelect?: (id: number) => void;
+  txt: string; sub: string; divider: string;
+}) {
+  return (
+    <div className={`px-4 py-2.5 flex items-center gap-3 border-t ${divider} ${dark ? 'hover:bg-[#16162a]' : 'hover:bg-gray-50'}`}>
+      {showCheckbox && (
+        <input
+          type="checkbox"
+          checked={checked}
+          onChange={() => onToggleSelect?.(k.id)}
+          className="cursor-pointer shrink-0"
+        />
+      )}
+      <button
+        onClick={() => onFav(k.id, k.is_favorite)}
+        className="shrink-0 text-[18px] leading-none transition-transform hover:scale-110"
+        title={k.is_favorite ? '즐겨찾기 해제' : '즐겨찾기 추가'}
+      >
+        {k.is_favorite ? '❤️' : '🤍'}
+      </button>
+      <button
+        onClick={() => onOpen(k, 'total')}
+        className="flex-1 min-w-0 text-left cursor-pointer group"
+        title="상품정보 보기 (전체)"
+      >
+        <div className={`font-bold text-[13px] truncate ${txt} group-hover:text-[#0078d7] group-hover:underline`}>"{k.keyword}"</div>
+        <div className={`text-[10px] ${sub} mt-0.5 flex gap-2 flex-wrap`}>
+          <span>📅 {formatAgo(k.last_searched_at || k.created_at)}</span>
+          <span>·</span>
+          <span>전체 {k.total_count.toLocaleString()}개</span>
+          {k.term_count > 0 && (<><span>·</span><span>Terms {k.term_count}</span></>)}
+          {k.terms?.length > 0 && (
+            <span className="truncate max-w-[200px] text-[#60a5fa]">{k.terms.slice(0, 4).join(' · ')}</span>
+          )}
+        </div>
+      </button>
+      <div className="flex gap-1 shrink-0">
+        {TAB_ORDER.map(tab => {
+          const c = k.collected[tab];
+          const has = c && c.count > 0;
+          return (
+            <button
+              key={tab}
+              onClick={() => has && onOpen(k, tab)}
+              disabled={!has}
+              className={`px-2 py-0.5 text-[10px] font-bold rounded transition ${
+                has
+                  ? 'bg-[#03c75a]/15 text-[#03c75a] hover:bg-[#03c75a]/30 cursor-pointer'
+                  : (dark ? 'bg-[#2a2a40] text-gray-500' : 'bg-gray-200 text-gray-400') + ' cursor-not-allowed'
+              }`}
+              title={has ? `${TAB_LABEL[tab]}: ${c.count}개 — 클릭해서 모달 보기` : `${TAB_LABEL[tab]}: 미수집`}
+            >
+              {TAB_LABEL[tab]}{has ? ` ${c.count}` : ''}
+            </button>
+          );
+        })}
+      </div>
+      {k.has_data && (
+        <a
+          href={`/api/naver/export/products/${k.id}/`}
+          download
+          className="shrink-0 px-2.5 py-1 text-[10px] font-bold rounded bg-[#03c75a] hover:bg-[#02a04a] text-white"
+          title="3시트 xlsx 다운로드"
+        >
+          📗
+        </a>
+      )}
+      <button
+        onClick={() => onReCollect(k.keyword)}
+        className="shrink-0 px-2.5 py-1 text-[10px] font-bold rounded bg-[#0078d7] hover:bg-[#0066b3] text-white"
+        title="확장프로그램으로 3탭 다시수집"
+      >
+        🔄
+      </button>
     </div>
   );
 }

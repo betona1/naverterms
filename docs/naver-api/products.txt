@@ -1,0 +1,66 @@
+📦 products[] 배열 전체 개요
+목적: 네이버 쇼핑 검색 결과의 개별 상품 정보를 담고 있는 배열
+
+1개 상품 = 1개 객체, 총 최대 100개까지 응답 가능 (pagingSize 제한)
+
+다양한 속성 포함: 가격, 이미지, 브랜드, 속성 태그, 쇼핑몰 리스트 등
+
+🧬 대표 상품 객체 구조 상세 (항목별 분석)
+
+항목	설명	예시
+id, nvMid	상품 고유 ID (네이버 내부 식별자)	"35227195618"
+rank	현재 페이지 내 순위	1
+productName, productTitle	표기용 상품명	"잠스쿨 접이식 매트리스..."
+imageUrl	대표 이미지 URL	https://shopping-phinf.pstatic.net/...
+additionalImageCount	추가 이미지 수	10
+openDate	최초 등록일 (yyyymmddhhmmss)	"20221014113748"
+brand, maker	브랜드명 / 제조사명	"잠스쿨", "휴먼링스"
+lowPrice, price	최저가 / 대표가격 (단위: 원)	"139000"
+priceUnit	통화 단위	"KRW"
+reviewCount, reviewCountSum	리뷰 수	3626
+scoreInfo	리뷰 평점 (소수점)	4.82
+category1Name~category4Name	카테고리 계층 정보	"가구/인테리어", "매트리스" 등
+attributeValue	속성명 리스트 (ex: 두께, 쿠션감)	`"두께_M
+characterValue	속성값 리스트	`"7cm
+smryReview	리뷰 요약 키워드	"쿠션감 좋고 포장도 깔끔"
+isHotDeal	핫딜 여부	0 또는 1
+isNaverPay	네이버페이 사용 가능 여부	"1" 또는 "0"
+lnchYm	출시 연월 (yyyymm)	"202210"
+keepCnt	찜 수	547
+mallCount	연결된 쇼핑몰 수 (가격비교용)	17
+lowMallList[]	쇼핑몰별 가격정보	아래 별도 분석
+crUrl	광고 클릭 URL	광고 추적용
+
+
+🏪 lowMallList[] 하위 배열 (가격비교용 쇼핑몰 정보)
+이건 가격비교 탭에서 중요! 각 쇼핑몰의 가격과 구매 옵션이 포함됨.
+
+
+항목	설명
+mallSeq	쇼핑몰 고유번호
+mallPid	쇼핑몰 내 상품 ID
+price	해당 몰에서의 가격
+name	쇼핑몰 이름 (ex: 쿠팡, 오늘의집)
+naverPay	네이버페이 지원 여부
+chnlType, chnlName	스토어팜 등 채널 정보
+
+🧠 추가로 중요한 속성들
+
+항목	설명
+categoryLevel	카테고리 깊이 (보통 4)
+productColor	색상 정보 (있을 경우)
+dlvryPrice / dlvryLowPrice	배송비 정보
+isAdult	성인 인증 필요 여부
+promotion	프로모션 정보
+gdid	글로벌 데이터 ID (광고/상품 분석용)
+imgVersion, imgSgnt	이미지 버전/서명값
+
+📊 활용 아이디어
+
+목적	사용 속성
+가격비교	lowPrice, lowMallList[]
+리뷰 분석	reviewCount, smryReview, scoreInfo
+카테고리 분류	category1~4Name, cmpOrg
+상품 속성 태깅	attributeValue, characterValue
+이미지 다운로드	imageUrl, imgVersion
+마켓별 비교	mallCount, mallName, naverPay 등

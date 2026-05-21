@@ -1,0 +1,106 @@
+baseurl = "https://search.shopping.naver.com/search/all?"
+
+
+파라미터	예시 값	설명
+query	매트리스	검색어 (필수)
+adQuery	매트리스	광고 추적용 검색어
+origQuery	매트리스	원래 사용자가 입력한 검색어
+pagingIndex	1	페이지 번호
+pagingSize	40	한 페이지당 결과 수 (기본: 40  최대:100)  
+productSet	total / model / checkout / department / window / overseas	필터 탭 구분 (아래 설명 참고)
+sort	rel / price_asc / price_dsc / review / review_rel / date	정렬 방식
+viewType	list / image	결과 보기 형식 (리스트 / 이미지)
+timestamp	(비워둬도 OK)	검색 시각 (필수 아님)
+
+📚 [탭 종류와 productSet 값 정리]
+
+탭 이름	productSet 값
+전체	total
+가격비교	model
+네이버페이	checkout
+백화점/홈쇼핑	department
+쇼핑윈도 (브랜드스토어)	window
+해외직구	overseas
+
+🔽 [정렬 방식 (sort 파라미터)]
+
+정렬 조건	sort 값
+네이버 랭킹순 (기본)	rel
+낮은 가격순	price_asc
+높은 가격순	price_dsc
+리뷰 많은 순	review
+리뷰 좋은 순	review_rel
+등록일순	date
+
+💡 가격 필터 관련 파라미터
+
+파라미터	값	의미
+minPrice	40000	최소 가격 (원 단위)
+maxPrice	323,000,000	최대 가격 (원 단위)
+
+✅ 배송/혜택 관련 파라미터 요약
+
+항목 이름	파라미터 이름	값	설명
+빠른배송	fastDelivery	true	빠른배송 필터
+무료배송	freeDelivery	true	무료배송 필터
+희망일배송	hopeDelivery	true	날짜 지정 배송
+정기구독	subscriptionDelivery	true	정기배송 지원 상품
+무료교환반품	freeReturnDelivery	true	교환/반품 무료
+핫딜	hotdeal	true	네이버 핫딜 상품
+카드할인	cardDiscount	true	카드 할인 있는 상품
+쿠폰	coupon	true	쿠폰 사용 가능한 상품
+적립	point	true	네이버 포인트 적립 가능한 상품
+
+root
+├── productSetFilter                        # 판매처 필터 정보
+│   ├── title: "판매처"
+│   ├── name: "seller"
+│   ├── filterType: "seller"
+│   ├── opened: false
+│   └── filterValues[]                     # 판매처 탭별 정보 (전체, 가격비교, 네이버페이 등)
+│       ├── title: "전체"
+│       ├── value: "total"
+│       ├── selected: false
+│       ├── expose: false
+│       ├── filterAction
+│       │   ├── defaultTitle: "상품타입"
+│       │   ├── multiSelect: false
+│       │   ├── paramName: "productSet"
+│       │   ├── excludeParam: "window"
+│       │   └── filterType: "seller"
+│       └── productCount: 73066
+│       (위 구조가 가격비교 / 네이버페이 / 백화점 / 쇼핑윈도 / 해외직구에도 반복)
+
+├── searchAdResult                         # 광고 관련 메타 정보
+│   ├── adMeta
+│   │   ├── pages[]                        # 광고 페이지별 정보
+│   │   ├── adSasRequestUrl               # 광고 요청 URL
+│   │   ├── bucketTestId / bucketId      # 실험군 분류 ID
+│   │   └── keywordAttributes            # 키워드 품질 관련 정보
+│   └── products[]                        # 광고 포함 상품 리스트
+│       ├── collection: "product"
+│       ├── rank: 상품 랭킹
+│       ├── productTitle: 상품명
+│       ├── price: 가격
+│       ├── brand: 브랜드명
+│       ├── category1Name~category4Name  # 카테고리 정보
+│       ├── imageUrl / modelImgUrlList   # 이미지 URL들
+│       ├── mallName / lowMallList[]     # 판매 쇼핑몰 정보
+│       ├── reviewCount / scoreInfo      # 리뷰 수와 평점
+│       └── 다양한 상품 세부 스펙들       # (두께, 쿠션감, 유통사, 출시일 등)
+
+├── searchParam                            # 검색 시 사용된 파라미터들
+│   ├── sort: 정렬 기준
+│   ├── pagingIndex: 페이지 번호
+│   ├── pagingSize: 페이지당 수량
+│   ├── viewType: 리스트/이미지형
+│   └── productSet: total/model 등
+
+├── shoppingResult                         # 실제 검색어 및 상태
+│   ├── status
+│   │   ├── code: "0"
+│   │   └── message: "OK"
+│   ├── query: "매트리스"
+│   └── stopwordQuery: "매트리스"
+└── 기타 (searchBanInfo, surls 등)
+queryValidateResult	검색어가 유효한지, 성인 인증이 필요한지 판단

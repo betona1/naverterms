@@ -2,7 +2,9 @@ import { useState, useEffect, useCallback } from 'react';
 import { useTheme } from './hooks/useTheme';
 import TopNav from './components/TopNav';
 import StoreSettingsModal from './components/smartstore/StoreSettingsModal';
+import PowerControlModal from './components/PowerControlModal';
 import NaverTermsPage from './pages/NaverTermsPage';
+import NaverResultsPage from './pages/NaverResultsPage';
 import NaverRankPage from './pages/NaverRankPage';
 import NaverExtDownloadPage from './pages/NaverExtDownloadPage';
 import SmartStoreProductsPage from './pages/SmartStoreProductsPage';
@@ -10,15 +12,26 @@ import OwnerClanProductsPage from './pages/OwnerClanProductsPage';
 import SmartStoreAnalyticsPage from './pages/SmartStoreAnalyticsPage';
 import NaverKeywordPage from './pages/NaverKeywordPage';
 import NaverCategoryKeywordPage from './pages/NaverCategoryKeywordPage';
+import NaverSynonymPage from './pages/NaverSynonymPage';
+import NaverAutocompletePage from './pages/NaverAutocompletePage';
 import ReportsPage from './pages/ReportsPage';
 import RankCunningPage from './pages/RankCunningPage';
+import PurchaseTrackingPage from './pages/PurchaseTrackingPage';
 import StoreCollectPage from './pages/StoreCollectPage';
 import ProductEditPage from './pages/ProductEditPage';
+import AttrAnalyticsPage from './pages/AttrAnalyticsPage';
+import MissingAttrsPage from './pages/MissingAttrsPage';
+import AttrRegisterPage from './pages/AttrRegisterPage';
+import WorkersPage from './pages/WorkersPage';
+import NaverMyProductsPage from './pages/NaverMyProductsPage';
 
 const PAGE_KEY = 'nt-page';
 
 const HASH_MAP: Record<string, string> = {
   '#terms': 'terms',
+  '#synonyms': 'synonyms',
+  '#autocomplete': 'autocomplete',
+  '#results': 'results',
   '#rank': 'rank',
   '#products': 'products',
   '#extension': 'extension',
@@ -27,8 +40,14 @@ const HASH_MAP: Record<string, string> = {
   '#catkeywords': 'catkeywords',
   '#analytics': 'analytics',
   '#cunning': 'cunning',
+  '#purchase': 'purchase',
   '#reports': 'reports',
   '#store-collect': 'store-collect',
+  '#attr-analytics': 'attr-analytics',
+  '#missing-attrs': 'missing-attrs',
+  '#attr-register': 'attr-register',
+  '#workers': 'workers',
+  '#naver-products': 'naver-products',
 };
 
 export default function App() {
@@ -39,6 +58,7 @@ export default function App() {
     try { return localStorage.getItem(PAGE_KEY) || 'products'; } catch { return 'products'; }
   });
   const [showStoreSettings, setShowStoreSettings] = useState(false);
+  const [showPowerControl, setShowPowerControl] = useState(false);
 
   const changePage = useCallback((p: string) => {
     setPage(p);
@@ -54,7 +74,7 @@ export default function App() {
         setPage('product-edit');
         return;
       }
-      if (h && ['terms', 'rank', 'products', 'extension', 'ownerclan', 'analytics', 'keywords', 'catkeywords', 'cunning', 'reports', 'store-collect'].includes(h)) {
+      if (h && ['terms', 'synonyms', 'autocomplete', 'results', 'rank', 'products', 'extension', 'ownerclan', 'analytics', 'keywords', 'catkeywords', 'cunning', 'purchase', 'reports', 'store-collect', 'attr-analytics', 'missing-attrs', 'attr-register', 'workers', 'naver-products'].includes(h)) {
         setPage(h);
         try { localStorage.setItem(PAGE_KEY, h); } catch { /* */ }
       }
@@ -75,11 +95,15 @@ export default function App() {
           page={page}
           onPageChange={changePage}
           onStoreSettings={() => setShowStoreSettings(true)}
+          onPowerControl={() => setShowPowerControl(true)}
           dark={dark}
           onToggleTheme={toggle}
         />
         <main className="min-h-[calc(100vh-42px)]">
           {page === 'terms' && <NaverTermsPage />}
+          {page === 'synonyms' && <NaverSynonymPage />}
+          {page === 'autocomplete' && <NaverAutocompletePage />}
+          {page === 'results' && <NaverResultsPage />}
           {page === 'rank' && <NaverRankPage />}
           {page === 'products' && <SmartStoreProductsPage />}
           {page === 'extension' && <NaverExtDownloadPage />}
@@ -88,13 +112,22 @@ export default function App() {
           {page === 'ownerclan' && <OwnerClanProductsPage />}
           {page === 'analytics' && <SmartStoreAnalyticsPage />}
           {page === 'cunning' && <RankCunningPage />}
+          {page === 'purchase' && <PurchaseTrackingPage />}
           {page === 'reports' && <ReportsPage />}
           {page === 'store-collect' && <StoreCollectPage />}
           {page === 'product-edit' && <ProductEditPage />}
+          {page === 'attr-analytics' && <AttrAnalyticsPage />}
+          {page === 'missing-attrs' && <MissingAttrsPage />}
+          {page === 'attr-register' && <AttrRegisterPage />}
+          {page === 'workers' && <WorkersPage />}
+          {page === 'naver-products' && <NaverMyProductsPage />}
         </main>
       </div>
       {showStoreSettings && (
         <StoreSettingsModal onClose={() => setShowStoreSettings(false)} />
+      )}
+      {showPowerControl && (
+        <PowerControlModal onClose={() => setShowPowerControl(false)} />
       )}
     </div>
   );

@@ -183,6 +183,8 @@ def _create_driver(download_dir):
     opts.binary_location = CHROME_BIN
     opts.add_argument('--no-sandbox')
     opts.add_argument('--disable-dev-shm-usage')
+    opts.add_argument('--disable-crash-reporter')
+    opts.add_argument('--disable-breakpad')
     opts.add_argument('--disable-blink-features=AutomationControlled')
     opts.add_argument('--window-size=1920,1080')
 

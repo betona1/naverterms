@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import time
 import hmac
 import hashlib
@@ -757,3 +758,332 @@ def match_keywords_for_product(product_name, keywords):
 
     scored.sort(key=lambda x: -x[1])
     return [kw for kw, _ in scored]
+
+
+# ══════════════════════════════════════════
+# 동의어 — 네이버 사전 후보 + 쇼핑 검증
+# ══════════════════════════════════════════
+
+_DICT_BASE_UA = (
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+    '(KHTML, like Gecko) Chrome/124.0 Safari/537.36'
+)
+_HANGUL_RE = re.compile(r'^[가-힣A-Za-z0-9 ·\-]{2,20}$')
+
+
+def _walk_collect_synonym_strings(obj, found):
+    """JSON 트리를 재귀로 돌며 유의어 후보 문자열 수집.
+    네이버 한국어사전(api3) 응답: similarWordList[].similarWordName, expSynonym('단어^URL') 등."""
+    LIST_KEYS = {'synonym', 'synonyms', 'syn', 'synWords', 'synonymList', 'similarWordList', 'similarWord'}
+    NAME_KEYS = {'similarWordName', 'name', 'word', 'entryName', 'text', 'mean'}
+    STR_KEYS = {'expSynonym', 'synonym', 'syn'}
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k in STR_KEYS and isinstance(v, str) and v:
+                # "백견^https://..." 형태에서 ^ 앞부분만 먼저 잘라낸 뒤 콤마로 다중분리
+                head = v.split('^', 1)[0]
+                for chunk in re.split(r'[,;·、|]+', head):
+                    name = chunk.strip()
+                    if name:
+                        found.add(name)
+            elif k in LIST_KEYS:
+                if isinstance(v, list):
+                    for it in v:
+                        if isinstance(it, str):
+                            name = it.split('^', 1)[0].strip()
+                            if name:
+                                found.add(name)
+                        elif isinstance(it, dict):
+                            for nk in NAME_KEYS:
+                                if nk in it and isinstance(it[nk], str):
+                                    name = it[nk].split('^', 1)[0].strip()
+                                    if name:
+                                        found.add(name)
+                            # similarWordList 등 객체 내부에 URL 필드가 있어 재귀하지 않음
+                elif isinstance(v, str):
+                    name = v.split('^', 1)[0].strip()
+                    if name:
+                        found.add(name)
+            elif isinstance(v, (dict, list)):
+                _walk_collect_synonym_strings(v, found)
+    elif isinstance(obj, list):
+        for it in obj:
+            _walk_collect_synonym_strings(it, found)
+
+
+def fetch_naver_dict_synonyms(word):
+    """네이버 한국어사전에서 유의어 후보 추출 (best-effort).
+    여러 엔드포인트를 시도해 결과를 합치고, 한글/영문 단어로 필터링."""
+    word = (word or '').strip()
+    if not word:
+        return []
+
+    headers = {
+        'User-Agent': _DICT_BASE_UA,
+        'Referer': 'https://ko.dict.naver.com/',
+        'Accept': 'application/json, text/plain, */*',
+    }
+    found = set()
+
+    endpoints = [
+        ('https://ko.dict.naver.com/api3/koko/search', {
+            'query': word, 'range': 'word', 'shouldSearchOpdic': 'true',
+            'articleSearchType': 'WORD', 'part': 'word',
+        }),
+        ('https://ko.dict.naver.com/api3/koko/search', {
+            'query': word, 'articleSearchType': 'THESAURUS', 'range': 'word',
+        }),
+    ]
+    for url, params in endpoints:
+        try:
+            r = http_requests.get(url, params=params, headers=headers, timeout=6)
+            if r.status_code != 200:
+                continue
+            data = r.json()
+            _walk_collect_synonym_strings(data, found)
+        except Exception as e:
+            logger.debug(f'[Synonym] dict fetch failed {url}: {e}')
+
+    cleaned = []
+    seen = set()
+    for w in found:
+        w = re.sub(r'\s+', ' ', w).strip()
+        if not w or w == word or w in seen:
+            continue
+        if not _HANGUL_RE.match(w):
+            continue
+        seen.add(w)
+        cleaned.append(w)
+    cleaned.sort()
+    return cleaned[:30]
+
+
+def verify_synonym_in_shopping(keyword, candidate, top_n=20):
+    """네이버쇼핑 검색 API로 두 키워드의 결과를 비교해 동의어 여부 검증.
+    카테고리 분포 + 최상위 카테고리 일치 + 상품 ID 중복도 가중합."""
+    keyword = (keyword or '').strip()
+    candidate = (candidate or '').strip()
+    if not keyword or not candidate:
+        return {'error': '키워드/후보 누락'}
+    if keyword == candidate:
+        return {'verdict': 'same_word', 'score': 1.0, 'details': '동일 단어'}
+
+    try:
+        d1 = _naver_search(keyword, display=top_n, start=1)
+        d2 = _naver_search(candidate, display=top_n, start=1)
+    except Exception as e:
+        return {'error': str(e)}
+
+    items1 = d1.get('items', [])[:top_n]
+    items2 = d2.get('items', [])[:top_n]
+    if not items1 or not items2:
+        return {
+            'verdict': 'no_data',
+            'score': 0.0,
+            'total1': d1.get('total', 0),
+            'total2': d2.get('total', 0),
+            'details': '검색 결과 부족',
+        }
+
+    def cat_path(it, depth=3):
+        return ' > '.join([str(it.get(f'category{i}', '') or '') for i in range(1, depth + 1) if it.get(f'category{i}')])
+
+    cats1 = Counter(cat_path(it) for it in items1 if cat_path(it))
+    cats2 = Counter(cat_path(it) for it in items2 if cat_path(it))
+
+    # 카테고리 자카드 (multiset min/max)
+    common_keys = set(cats1) & set(cats2)
+    inter = sum(min(cats1[k], cats2[k]) for k in common_keys)
+    union = sum((cats1 | cats2).values()) or 1
+    cat_score = inter / union
+
+    top_cat1 = cats1.most_common(1)[0][0] if cats1 else ''
+    top_cat2 = cats2.most_common(1)[0][0] if cats2 else ''
+    top_cat_match = bool(top_cat1) and (top_cat1 == top_cat2)
+
+    # category1 (대분류) 일치
+    big1 = Counter(it.get('category1', '') for it in items1 if it.get('category1'))
+    big2 = Counter(it.get('category1', '') for it in items2 if it.get('category1'))
+    big_top1 = big1.most_common(1)[0][0] if big1 else ''
+    big_top2 = big2.most_common(1)[0][0] if big2 else ''
+    big_match = bool(big_top1) and (big_top1 == big_top2)
+
+    # 상품 ID 중복
+    ids1 = {str(it.get('productId') or '') for it in items1 if it.get('productId')}
+    ids2 = {str(it.get('productId') or '') for it in items2 if it.get('productId')}
+    overlap = len(ids1 & ids2) / max(len(ids1 | ids2), 1) if (ids1 or ids2) else 0.0
+
+    score = cat_score * 0.45 + (1.0 if top_cat_match else 0.0) * 0.30 + \
+            (1.0 if big_match else 0.0) * 0.10 + overlap * 0.15
+
+    if score >= 0.6:
+        verdict = 'likely_synonym'   # 동의어 가능성 높음
+    elif score >= 0.35:
+        verdict = 'maybe_synonym'    # 보류
+    else:
+        verdict = 'unlikely_synonym' # 동의어 아님
+
+    return {
+        'verdict': verdict,
+        'score': round(score, 3),
+        'cat_score': round(cat_score, 3),
+        'product_overlap': round(overlap, 3),
+        'top_cat_match': top_cat_match,
+        'big_cat_match': big_match,
+        'top_cat_keyword': top_cat1,
+        'top_cat_candidate': top_cat2,
+        'top_categories_keyword': cats1.most_common(3),
+        'top_categories_candidate': cats2.most_common(3),
+        'total1': d1.get('total', 0),
+        'total2': d2.get('total', 0),
+        'sample_count': min(len(items1), len(items2)),
+    }
+
+
+# ══════════════════════════════════════════
+# 자동완성 — 마켓별 (1단계: 네이버, 쿠팡)
+# ══════════════════════════════════════════
+
+def _autocomplete_headers():
+    return {
+        'User-Agent': _DICT_BASE_UA,
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'ko-KR,ko;q=0.9,en;q=0.8',
+    }
+
+
+def fetch_autocomplete_naver(query):
+    """네이버 통합검색 자동완성 (ac.search.naver.com/nx/ac).
+    응답: {"query":[...], "items":[ [["키워드"], ...] ]}
+    """
+    query = (query or '').strip()
+    if not query:
+        return []
+    url = 'https://ac.search.naver.com/nx/ac'
+    params = {
+        'of': 'os1,os2,os3,os4,os5,os6,os7,os8,os9,os10,os11',
+        'q': query, 'frm': 'shopping',
+        'st': '11111', 'r_format': 'json', 'r_enc': 'UTF-8',
+        'r_unicode': '0', 'r_lt': '11111', '_callback': '',
+    }
+    try:
+        r = http_requests.get(url, params=params, headers=_autocomplete_headers(), timeout=5)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        raise RuntimeError(f'네이버 자동완성 실패: {e}')
+    items = data.get('items') or []
+    out = []
+    seen = set()
+    # items 자체가 [[ ["kw"], ... ]] 1중 또는 2중 — 모든 list-of-list-of-str 패턴 안전하게 처리
+    def collect(node):
+        if isinstance(node, str):
+            w = node.strip()
+            if w and w not in seen:
+                seen.add(w)
+                out.append(w)
+        elif isinstance(node, list):
+            for c in node:
+                collect(c)
+    collect(items)
+    # 첫 항목이 query 자체면 제외
+    if out and out[0] == query:
+        out = out[1:]
+    return out
+
+
+def fetch_autocomplete_coupang(query):
+    """쿠팡 자동완성 — Akamai 봇차단으로 단순 GET이 403 됨.
+    여러 호스트/UA 조합을 시도하고, 모두 차단되면 명시적 에러 발생.
+    (실제 동작 시 Selenium 기반 마켓 자동완성으로 전환 필요)"""
+    query = (query or '').strip()
+    if not query:
+        return []
+
+    candidates = [
+        ('https://www.coupang.com/np/search/autoComplete',
+         {'keyword': query, '_': int(time.time() * 1000)}),
+        ('https://m.coupang.com/np/search/autoComplete.pang',
+         {'keyword': query}),
+    ]
+    last_err = None
+    for url, params in candidates:
+        try:
+            r = http_requests.get(
+                url, params=params,
+                headers={**_autocomplete_headers(),
+                         'Referer': 'https://www.coupang.com/',
+                         'X-Requested-With': 'XMLHttpRequest'},
+                timeout=5,
+            )
+            if r.status_code == 403 or '<HTML' in r.text[:100].upper() or 'Access Denied' in r.text:
+                last_err = f'HTTP {r.status_code} — Akamai 차단'
+                continue
+            text = r.text.strip()
+            if not text:
+                last_err = 'empty response'
+                continue
+            m = re.match(r'^[a-zA-Z_$][\w$]*\((.*)\)\s*;?\s*$', text, re.S)
+            payload = m.group(1) if m else text
+            data = json.loads(payload)
+        except Exception as e:
+            last_err = str(e)
+            continue
+
+        out = []
+        auto_list = data.get('autoCompleteList') or data.get('list') or []
+        for entry in auto_list:
+            if isinstance(entry, dict):
+                w = entry.get('keyword') or entry.get('text') or entry.get('label')
+                if w and isinstance(w, str):
+                    out.append(w.strip())
+            elif isinstance(entry, str):
+                out.append(entry.strip())
+
+        items = data.get('items')
+        if not out and isinstance(items, list) and len(items) >= 2 and isinstance(items[1], list):
+            for entry in items[1]:
+                try:
+                    w = entry[0][0]
+                    if isinstance(w, str) and w.strip():
+                        out.append(w.strip())
+                except (IndexError, TypeError):
+                    continue
+
+        seen = set()
+        dedup = []
+        for w in out:
+            if w and w not in seen:
+                seen.add(w)
+                dedup.append(w)
+        if dedup:
+            return dedup
+
+    raise RuntimeError(f'쿠팡 자동완성 실패 (서버측 직접 호출 차단): {last_err or "no data"}')
+
+
+MARKET_FETCHERS = {
+    'naver': fetch_autocomplete_naver,
+    'coupang': fetch_autocomplete_coupang,
+}
+
+
+def fetch_autocomplete_multi(query, markets):
+    """여러 마켓 자동완성을 병렬로 조회 → {market: {keywords, error}} 반환"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    targets = [m for m in (markets or []) if m in MARKET_FETCHERS]
+    if not targets:
+        return {}
+
+    def run(m):
+        try:
+            return m, {'keywords': MARKET_FETCHERS[m](query), 'error': None}
+        except Exception as e:
+            return m, {'keywords': [], 'error': str(e)}
+
+    out = {}
+    with ThreadPoolExecutor(max_workers=len(targets)) as ex:
+        for m, res in ex.map(run, targets):
+            out[m] = res
+    return out
