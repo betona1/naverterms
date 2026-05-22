@@ -5,8 +5,9 @@ import {
   startImportFrom11st, fetchImportStatus, generateNaverName,
   enqueueGenerate, fetchQueueStatus, moveNaverProducts,
   fetchNaverProductDetail, patchNaverProduct, clearVisionCache,
+  fetchKeywordPool,
   type NaverProductItem, type NaverProductFolder, type ImportState,
-  type QueueStatus, type NaverProductDetail,
+  type QueueStatus, type NaverProductDetail, type KeywordPool,
 } from '../api/naverProductApi';
 
 const POLL_MS = 1500;
@@ -738,11 +739,21 @@ function ProductDetailModal({
   onSaved: () => void;
 }) {
   const [d, setD] = useState<NaverProductDetail | null>(null);
+  const [pool, setPool] = useState<KeywordPool | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [genBusy, setGenBusy] = useState(false);
   const [clearBusy, setClearBusy] = useState(false);
   const [msg, setMsg] = useState('');
+  const [expanded, setExpanded] = useState(false);
+
+  // 키워드 추가 입력
+  const [newKw, setNewKw] = useState('');
+  const [extraKws, setExtraKws] = useState<string[]>([]);  // 사용자가 직접 추가한 칩
+  // 선택된 키워드 (포함됨, 순서 유지)
+  const [selectedOrder, setSelectedOrder] = useState<string[]>([]);
+  // base 텍스트 (브랜드+핵심명사) — 기본은 brand + form
+  const [baseText, setBaseText] = useState('');
 
   // 편집 가능 필드 (form state)
   const [form, setForm] = useState({
@@ -762,8 +773,12 @@ function ProductDetailModal({
   const reload = useCallback(async () => {
     setLoading(true);
     try {
-      const r = await fetchNaverProductDetail(productId);
+      const [r, p] = await Promise.all([
+        fetchNaverProductDetail(productId),
+        fetchKeywordPool(productId).catch(() => null),
+      ]);
       setD(r);
+      setPool(p && p.ok ? p : null);
       setForm({
         product_name: r.product_name || '',
         naver_product_name: r.naver_product_name || '',
@@ -777,6 +792,14 @@ function ProductDetailModal({
         model_name: r.model_name || '',
         folder_id: r.folder_id || 1,
       });
+      // base = brand + vision_meta.form (default), 비면 product_name 앞 부분
+      const brand = r.brand || r.manufacturer || '';
+      const form_ = p?.vision_meta?.form || '';
+      const composed = [brand, form_].filter(Boolean).join(' ').trim();
+      setBaseText(composed || (r.product_name || '').slice(0, 20));
+      // selectedOrder 는 빈 상태로 시작 (사용자가 클릭으로 채움)
+      setSelectedOrder([]);
+      setExtraKws([]);
     } finally {
       setLoading(false);
     }
@@ -785,6 +808,60 @@ function ProductDetailModal({
   useEffect(() => { reload(); }, [reload]);
 
   const flash = (m: string) => { setMsg(m); window.setTimeout(() => setMsg(prev => prev === m ? '' : prev), 3500); };
+
+  // ── 키워드 풀 헬퍼 ──
+  const calcBytes = (s: string) => {
+    let n = 0;
+    for (const c of s || '') n += (c >= '가' && c <= '힣') ? 2 : 1;
+    return n;
+  };
+  const MAX_BYTES_KW = 100;
+
+  // 동적 미리보기: baseText + 선택된 키워드 들 (100바이트 안에서 채움, ' ' 구분)
+  const buildPreview = useMemo(() => {
+    const used = new Set<string>();
+    const norm = (s: string) => s.toLowerCase().trim();
+    const baseTokens = (baseText || '').split(/\s+/).filter(Boolean);
+    baseTokens.forEach(t => used.add(norm(t)));
+
+    const out: string[] = [...baseTokens];
+    let bytes = calcBytes(out.join(' '));
+    for (const kw of selectedOrder) {
+      const k = norm(kw);
+      if (!k || used.has(k)) continue;
+      const add = (out.length > 0 ? 1 : 0) + calcBytes(kw);
+      if (bytes + add > MAX_BYTES_KW) continue;
+      out.push(kw);
+      used.add(k);
+      bytes += add;
+    }
+    return out.join(' ');
+  }, [baseText, selectedOrder]);
+
+  const previewBytes = calcBytes(buildPreview);
+
+  const toggleKeyword = (kw: string) => {
+    setSelectedOrder(prev => prev.includes(kw) ? prev.filter(x => x !== kw) : [...prev, kw]);
+  };
+
+  const applyPreviewToForm = () => {
+    if (!buildPreview.trim()) return;
+    setForm(s => ({ ...s, naver_product_name: buildPreview }));
+    flash(`✅ 미리보기 → 네이버 상품명 (${buildPreview.length}자/${previewBytes}B)`);
+  };
+
+  const addExtraKw = () => {
+    const k = newKw.trim();
+    if (!k) return;
+    if (!extraKws.includes(k)) setExtraKws(s => [...s, k]);
+    setSelectedOrder(s => s.includes(k) ? s : [...s, k]);
+    setNewKw('');
+  };
+
+  const removeExtraKw = (kw: string) => {
+    setExtraKws(s => s.filter(x => x !== kw));
+    setSelectedOrder(s => s.filter(x => x !== kw));
+  };
 
   const onSave = async () => {
     setSaving(true);
@@ -854,7 +931,9 @@ function ProductDetailModal({
   return (
     <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 px-4 py-4"
          onClick={onClose}>
-      <div className={`${C.bg} ${C.border} border rounded-xl shadow-2xl w-full max-w-5xl max-h-[92vh] flex flex-col`}
+      <div className={`${C.bg} ${C.border} border rounded-xl shadow-2xl flex flex-col transition-all ${
+             expanded ? 'w-[98vw] max-w-[98vw] h-[96vh] max-h-[96vh]' : 'w-full max-w-5xl max-h-[92vh]'
+           }`}
            onClick={e => e.stopPropagation()}>
         {/* Header */}
         <div className={`flex items-center justify-between px-5 py-3 border-b ${C.border}`}>
@@ -868,10 +947,23 @@ function ProductDetailModal({
               <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-600 dark:text-amber-400">수정됨</span>
             )}
           </div>
-          <button onClick={onClose}
-                  className={`text-xl ${dark ? 'text-gray-400 hover:text-gray-200' : 'text-gray-400 hover:text-gray-700'}`}>
-            ×
-          </button>
+          <div className="flex items-center gap-2">
+            <button onClick={() => setExpanded(v => !v)}
+                    title={expanded ? '상세페이지 닫기' : '상세페이지 펼치기 (우측에 큰 이미지 + 상세 HTML)'}
+                    className={`px-2.5 py-1 text-[11px] rounded font-bold border ${
+                      expanded
+                        ? 'bg-sky-600 text-white border-sky-700 hover:bg-sky-700'
+                        : dark
+                          ? 'bg-sky-900/30 text-sky-300 border-sky-700 hover:bg-sky-900/50'
+                          : 'bg-sky-50 text-sky-700 border-sky-300 hover:bg-sky-100'
+                    }`}>
+              {expanded ? '◀ 상세 닫기' : '🔍 상세페이지'}
+            </button>
+            <button onClick={onClose}
+                    className={`text-xl ${dark ? 'text-gray-400 hover:text-gray-200' : 'text-gray-400 hover:text-gray-700'}`}>
+              ×
+            </button>
+          </div>
         </div>
 
         {msg && (
@@ -885,7 +977,10 @@ function ProductDetailModal({
             로딩 중...
           </div>
         ) : (
-          <div className="flex-1 overflow-y-auto p-5 grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-5">
+          <div className={`flex-1 min-h-0 ${expanded ? 'flex flex-row' : ''}`}>
+          <div className={`overflow-y-auto p-5 grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-5 ${
+            expanded ? 'flex-1 min-w-0 max-w-[55%] border-r ' + C.border : ''
+          }`}>
             {/* 좌측: 이미지 + 비전 분석 */}
             <div className="space-y-3">
               {d.image_large ? (
@@ -1024,26 +1119,176 @@ function ProductDetailModal({
                 </div>
               </div>
 
-              {/* 키워드 */}
-              <div>
-                <label className={`block ${C.label} font-bold mb-1`}>네이버 전용 키워드</label>
-                <textarea
-                  value={form.naver_keywords}
-                  onChange={e => setForm(s => ({ ...s, naver_keywords: e.target.value }))}
-                  rows={2} placeholder="쉼표 또는 줄바꿈으로 구분"
-                  className={`${C.input} border rounded w-full px-2 py-1.5`}
-                />
+              {/* ── 키워드 풀 + 동적 미리보기 ── */}
+              <div className={`border-2 rounded-lg p-2.5 ${dark ? 'border-amber-700 bg-amber-900/10' : 'border-amber-300 bg-amber-50/30'}`}>
+                <div className={`text-[11px] font-bold mb-1.5 ${dark ? 'text-amber-300' : 'text-amber-700'}`}>
+                  ✨ 키워드 풀 — 클릭으로 포함/제외 토글, 미리보기 확인 후 [적용]
+                </div>
+
+                {/* base 텍스트 (브랜드 + 핵심) */}
+                <div className="mb-2">
+                  <label className={`block ${C.label} text-[10px] mb-0.5`}>기본(필수) — 브랜드 + 핵심 명사</label>
+                  <input
+                    value={baseText}
+                    onChange={e => setBaseText(e.target.value)}
+                    placeholder="예: 시온전자 무선 차임벨"
+                    className={`${C.input} border rounded w-full px-2 py-1 text-xs`}
+                  />
+                </div>
+
+                {/* 키워드 버킷들 (칩) */}
+                {pool && (() => {
+                  const buckets: Array<[string, string, string[]]> = [
+                    ['👁 비전 특징', dark ? 'bg-emerald-900/30 border-emerald-700' : 'bg-emerald-50 border-emerald-300', pool.vision_features],
+                    ['📌 원본 검색태그', dark ? 'bg-gray-700/50 border-gray-600' : 'bg-gray-100 border-gray-300', pool.preset_keywords],
+                    ['🌐 네이버 키워드(저장)', dark ? 'bg-sky-900/30 border-sky-700' : 'bg-sky-50 border-sky-300', pool.naver_keywords],
+                    ['🌟 11번가 베스트', dark ? 'bg-yellow-900/30 border-yellow-700' : 'bg-yellow-50 border-yellow-300', pool.best_picks],
+                    ['⭐ 11번가 우수', dark ? 'bg-orange-900/30 border-orange-700' : 'bg-orange-50 border-orange-300', pool.good_picks],
+                    ['✨ 11번가 광고', dark ? 'bg-violet-900/30 border-violet-700' : 'bg-violet-50 border-violet-300', pool.ad_keywords],
+                    ['🔧 11번가 기능성', dark ? 'bg-blue-900/30 border-blue-700' : 'bg-blue-50 border-blue-300', pool.functional_keywords],
+                    ['➕ 직접 추가', dark ? 'bg-fuchsia-900/30 border-fuchsia-700' : 'bg-fuchsia-50 border-fuchsia-300', extraKws],
+                  ];
+                  return buckets.map(([label, cls, items]) => items.length > 0 && (
+                    <div key={label} className={`mb-1.5 p-1.5 rounded border ${cls}`}>
+                      <div className={`text-[9px] font-bold mb-1 ${C.muted}`}>{label} ({items.length})</div>
+                      <div className="flex flex-wrap gap-1">
+                        {items.map(kw => {
+                          const on = selectedOrder.includes(kw);
+                          const isExtra = extraKws.includes(kw);
+                          return (
+                            <span key={kw}
+                                  onClick={() => toggleKeyword(kw)}
+                                  className={`px-1.5 py-0.5 rounded text-[11px] cursor-pointer border transition-all ${
+                                    on
+                                      ? 'bg-amber-500 text-white border-amber-600 font-bold'
+                                      : dark
+                                        ? 'bg-[#1c1c2e] border-[#2a2a40] text-gray-300 hover:border-amber-500'
+                                        : 'bg-white border-gray-300 text-gray-700 hover:border-amber-500'
+                                  }`}>
+                              {kw}
+                              {isExtra && (
+                                <button onClick={e => { e.stopPropagation(); removeExtraKw(kw); }}
+                                        className="ml-1 text-rose-400 hover:text-rose-600 text-[10px]"
+                                        title="이 추가 키워드 삭제">×</button>
+                              )}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ));
+                })()}
+
+                {/* 직접 키워드 추가 */}
+                <div className="flex items-center gap-1.5 mt-2">
+                  <input value={newKw} onChange={e => setNewKw(e.target.value)}
+                         onKeyDown={e => { if (e.key === 'Enter') addExtraKw(); }}
+                         placeholder="키워드 입력 후 Enter / 추가"
+                         className={`${C.input} flex-1 border rounded px-2 py-1 text-xs`} />
+                  <button onClick={addExtraKw}
+                          className="px-2 py-1 text-xs rounded bg-fuchsia-600 hover:bg-fuchsia-700 text-white font-bold">
+                    + 추가
+                  </button>
+                </div>
+
+                {/* 미리보기 */}
+                <div className={`mt-2.5 p-2 rounded border-2 ${dark ? 'border-amber-500 bg-amber-900/20' : 'border-amber-400 bg-amber-100/50'}`}>
+                  <div className={`text-[10px] font-bold mb-0.5 flex items-center justify-between ${dark ? 'text-amber-300' : 'text-amber-800'}`}>
+                    <span>📋 미리보기</span>
+                    <span className={`text-[10px] font-normal ${
+                      previewBytes > MAX_BYTES_KW ? 'text-rose-500' :
+                      previewBytes > 80 ? 'text-amber-500' : C.muted
+                    }`}>
+                      {buildPreview.length}자 / {previewBytes}바이트 (한도 {MAX_BYTES_KW})
+                    </span>
+                  </div>
+                  <div className={`text-sm font-medium ${dark ? 'text-amber-200' : 'text-amber-900'}`}>
+                    {buildPreview || <span className={C.muted}>키워드를 선택하세요</span>}
+                  </div>
+                  <button onClick={applyPreviewToForm}
+                          disabled={!buildPreview.trim()}
+                          className="mt-1.5 px-2.5 py-1 text-[11px] font-bold rounded bg-amber-600 hover:bg-amber-700 text-white disabled:opacity-40 disabled:cursor-not-allowed">
+                    ⬇ 적용해서 네이버 상품명에 반영
+                  </button>
+                </div>
               </div>
+
+              {/* 11번가 원본 keywords (참고만, 편집 가능) */}
               <div>
-                <label className={`block ${C.label} mb-1`}>11번가 원본 keywords</label>
+                <label className={`block ${C.label} mb-1 text-[10px]`}>11번가 원본 keywords (저장됨)</label>
                 <textarea
                   value={form.keywords}
                   onChange={e => setForm(s => ({ ...s, keywords: e.target.value }))}
                   rows={2}
-                  className={`${C.input} border rounded w-full px-2 py-1.5`}
+                  className={`${C.input} border rounded w-full px-2 py-1 text-[11px]`}
+                />
+              </div>
+              <div>
+                <label className={`block ${C.label} mb-1 text-[10px]`}>네이버 전용 키워드 (저장됨, 쉼표 구분)</label>
+                <textarea
+                  value={form.naver_keywords}
+                  onChange={e => setForm(s => ({ ...s, naver_keywords: e.target.value }))}
+                  rows={2}
+                  className={`${C.input} border rounded w-full px-2 py-1 text-[11px]`}
                 />
               </div>
             </div>
+          </div>
+
+          {/* ── 확장 시 우측 상세 panel ── */}
+          {expanded && (
+            <div className={`flex-1 min-w-0 overflow-y-auto p-4 ${dark ? 'bg-[#0f0f1a]' : 'bg-gray-50'}`}>
+              <div className={`text-xs font-bold mb-2 flex items-center gap-2 ${C.text}`}>
+                <span>🔍 상품 원본 상세</span>
+                {d.image_large && (
+                  <a href={d.image_large} target="_blank" rel="noreferrer"
+                     className={`text-[10px] font-normal underline ${dark ? 'text-sky-300' : 'text-sky-600'}`}>
+                    이미지 새창
+                  </a>
+                )}
+              </div>
+
+              {/* 큰 이미지 (있으면) */}
+              {d.image_large && (
+                <div className={`${C.panel} rounded mb-3 p-2 border ${C.border}`}>
+                  <img src={d.image_large} alt={d.product_name || ''}
+                       className="w-full max-h-[400px] object-contain rounded" />
+                </div>
+              )}
+
+              {/* 옵션 / 상품 속성 */}
+              {(d.option1_name || d.option2_name || d.combined_option || d.product_attribute) && (
+                <div className={`${C.panel} rounded p-3 mb-3 text-[11px] space-y-1.5`}>
+                  <div className={`font-bold ${C.text}`}>📦 옵션 / 속성</div>
+                  {d.option1_name && (
+                    <div><span className={C.muted}>옵션1 ({d.option1_name}):</span> <span className={C.text}>{d.option1_values}</span></div>
+                  )}
+                  {d.option2_name && (
+                    <div><span className={C.muted}>옵션2 ({d.option2_name}):</span> <span className={C.text}>{d.option2_values}</span></div>
+                  )}
+                  {d.product_attribute && (
+                    <div><span className={C.muted}>속성:</span> <span className={C.text}>{d.product_attribute}</span></div>
+                  )}
+                </div>
+              )}
+
+              {/* 상세 HTML */}
+              <div className={`${C.panel} rounded p-3 ${C.border} border`}>
+                <div className={`font-bold ${C.text} text-xs mb-2 flex items-center justify-between`}>
+                  <span>📄 상세 페이지</span>
+                  <span className={`text-[10px] font-normal ${C.muted}`}>
+                    {d.detail_html ? `${d.detail_html.length.toLocaleString()}자` : '없음'}
+                  </span>
+                </div>
+                {d.detail_html ? (
+                  <div className={`prose prose-sm max-w-none ${dark ? 'prose-invert' : ''} bg-white text-gray-900 rounded p-3 max-h-[60vh] overflow-y-auto`}
+                       dangerouslySetInnerHTML={{ __html: d.detail_html }} />
+                ) : (
+                  <div className={`text-xs ${C.muted} italic`}>저장된 상세 HTML 없음</div>
+                )}
+              </div>
+            </div>
+          )}
           </div>
         )}
 

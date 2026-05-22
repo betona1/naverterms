@@ -211,3 +211,29 @@ export async function clearVisionCache(id: number): Promise<{ ok: boolean; error
   const r = await api.post(`/naver-products/${id}/clear-vision/`);
   return r.data;
 }
+
+export interface KeywordPool {
+  ok: boolean;
+  product_name: string;
+  naver_product_name: string | null;
+  vision_features: string[];
+  vision_meta: {
+    color?: string[] | string | null;
+    material?: string | null;
+    form?: string | null;
+    package_qty?: string | null;
+    readable_text?: string | null;
+  };
+  best_picks: string[];
+  good_picks: string[];
+  ad_keywords: string[];
+  functional_keywords: string[];
+  preset_keywords: string[];
+  naver_keywords: string[];
+  error?: string;
+}
+
+export async function fetchKeywordPool(id: number): Promise<KeywordPool> {
+  const r = await api.get(`/naver-products/${id}/keyword-pool/`);
+  return r.data;
+}

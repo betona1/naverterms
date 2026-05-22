@@ -325,6 +325,87 @@ def patch_product(product_id: int, payload: dict) -> dict:
     return {'ok': True, 'updated': True, 'detail': get_product_detail(product_id)}
 
 
+def _split_kws(text) -> list[str]:
+    if not text:
+        return []
+    if isinstance(text, list):
+        return [str(k).strip() for k in text if str(k).strip()]
+    return [k.strip() for k in str(text).replace('\n', ',').replace('/', ',').split(',') if k.strip()]
+
+
+def get_keyword_pool(product_id: int) -> dict:
+    """편집 모달의 키워드 풀.
+    - vision_features: image_analysis.key_features (qwen2.5vl 시각 키워드)
+    - vision_meta: color/material/form/package_qty/readable_text (참고 정보)
+    - 11번가 my_product_ad_keyword: best/good/ad/functional (source_id 로 cross-DB)
+    - preset_keywords: naver_my_product.keywords / naver_keywords (원본 + 사용자 편집)
+    """
+    import json as _json
+    with connections[NAVERDB].cursor() as cur:
+        cur.execute(
+            "SELECT source_id, image_analysis, keywords, naver_keywords, "
+            "product_name, naver_product_name "
+            "FROM naver_my_product WHERE id=%s",
+            [product_id],
+        )
+        row = cur.fetchone()
+        if not row:
+            return {'ok': False, 'error': 'not_found'}
+        source_id, vision_raw, kw, naver_kw, product_name, naver_name = row
+
+    # vision
+    vision_features: list = []
+    vision_meta: dict = {}
+    if vision_raw:
+        try:
+            v = _json.loads(vision_raw) if isinstance(vision_raw, str) else vision_raw
+            kf = v.get('key_features') or []
+            if isinstance(kf, list):
+                vision_features = [str(k) for k in kf if k]
+            for k in ('color', 'material', 'form', 'package_qty', 'readable_text'):
+                vision_meta[k] = v.get(k)
+            # color 가 list 면 평탄화 → 칩 후보
+            if isinstance(vision_meta.get('color'), list):
+                vision_features = vision_features + [c for c in vision_meta['color'] if c]
+        except (ValueError, TypeError):
+            pass
+
+    # 11번가 키워드 풀 (source_id 가 11st my_product.id 와 매핑)
+    pool_11st = {
+        'best_picks': [], 'good_picks': [], 'ad_keywords': [], 'functional_keywords': [],
+    }
+    if source_id:
+        try:
+            with connections[ADSDB].cursor() as cur:
+                cur.execute(
+                    "SELECT best_picks, good_picks, ad_keywords, functional_keywords "
+                    "FROM my_product_ad_keyword WHERE my_product_id=%s",
+                    [int(source_id)],
+                )
+                row2 = cur.fetchone()
+                if row2:
+                    pool_11st['best_picks'] = _split_kws(row2[0])
+                    pool_11st['good_picks'] = _split_kws(row2[1])
+                    pool_11st['ad_keywords'] = _split_kws(row2[2])
+                    pool_11st['functional_keywords'] = _split_kws(row2[3])
+        except Exception:
+            pass
+
+    return {
+        'ok': True,
+        'product_name': product_name,
+        'naver_product_name': naver_name,
+        'vision_features': vision_features,
+        'vision_meta': vision_meta,
+        'best_picks': pool_11st['best_picks'],
+        'good_picks': pool_11st['good_picks'],
+        'ad_keywords': pool_11st['ad_keywords'],
+        'functional_keywords': pool_11st['functional_keywords'],
+        'preset_keywords': _split_kws(kw),
+        'naver_keywords': _split_kws(naver_kw),
+    }
+
+
 def clear_image_analysis(product_id: int) -> dict:
     """비전 분석 캐시 삭제 — 다음 generate 시 재분석."""
     with connections[NAVERDB].cursor() as cur:

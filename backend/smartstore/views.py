@@ -40,6 +40,12 @@ class SmartStoreStoreListView(APIView):
             return Response({'error': msg}, status=400)
 
 
+class SmartStoreStoreCountsView(APIView):
+    """좌측 사이드바용: 활성 스토어 + status 별 상품 카운트."""
+    def get(self, request):
+        return Response({'items': smartstore_service.get_stores_with_counts()})
+
+
 class SmartStoreStoreSampleExcelView(APIView):
     def get(self, request):
         from openpyxl import Workbook
@@ -1115,6 +1121,13 @@ class NaverMyProductClearVisionView(APIView):
     """비전 분석 캐시 삭제."""
     def post(self, request, pk):
         r = naver_my_product_service.clear_image_analysis(int(pk))
+        return Response(r, status=200 if r.get('ok') else 404)
+
+
+class NaverMyProductKeywordPoolView(APIView):
+    """편집 모달용 키워드 풀 (비전 + 11번가 ad_keyword + naver preset)."""
+    def get(self, request, pk):
+        r = naver_my_product_service.get_keyword_pool(int(pk))
         return Response(r, status=200 if r.get('ok') else 404)
 
 

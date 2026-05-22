@@ -4,6 +4,7 @@ from . import views
 urlpatterns = [
     # Store management
     path('stores/', views.SmartStoreStoreListView.as_view()),
+    path('stores/counts/', views.SmartStoreStoreCountsView.as_view()),
     path('stores/sample-excel/', views.SmartStoreStoreSampleExcelView.as_view()),
     path('stores/upload/', views.SmartStoreStoreBulkUploadView.as_view()),
     path('stores/<int:pk>/', views.SmartStoreStoreDetailView.as_view()),
@@ -104,4 +105,5 @@ urlpatterns = [
     path('naver-products/move/', views.NaverMyProductMoveView.as_view()),
     path('naver-products/<int:pk>/', views.NaverMyProductDetailView.as_view()),
     path('naver-products/<int:pk>/clear-vision/', views.NaverMyProductClearVisionView.as_view()),
+    path('naver-products/<int:pk>/keyword-pool/', views.NaverMyProductKeywordPoolView.as_view()),
 ]
