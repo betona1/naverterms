@@ -32,7 +32,7 @@ import {
   type ZeroMarginLog,
   type ZeroMarginLogItem,
 } from '../api/smartstoreProductApi';
-import { fetchStores, type SmartStore } from '../api/smartstoreApi';
+import { fetchStores, fetchStoreCounts, type SmartStore, type StoreCount } from '../api/smartstoreApi';
 import * as naverApi from '../api/naverApi';
 import ProductOrdersModal from '../components/smartstore/ProductOrdersModal';
 
@@ -63,6 +63,8 @@ export default function SmartStoreProductsPage() {
   const [, setStoreName] = useState('');
   const [storeUrl, setStoreUrl] = useState('');
   const [apiStores, setApiStores] = useState<SmartStore[]>([]);
+  const [storeCounts, setStoreCounts] = useState<StoreCount[]>([]);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [products, setProducts] = useState<SmartStoreProduct[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -215,6 +217,15 @@ export default function SmartStoreProductsPage() {
       setApiStores(stores.filter(st => st.is_active && st.commerce_api_key));
     });
   }, [storeId, isAllStores]);
+
+  // 좌측 사이드바 — 스토어별 카운트 (총 / 판매중)
+  useEffect(() => {
+    let alive = true;
+    fetchStoreCounts().then(r => {
+      if (alive) setStoreCounts(r.items);
+    }).catch(() => { /* ignore */ });
+    return () => { alive = false; };
+  }, []);
 
   // 상품 목록 조회
   const loadProducts = useCallback(async () => {
@@ -464,8 +475,62 @@ export default function SmartStoreProductsPage() {
   const colSpan = isAllStores ? 13 : 12;
   const getStoreUrlById = (sid: number) => apiStores.find(st => st.id === sid)?.store_url || '';
 
+  const totalAcrossStores = storeCounts.reduce((s, st) => s + st.total_count, 0);
+  const totalSaleAcross = storeCounts.reduce((s, st) => s + st.sale_count, 0);
+
   return (
-    <div className="min-h-screen bg-gray-50 dark:bg-gray-900 text-gray-800 dark:text-gray-200">
+    <div className="flex min-h-screen bg-gray-50 dark:bg-gray-900">
+      {/* 좌측 폴더 사이드바 (네이버 ID 별) */}
+      {sidebarOpen ? (
+        <aside className="w-56 shrink-0 bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 overflow-y-auto sticky top-[42px] self-start max-h-[calc(100vh-42px)]">
+          <div className="flex items-center justify-between px-3 py-2 border-b border-gray-200 dark:border-gray-700">
+            <span className="text-xs font-bold text-gray-700 dark:text-gray-200">📁 스토어 ({storeCounts.length})</span>
+            <button onClick={() => setSidebarOpen(false)}
+                    className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 text-sm"
+                    title="사이드바 접기">◀</button>
+          </div>
+          <div className="p-1.5 space-y-0.5">
+            <button
+              onClick={() => { setStoreId(0); setPage(1); setSelectedIds(new Set()); setSelectAll(false); }}
+              className={`w-full text-left px-2 py-1.5 rounded text-xs flex items-center justify-between border ${
+                storeId === 0
+                  ? 'bg-[#03c75a]/15 border-[#03c75a] text-gray-900 dark:text-white font-bold'
+                  : 'border-transparent text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'
+              }`}>
+              <span>📦 전체상점</span>
+              <span className="text-[10px] text-gray-500">
+                <span className="text-green-600 dark:text-green-400 font-mono">{totalSaleAcross.toLocaleString()}</span>
+                <span className="opacity-60">/{totalAcrossStores.toLocaleString()}</span>
+              </span>
+            </button>
+            {storeCounts.map(st => {
+              const active = storeId === st.id;
+              return (
+                <button key={st.id}
+                        onClick={() => { setStoreId(st.id); setPage(1); setSelectedIds(new Set()); setSelectAll(false); }}
+                        title={`판매중 ${st.sale_count.toLocaleString()} / 총 ${st.total_count.toLocaleString()}`}
+                        className={`w-full text-left px-2 py-1.5 rounded text-xs flex items-center justify-between border ${
+                          active
+                            ? 'bg-[#03c75a]/15 border-[#03c75a] text-gray-900 dark:text-white font-bold'
+                            : 'border-transparent text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'
+                        }`}>
+                  <span className="truncate">{st.store_name}</span>
+                  <span className="text-[10px] text-gray-500 shrink-0 ml-2">
+                    <span className="text-green-600 dark:text-green-400 font-mono">{st.sale_count.toLocaleString()}</span>
+                    <span className="opacity-60">/{st.total_count.toLocaleString()}</span>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </aside>
+      ) : (
+        <button onClick={() => setSidebarOpen(true)}
+                className="w-6 shrink-0 bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-400 text-xs"
+                title="사이드바 펼치기">▶</button>
+      )}
+
+    <div className="flex-1 min-w-0 text-gray-800 dark:text-gray-200">
       {/* Header */}
       <div className="sticky top-0 z-10 bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 px-4 py-3">
         <div className="max-w-7xl mx-auto flex items-center justify-between">
@@ -1836,6 +1901,7 @@ export default function SmartStoreProductsPage() {
           </div>
         </div>
       )}
+    </div>
     </div>
   );
 }

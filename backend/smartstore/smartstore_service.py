@@ -22,6 +22,34 @@ def get_stores(include_inactive=False):
         return [_serialize_row(r) for r in _dictfetchall(cur)]
 
 
+def get_stores_with_counts():
+    """좌측 사이드바용: 활성 스토어 + 총상품/판매중 카운트.
+    smartstore_product 와 cross-table aggregation.
+    """
+    with connections['myproduct'].cursor() as cur:
+        cur.execute(
+            """
+            SELECT s.id, s.store_id, s.store_name, s.store_url, s.is_active,
+                   COUNT(p.id) AS total_count,
+                   SUM(p.status_type='SALE') AS sale_count,
+                   SUM(p.status_type='SUSPENSION') AS suspension_count,
+                   SUM(p.status_type='CLOSE') AS close_count,
+                   SUM(p.status_type='PROHIBITION') AS prohibition_count
+              FROM smartstoreIdList s
+              LEFT JOIN smartstore_product p ON p.store_id = s.id
+             WHERE s.is_active=1
+             GROUP BY s.id, s.store_id, s.store_name, s.store_url, s.is_active
+             ORDER BY s.id
+            """
+        )
+        rows = _dictfetchall(cur)
+    # int 캐스팅 (SUM 결과 None 또는 Decimal)
+    for r in rows:
+        for k in ('total_count', 'sale_count', 'suspension_count', 'close_count', 'prohibition_count'):
+            r[k] = int(r.get(k) or 0)
+    return rows
+
+
 def get_store(pk):
     with connections['myproduct'].cursor() as cur:
         cur.execute("SELECT * FROM smartstoreIdList WHERE id=%s", [pk])

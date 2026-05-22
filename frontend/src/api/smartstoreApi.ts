@@ -23,6 +23,24 @@ export async function fetchStores(all = false): Promise<SmartStore[]> {
   return data;
 }
 
+export interface StoreCount {
+  id: number;
+  store_id: string;
+  store_name: string;
+  store_url: string | null;
+  is_active: number;
+  total_count: number;
+  sale_count: number;
+  suspension_count: number;
+  close_count: number;
+  prohibition_count: number;
+}
+
+export async function fetchStoreCounts(): Promise<{ items: StoreCount[] }> {
+  const r = await api.get('/stores/counts/');
+  return r.data;
+}
+
 export async function createStore(payload: {
   store_id: string;
   store_pw: string;

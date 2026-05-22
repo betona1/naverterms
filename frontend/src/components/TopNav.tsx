@@ -8,31 +8,63 @@ interface Props {
   onToggleTheme: () => void;
 }
 
-const NAV_ITEMS = [
-  { key: 'products', label: '스마트스토어상품', color: '#03c75a' },
-  { key: 'naver-products', label: '네이버상품', color: '#22c55e', isNew: true },
-  { key: 'analytics', label: '스토어분석', color: '#10b981' },
-  { key: 'attr-analytics', label: '상품속성분석', color: '#14b8a6' },
-  { key: 'missing-attrs', label: '빈속성검토', color: '#ef4444' },
-  { key: 'attr-register', label: '속성별등록', color: '#dc2626', isNew: true },
-  { key: 'workers', label: '워커', color: '#6b7280' },
-  { key: 'terms', label: 'Term 분석', color: '#0078d7' },
-  { key: 'synonyms', label: '동의어', color: '#a855f7' },
-  { key: 'autocomplete', label: '자동완성', color: '#0ea5e9' },
-  { key: 'results', label: '결과보기', color: '#22c55e' },
-  { key: 'rank', label: '순위추적', color: '#f59e0b' },
-  { key: 'cunning', label: '순위컨닝', color: '#ec4899' },
-  { key: 'purchase', label: '구매추적', color: '#f97316' },
-  { key: 'keywords', label: '연관키워드', color: '#06b6d4' },
-  { key: 'catkeywords', label: '카테고리키워드', color: '#e879f9' },
-  { key: 'ownerclan', label: '오너클랜상품', color: '#ff6b35' },
-  { key: 'reports', label: '보고서', color: '#ef4444' },
-  { key: 'extension', label: '도우미프로그램', color: '#8b5cf6' },
-] as const;
+interface SubItem {
+  key: string;
+  label: string;
+}
+
+interface GroupItem {
+  key: string;
+  label: string;
+  color: string;
+  page?: string;          // 단일 페이지 그룹 (children 없음)
+  children?: SubItem[];   // sub-tab 그룹 (메인 클릭 시 첫 child 로 이동)
+}
+
+const NAV_GROUPS: GroupItem[] = [
+  { key: 'products',       label: '스마트스토어상품', color: '#03c75a', page: 'products' },
+  { key: 'naver-products', label: 'My상품',          color: '#22c55e', page: 'naver-products' },
+  { key: 'analytics',      label: '스토어분석',      color: '#10b981', page: 'analytics' },
+  { key: 'attr',           label: '상품속성',        color: '#14b8a6', children: [
+    { key: 'attr-analytics', label: '상품속성분석' },
+    { key: 'missing-attrs',  label: '빈속성검토' },
+    { key: 'attr-register',  label: '속성별등록' },
+  ]},
+  { key: 'ownerclan',      label: '오너클랜상품',    color: '#ff6b35', page: 'ownerclan' },
+  { key: 'reports',        label: '보고서',          color: '#ef4444', page: 'reports' },
+  { key: 'tools',          label: '도구',            color: '#0078d7', children: [
+    { key: 'terms',        label: 'Term 분석' },
+    { key: 'synonyms',     label: '동의어' },
+    { key: 'autocomplete', label: '자동완성' },
+    { key: 'results',      label: '결과보기' },
+    { key: 'rank',         label: '순위추적' },
+    { key: 'cunning',      label: '순위컨닝' },
+    { key: 'purchase',     label: '구매추적' },
+    { key: 'keywords',     label: '연관키워드' },
+    { key: 'catkeywords',  label: '카테고리키워드' },
+    { key: 'extension',    label: '도우미프로그램' },
+  ]},
+];
+
+// page → 속한 그룹 찾기
+function findGroup(page: string): GroupItem | undefined {
+  for (const g of NAV_GROUPS) {
+    if (g.page === page) return g;
+    if (g.children?.some(c => c.key === page)) return g;
+  }
+  return undefined;
+}
 
 export default function TopNav({ page, onPageChange, onStoreSettings, onPowerControl, onGpuMonitor, dark, onToggleTheme }: Props) {
+  const activeGroup = findGroup(page);
+  const subItems = activeGroup?.children;
+
+  const headerBg = dark ? 'bg-[#1a1a2e]' : 'bg-white border-b border-gray-200';
+  const subBg = dark ? 'bg-[#13131f] border-t border-[#2a2a40]' : 'bg-gray-50 border-t border-gray-200';
+
   return (
-    <header className={`sticky top-0 z-50 ${dark ? 'bg-[#1a1a2e]' : 'bg-white border-b border-gray-200'}`}>
+    <header className={`sticky top-0 z-50 ${headerBg}`}>
+      {/* ── 1단: 메인 그룹 ── */}
       <div className="h-[42px] flex items-center px-4 gap-1">
         {/* Logo */}
         <div className="flex items-center gap-2 mr-4 shrink-0">
@@ -43,25 +75,25 @@ export default function TopNav({ page, onPageChange, onStoreSettings, onPowerCon
           </span>
         </div>
 
-        {/* Tab Buttons */}
         <nav className="flex items-center gap-0.5 overflow-x-auto scrollbar-hide">
-          {NAV_ITEMS.map(item => {
-            const active = page === item.key;
-            const isNew = 'isNew' in item && item.isNew;
+          {NAV_GROUPS.map(g => {
+            const isActive = activeGroup?.key === g.key;
+            const hasChildren = !!g.children?.length;
             return (
-              <button key={item.key}
-                      onClick={() => onPageChange(item.key)}
+              <button key={g.key}
+                      onClick={() => {
+                        if (g.page) onPageChange(g.page);
+                        else if (g.children?.length) onPageChange(g.children[0].key);
+                      }}
                       className={`relative px-3 pb-[10px] pt-[11px] text-[13px] font-medium whitespace-nowrap border-b-2 transition-colors
-                        ${active
+                        ${isActive
                           ? `${dark ? 'text-white' : 'text-gray-900'}`
                           : `border-transparent ${dark ? 'text-gray-400 hover:text-gray-200' : 'text-gray-500 hover:text-gray-700'}`
                         }`}
-                      style={active ? { borderBottomColor: item.color } : undefined}>
-                {item.label}
-                {isNew && (
-                  <span className="ml-1 inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-red-500 text-white align-middle">
-                    NEW
-                  </span>
+                      style={isActive ? { borderBottomColor: g.color } : undefined}>
+                {g.label}
+                {hasChildren && (
+                  <span className={`ml-1 text-[9px] ${isActive ? 'opacity-80' : 'opacity-50'}`}>▾</span>
                 )}
               </button>
             );
@@ -95,25 +127,19 @@ export default function TopNav({ page, onPageChange, onStoreSettings, onPowerCon
               </svg>
             )}
           </button>
-          {/* GPU 모니터 */}
           <button onClick={onGpuMonitor}
-                  title="GPU 워커 상태 모니터링"
+                  title="워커 모니터링 (GPU + 일반 크롤링)"
                   className={`p-1.5 rounded transition-all
-                    ${dark
-                      ? 'text-emerald-400 hover:text-emerald-200 hover:bg-emerald-900/30'
-                      : 'text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50'}`}>
+                    ${dark ? 'text-emerald-400 hover:text-emerald-200 hover:bg-emerald-900/30' : 'text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50'}`}>
             <svg className="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.2}>
               <rect x="3" y="6" width="18" height="12" rx="1.5" strokeLinejoin="round" />
               <path strokeLinecap="round" d="M7 10v4M11 10v4M15 10v4" />
             </svg>
           </button>
-          {/* 원격 전원 관리 — 우측 끝 */}
           <button onClick={onPowerControl}
                   title="원격 전원 관리 (Wake-on-LAN / Shutdown)"
                   className={`p-1.5 rounded transition-all
-                    ${dark
-                      ? 'text-violet-400 hover:text-violet-200 hover:bg-violet-900/30'
-                      : 'text-violet-600 hover:text-violet-700 hover:bg-violet-50'}`}>
+                    ${dark ? 'text-violet-400 hover:text-violet-200 hover:bg-violet-900/30' : 'text-violet-600 hover:text-violet-700 hover:bg-violet-50'}`}>
             <svg className="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v9" />
               <path strokeLinecap="round" strokeLinejoin="round" d="M18.36 6.64a9 9 0 11-12.73 0" />
@@ -121,6 +147,32 @@ export default function TopNav({ page, onPageChange, onStoreSettings, onPowerCon
           </button>
         </div>
       </div>
+
+      {/* ── 2단: sub-tab (활성 그룹 children) ── */}
+      {subItems && subItems.length > 0 && (
+        <div className={`h-[36px] flex items-center px-4 gap-0.5 ${subBg}`}>
+          <span className={`text-[11px] font-bold mr-3 ${dark ? 'text-gray-500' : 'text-gray-400'}`}>
+            ◀ {activeGroup?.label}
+          </span>
+          <nav className="flex items-center gap-0.5 overflow-x-auto scrollbar-hide">
+            {subItems.map(s => {
+              const active = page === s.key;
+              return (
+                <button key={s.key}
+                        onClick={() => onPageChange(s.key)}
+                        className={`px-2.5 py-1 text-[12px] rounded whitespace-nowrap transition-colors
+                          ${active
+                            ? `${dark ? 'bg-[#252540] text-white' : 'bg-white shadow text-gray-900 border border-gray-200'}`
+                            : `${dark ? 'text-gray-400 hover:text-gray-200 hover:bg-[#1e1e30]' : 'text-gray-600 hover:text-gray-900 hover:bg-white/60'}`
+                          }`}
+                        style={active ? { boxShadow: `inset 0 -2px 0 ${activeGroup?.color}` } : undefined}>
+                  {s.label}
+                </button>
+              );
+            })}
+          </nav>
+        </div>
+      )}
     </header>
   );
 }
