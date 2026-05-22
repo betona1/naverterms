@@ -3,6 +3,7 @@ interface Props {
   onPageChange: (page: string) => void;
   onStoreSettings: () => void;
   onPowerControl: () => void;
+  onGpuMonitor: () => void;
   dark: boolean;
   onToggleTheme: () => void;
 }
@@ -29,7 +30,7 @@ const NAV_ITEMS = [
   { key: 'extension', label: '도우미프로그램', color: '#8b5cf6' },
 ] as const;
 
-export default function TopNav({ page, onPageChange, onStoreSettings, onPowerControl, dark, onToggleTheme }: Props) {
+export default function TopNav({ page, onPageChange, onStoreSettings, onPowerControl, onGpuMonitor, dark, onToggleTheme }: Props) {
   return (
     <header className={`sticky top-0 z-50 ${dark ? 'bg-[#1a1a2e]' : 'bg-white border-b border-gray-200'}`}>
       <div className="h-[42px] flex items-center px-4 gap-1">
@@ -93,6 +94,18 @@ export default function TopNav({ page, onPageChange, onStoreSettings, onPowerCon
                       d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/>
               </svg>
             )}
+          </button>
+          {/* GPU 모니터 */}
+          <button onClick={onGpuMonitor}
+                  title="GPU 워커 상태 모니터링"
+                  className={`p-1.5 rounded transition-all
+                    ${dark
+                      ? 'text-emerald-400 hover:text-emerald-200 hover:bg-emerald-900/30'
+                      : 'text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50'}`}>
+            <svg className="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.2}>
+              <rect x="3" y="6" width="18" height="12" rx="1.5" strokeLinejoin="round" />
+              <path strokeLinecap="round" d="M7 10v4M11 10v4M15 10v4" />
+            </svg>
           </button>
           {/* 원격 전원 관리 — 우측 끝 */}
           <button onClick={onPowerControl}

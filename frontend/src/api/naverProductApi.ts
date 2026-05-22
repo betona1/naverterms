@@ -2,6 +2,12 @@ import axios from 'axios';
 
 const api = axios.create({ baseURL: '/api/smartstore' });
 
+export interface ProductSalesInfo {
+  total_amount: number;
+  total_quantity: number;
+  order_count: number;
+}
+
 export interface NaverProductItem {
   id: number;
   product_code: string;
@@ -28,6 +34,7 @@ export interface NaverProductItem {
   synced_at: string | null;
   created_at: string;
   updated_at: string;
+  sales?: ProductSalesInfo;
 }
 
 export interface NaverProductFolder {
@@ -64,11 +71,13 @@ export interface ImportState {
 
 export async function fetchNaverProducts(
   page = 1, perPage = 50,
-  opts: { folder_id?: number | null; search?: string } = {},
+  opts: { folder_id?: number | null; search?: string; sort?: string; include_sales?: boolean } = {},
 ): Promise<NaverProductListResponse> {
   const params: Record<string, string | number> = { page, per_page: perPage };
   if (opts.folder_id != null) params.folder_id = opts.folder_id;
   if (opts.search) params.search = opts.search;
+  if (opts.sort) params.sort = opts.sort;
+  if (opts.include_sales) params.include_sales = '1';
   const r = await api.get('/naver-products/', { params });
   return r.data;
 }
@@ -103,10 +112,12 @@ export interface GenerateNameResult {
   error?: string;
 }
 
-export async function generateNaverName(productId: number): Promise<GenerateNameResult> {
-  const r = await api.post(`/naver-products/${productId}/generate-name/`, {}, {
-    validateStatus: () => true,  // 502 도 그대로 받기
-  });
+export async function generateNaverName(
+  productId: number, useVision = true,  // 모달의 단건 [🤖] 은 비전 ON
+): Promise<GenerateNameResult> {
+  const r = await api.post(`/naver-products/${productId}/generate-name/`,
+    { use_vision: useVision },
+    { validateStatus: () => true });
   return r.data;
 }
 
@@ -134,6 +145,7 @@ export interface QueueStatus {
 export async function enqueueGenerate(opts: {
   ids?: number[];
   folder_id?: number;
+  top_sales?: number;
   only_missing?: boolean;
 }): Promise<EnqueueResult> {
   const r = await api.post('/naver-products/enqueue/', opts);
@@ -142,5 +154,60 @@ export async function enqueueGenerate(opts: {
 
 export async function fetchQueueStatus(): Promise<QueueStatus> {
   const r = await api.get('/naver-products/queue-status/');
+  return r.data;
+}
+
+export async function moveNaverProducts(
+  ids: number[], folderId: number,
+): Promise<{ ok: boolean; moved?: number; folder_id?: number; error?: string }> {
+  const r = await api.post('/naver-products/move/', { ids, folder_id: folderId });
+  return r.data;
+}
+
+export interface VisionAnalysis {
+  color?: string[] | null;
+  material?: string | null;
+  form?: string | null;
+  package_qty?: string | null;
+  key_features?: string[] | null;
+  readable_text?: string | null;
+}
+
+export interface NaverProductDetail extends NaverProductItem {
+  market_product_name: string | null;
+  naver_keywords: string | null;
+  keywords: string | null;
+  category_code: string | null;
+  model_name: string | null;
+  consumer_price: number;
+  option1_name: string | null;
+  option1_values: string | null;
+  option2_name: string | null;
+  option2_values: string | null;
+  combined_option: string | null;
+  product_attribute: string | null;
+  detail_html: string | null;
+  is_modified: number;
+  image_medium: string | null;
+  image_analysis: VisionAnalysis | null;
+  image_analyzed_at: string | null;
+}
+
+export async function fetchNaverProductDetail(id: number): Promise<NaverProductDetail> {
+  const r = await api.get(`/naver-products/${id}/`);
+  return r.data;
+}
+
+export async function patchNaverProduct(
+  id: number, payload: Partial<NaverProductDetail>,
+): Promise<{ ok: boolean; detail?: NaverProductDetail; error?: string }> {
+  const r = await api.patch(`/naver-products/${id}/`, payload, {
+    validateStatus: () => true,
+  });
+  return r.data;
+}
+
+export async function clearVisionCache(id: number): Promise<{ ok: boolean; error?: string }> {
+  const r = await api.post(`/naver-products/${id}/clear-vision/`);
   return r.data;
 }

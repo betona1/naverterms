@@ -3,9 +3,10 @@ import { useTheme } from '../hooks/useTheme';
 import {
   fetchNaverProducts, fetchNaverFolders, syncNaverFolders,
   startImportFrom11st, fetchImportStatus, generateNaverName,
-  enqueueGenerate, fetchQueueStatus,
+  enqueueGenerate, fetchQueueStatus, moveNaverProducts,
+  fetchNaverProductDetail, patchNaverProduct, clearVisionCache,
   type NaverProductItem, type NaverProductFolder, type ImportState,
-  type QueueStatus,
+  type QueueStatus, type NaverProductDetail,
 } from '../api/naverProductApi';
 
 const POLL_MS = 1500;
@@ -27,6 +28,10 @@ export default function NaverMyProductsPage() {
   const [msg, setMsg] = useState('');
   const [genBusy, setGenBusy] = useState<Set<number>>(new Set());
   const [queueStatus, setQueueStatus] = useState<QueueStatus | null>(null);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [moveModalOpen, setMoveModalOpen] = useState(false);
+  const [detailId, setDetailId] = useState<number | null>(null);
+  const [salesMode, setSalesMode] = useState(false);
   const pollRef = useRef<number | null>(null);
   const queuePollRef = useRef<number | null>(null);
 
@@ -35,8 +40,10 @@ export default function NaverMyProductsPage() {
     setLoading(true);
     try {
       const r = await fetchNaverProducts(page, perPage, {
-        folder_id: selectedFolderId,
+        folder_id: salesMode ? null : selectedFolderId,
         search: search || undefined,
+        sort: salesMode ? 'sales' : undefined,
+        include_sales: salesMode,
       });
       setProducts(r.items);
       setTotal(r.total);
@@ -46,7 +53,7 @@ export default function NaverMyProductsPage() {
     } finally {
       setLoading(false);
     }
-  }, [page, perPage, selectedFolderId, search]);
+  }, [page, perPage, selectedFolderId, search, salesMode]);
 
   const loadFolders = useCallback(async () => {
     try {
@@ -121,6 +128,62 @@ export default function NaverMyProductsPage() {
     queuePollRef.current = window.setInterval(loadQueueStatus, hasWork ? 3000 : 30000);
     return () => { if (queuePollRef.current != null) window.clearInterval(queuePollRef.current); };
   }, [queueStatus?.pending, queueStatus?.running, loadQueueStatus]);
+
+  const onMoveTo = async (folderId: number) => {
+    if (selected.size === 0) return;
+    setBusy(true);
+    try {
+      const r = await moveNaverProducts(Array.from(selected), folderId);
+      if (r.ok) {
+        const folder = folders.find(f => f.id === folderId);
+        flash(`📁 ${r.moved}개 → ${folder?.name || folderId} 이동`);
+        setSelected(new Set());
+        setMoveModalOpen(false);
+        loadProducts();
+        loadFolders();
+      } else {
+        flash(`이동 실패: ${r.error || 'unknown'}`);
+      }
+    } catch (e: unknown) {
+      flash(`에러: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggleSelected = (id: number) => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const togglePageAll = (on: boolean) => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (on) products.forEach(p => next.add(p.id));
+      else products.forEach(p => next.delete(p.id));
+      return next;
+    });
+  };
+
+  // 폴더/검색 바뀌면 선택 해제
+  useEffect(() => { setSelected(new Set()); }, [selectedFolderId, search, salesMode]);
+
+  const onEnqueueTopSales = async (n: number) => {
+    if (!confirm(`매출 상위 ${n}개 상품을 워커 큐에 추가합니다.\n(워커 11개로 처리, 약 ${Math.round(n * 0.6)}초 예상)`)) return;
+    setBusy(true);
+    try {
+      const r = await enqueueGenerate({ top_sales: n, only_missing: false });
+      flash(`📊 매출 상위 ${n} → 큐 ${r.queued}건 추가 (이미생성 ${r.requested - r.queued})`);
+      loadQueueStatus();
+    } catch (e: unknown) {
+      flash(`에러: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const onEnqueueFolder = async () => {
     if (selectedFolderId == null) {
@@ -280,6 +343,55 @@ export default function NaverMyProductsPage() {
         >
           🤖 전체 빠진 것 생성
         </button>
+
+        <button
+          onClick={() => setMoveModalOpen(true)}
+          disabled={busy || selected.size === 0}
+          title="선택된 상품을 다른 폴더로 이동"
+          className="px-3 py-1.5 text-xs font-bold rounded bg-amber-600 hover:bg-amber-700 text-white disabled:opacity-40 disabled:cursor-not-allowed shadow"
+        >
+          📁 폴더 이동{selected.size > 0 ? ` (${selected.size})` : ''}
+        </button>
+
+        <label className={`flex items-center gap-1 text-xs cursor-pointer select-none px-2 py-1 rounded border ${
+          salesMode
+            ? 'bg-rose-500/20 border-rose-400 text-rose-700 dark:text-rose-300 font-bold'
+            : `${C.border} ${C.sub} hover:${C.text}`
+        }`}>
+          <input type="checkbox" checked={salesMode}
+                 onChange={e => { setSalesMode(e.target.checked); setPage(1); }} />
+          📊 매출 정렬
+        </label>
+
+        <button
+          onClick={() => onEnqueueTopSales(500)}
+          disabled={busy}
+          title="매출 상위 500개를 모두 워커 큐에 추가 (이미 생성된 것도 강제 재생성)"
+          className="px-3 py-1.5 text-xs font-bold rounded bg-rose-600 hover:bg-rose-700 text-white disabled:opacity-40 disabled:cursor-not-allowed shadow"
+        >
+          📊 매출 TOP500 생성
+        </button>
+
+        <button
+          onClick={() => {
+            const params = new URLSearchParams();
+            if (salesMode) {
+              const n = prompt('엑셀로 내보낼 매출 상위 N건 (예: 100, 500, 1000):', '500');
+              if (!n) return;
+              params.set('top_sales', n);
+            } else {
+              if (selectedFolderId != null) params.set('folder_id', String(selectedFolderId));
+              if (search) params.set('search', search);
+              params.set('limit', '5000');
+            }
+            window.location.href = `/api/smartstore/naver-products/excel/?${params.toString()}`;
+          }}
+          disabled={busy}
+          title="현재 필터/정렬 그대로 엑셀 다운로드 (매출 모드면 TOP N 입력)"
+          className="px-3 py-1.5 text-xs font-bold rounded bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-40 disabled:cursor-not-allowed shadow"
+        >
+          📥 엑셀
+        </button>
       </div>
 
       {/* Queue status card */}
@@ -422,33 +534,72 @@ export default function NaverMyProductsPage() {
               <table className="w-full text-xs">
                 <thead className={`${C.tableHead} sticky top-0 z-10`}>
                   <tr>
+                    <th className="px-2 py-1.5 w-8">
+                      <input
+                        type="checkbox"
+                        checked={products.length > 0 && products.every(p => selected.has(p.id))}
+                        onChange={e => togglePageAll(e.target.checked)}
+                        title="페이지 전체 선택/해제"
+                      />
+                    </th>
+                    {salesMode && <th className="text-right px-2 py-1.5 font-bold">순위</th>}
                     <th className="text-left px-2 py-1.5 font-bold">이미지</th>
                     <th className="text-left px-2 py-1.5 font-bold">W코드</th>
                     <th className="text-left px-2 py-1.5 font-bold">상품명</th>
+                    {salesMode && <th className="text-right px-2 py-1.5 font-bold">총 매출</th>}
+                    {salesMode && <th className="text-right px-2 py-1.5 font-bold">판매수량</th>}
                     <th className="text-left px-2 py-1.5 font-bold">AI상품명</th>
                     <th className="text-left px-2 py-1.5 font-bold">네이버상품명</th>
-                    <th className="text-left px-2 py-1.5 font-bold">카테고리</th>
-                    <th className="text-right px-2 py-1.5 font-bold">판매가</th>
-                    <th className="text-right px-2 py-1.5 font-bold">오너클랜가</th>
+                    {!salesMode && <th className="text-left px-2 py-1.5 font-bold">카테고리</th>}
+                    {!salesMode && <th className="text-right px-2 py-1.5 font-bold">판매가</th>}
+                    {!salesMode && <th className="text-right px-2 py-1.5 font-bold">오너클랜가</th>}
                     <th className="text-left px-2 py-1.5 font-bold">폴더</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {products.map(p => {
+                  {products.map((p, idx) => {
                     const folder = folders.find(f => f.id === p.folder_id);
+                    const isSelected = selected.has(p.id);
+                    const rank = salesMode ? (page - 1) * perPage + idx + 1 : null;
                     return (
-                      <tr key={p.id} className={`border-t ${C.border} ${C.rowHover} ${C.text}`}>
-                        <td className="px-2 py-1">
+                      <tr key={p.id} className={`border-t ${C.border} ${C.rowHover} ${C.text} ${
+                        isSelected ? (dark ? 'bg-amber-900/20' : 'bg-amber-50') : ''
+                      }`}>
+                        <td className="px-2 py-1 text-center">
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => toggleSelected(p.id)}
+                          />
+                        </td>
+                        {salesMode && (
+                          <td className={`px-2 py-1 text-right font-bold ${
+                            rank! <= 3 ? 'text-rose-500' : rank! <= 10 ? 'text-amber-500' : C.sub
+                          }`}>
+                            {rank}
+                          </td>
+                        )}
+                        <td className="px-2 py-1 cursor-pointer" onClick={() => setDetailId(p.id)}>
                           {p.image_small ? (
-                            <img src={p.image_small} alt="" className="w-10 h-10 object-cover rounded" loading="lazy" />
+                            <img src={p.image_small} alt="" className="w-10 h-10 object-cover rounded hover:ring-2 hover:ring-emerald-400" loading="lazy" />
                           ) : (
                             <div className={`w-10 h-10 rounded ${dark ? 'bg-[#252540]' : 'bg-gray-200'}`} />
                           )}
                         </td>
                         <td className={`px-2 py-1 font-mono text-[11px] ${C.sub}`}>{p.product_code}</td>
-                        <td className="px-2 py-1 max-w-[280px]">
-                          <div className="truncate" title={p.product_name || ''}>{p.product_name}</div>
+                        <td className="px-2 py-1 max-w-[280px] cursor-pointer" onClick={() => setDetailId(p.id)}>
+                          <div className="truncate hover:underline" title={p.product_name || ''}>{p.product_name}</div>
                         </td>
+                        {salesMode && (
+                          <td className="px-2 py-1 text-right font-bold text-emerald-600 dark:text-emerald-400 whitespace-nowrap">
+                            {p.sales ? `${p.sales.total_amount.toLocaleString()}원` : '—'}
+                          </td>
+                        )}
+                        {salesMode && (
+                          <td className={`px-2 py-1 text-right ${C.sub}`}>
+                            {p.sales ? p.sales.total_quantity.toLocaleString() : '—'}
+                          </td>
+                        )}
                         <td className="px-2 py-1 max-w-[260px]">
                           <div className="truncate" title={p.ai_recommended_name || p.ai_product_name || ''}>
                             {p.ai_recommended_name || p.ai_product_name || <span className={C.muted}>—</span>}
@@ -469,11 +620,13 @@ export default function NaverMyProductsPage() {
                             </button>
                           </div>
                         </td>
-                        <td className={`px-2 py-1 text-[11px] ${C.sub} max-w-[200px]`}>
-                          <div className="truncate" title={p.category_name || ''}>{p.category_name}</div>
-                        </td>
-                        <td className="px-2 py-1 text-right">{p.market_price?.toLocaleString() || 0}</td>
-                        <td className={`px-2 py-1 text-right ${C.sub}`}>{p.ownerclan_price?.toLocaleString() || 0}</td>
+                        {!salesMode && (
+                          <td className={`px-2 py-1 text-[11px] ${C.sub} max-w-[200px]`}>
+                            <div className="truncate" title={p.category_name || ''}>{p.category_name}</div>
+                          </td>
+                        )}
+                        {!salesMode && <td className="px-2 py-1 text-right">{p.market_price?.toLocaleString() || 0}</td>}
+                        {!salesMode && <td className={`px-2 py-1 text-right ${C.sub}`}>{p.ownerclan_price?.toLocaleString() || 0}</td>}
                         <td className={`px-2 py-1 text-[11px] ${C.sub}`}>{folder?.name || '—'}</td>
                       </tr>
                     );
@@ -483,6 +636,447 @@ export default function NaverMyProductsPage() {
             )}
           </div>
         </main>
+      </div>
+
+      {moveModalOpen && (
+        <FolderMoveModal
+          folders={folders}
+          selectedCount={selected.size}
+          currentFolderId={selectedFolderId}
+          dark={dark}
+          busy={busy}
+          onClose={() => setMoveModalOpen(false)}
+          onMove={onMoveTo}
+        />
+      )}
+
+      {detailId != null && (
+        <ProductDetailModal
+          productId={detailId}
+          folders={folders}
+          dark={dark}
+          onClose={() => setDetailId(null)}
+          onSaved={() => { loadProducts(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function FolderMoveModal({
+  folders, selectedCount, currentFolderId, dark, busy, onClose, onMove,
+}: {
+  folders: NaverProductFolder[];
+  selectedCount: number;
+  currentFolderId: number | null;
+  dark: boolean;
+  busy: boolean;
+  onClose: () => void;
+  onMove: (folderId: number) => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 px-4 py-4"
+         onClick={onClose}>
+      <div className={`rounded-xl shadow-2xl border w-full max-w-md max-h-[85vh] flex flex-col ${
+             dark ? 'bg-[#1c1c2e] border-[#2a2a40]' : 'bg-white border-gray-200'
+           }`}
+           onClick={e => e.stopPropagation()}>
+        <div className={`flex items-center justify-between px-5 py-3 border-b ${
+               dark ? 'border-[#2a2a40]' : 'border-gray-200'
+             }`}>
+          <h2 className={`text-sm font-bold ${dark ? 'text-white' : 'text-gray-900'}`}>
+            📁 폴더로 이동 ({selectedCount.toLocaleString()}건)
+          </h2>
+          <button onClick={onClose}
+                  className={`text-xl ${dark ? 'text-gray-400 hover:text-gray-200' : 'text-gray-400 hover:text-gray-600'}`}>
+            ×
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-3">
+          <ul className="space-y-1">
+            {folders.map(f => {
+              const isCurrent = f.id === currentFolderId;
+              return (
+                <li key={f.id}>
+                  <button
+                    onClick={() => onMove(f.id)}
+                    disabled={isCurrent || busy}
+                    className={`w-full text-left px-3 py-2 rounded text-xs flex items-center justify-between transition-colors
+                      ${isCurrent
+                        ? (dark ? 'bg-[#252540] text-gray-500 cursor-not-allowed' : 'bg-gray-100 text-gray-400 cursor-not-allowed')
+                        : (dark ? 'bg-[#252540] hover:bg-amber-900/30 text-white' : 'bg-gray-50 hover:bg-amber-100 text-gray-900')
+                      } disabled:opacity-60`}
+                  >
+                    <span className="flex items-center gap-1.5 truncate">
+                      <span style={{ color: f.color || (dark ? '#475569' : '#94a3b8') }}>●</span>
+                      <span className="truncate">{f.is_system === 1 ? '📦 ' : ''}{f.name}</span>
+                    </span>
+                    <span className={`text-[10px] shrink-0 ml-2 ${dark ? 'text-gray-500' : 'text-gray-500'}`}>
+                      {(f.product_count || 0).toLocaleString()}
+                      {isCurrent && ' · 현재'}
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── 상세/편집 모달 ──────────────────────────────────────────
+
+function ProductDetailModal({
+  productId, folders, dark, onClose, onSaved,
+}: {
+  productId: number;
+  folders: NaverProductFolder[];
+  dark: boolean;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [d, setD] = useState<NaverProductDetail | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [genBusy, setGenBusy] = useState(false);
+  const [clearBusy, setClearBusy] = useState(false);
+  const [msg, setMsg] = useState('');
+
+  // 편집 가능 필드 (form state)
+  const [form, setForm] = useState({
+    product_name: '',
+    naver_product_name: '',
+    edited_product_name: '',
+    naver_keywords: '',
+    keywords: '',
+    category_name: '',
+    brand: '',
+    manufacturer: '',
+    origin: '',
+    model_name: '',
+    folder_id: 1,
+  });
+
+  const reload = useCallback(async () => {
+    setLoading(true);
+    try {
+      const r = await fetchNaverProductDetail(productId);
+      setD(r);
+      setForm({
+        product_name: r.product_name || '',
+        naver_product_name: r.naver_product_name || '',
+        edited_product_name: r.edited_product_name || '',
+        naver_keywords: r.naver_keywords || '',
+        keywords: r.keywords || '',
+        category_name: r.category_name || '',
+        brand: r.brand || '',
+        manufacturer: r.manufacturer || '',
+        origin: r.origin || '',
+        model_name: r.model_name || '',
+        folder_id: r.folder_id || 1,
+      });
+    } finally {
+      setLoading(false);
+    }
+  }, [productId]);
+
+  useEffect(() => { reload(); }, [reload]);
+
+  const flash = (m: string) => { setMsg(m); window.setTimeout(() => setMsg(prev => prev === m ? '' : prev), 3500); };
+
+  const onSave = async () => {
+    setSaving(true);
+    try {
+      const r = await patchNaverProduct(productId, form);
+      if (r.ok) {
+        flash('💾 저장 완료');
+        if (r.detail) setD(r.detail);
+        onSaved();
+      } else {
+        flash(`저장 실패: ${r.error || 'unknown'}`);
+      }
+    } catch (e: unknown) {
+      flash(`에러: ${(e as Error).message}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const onRegenerate = async () => {
+    setGenBusy(true);
+    try {
+      const r = await generateNaverName(productId);
+      if (r.ok && r.naver_product_name) {
+        flash(`🤖 재생성: ${r.naver_product_name} (${r.byte_length}B / ${r.elapsed_ms}ms)`);
+        await reload();
+        onSaved();
+      } else {
+        flash(`재생성 실패: ${r.error || 'unknown'}`);
+      }
+    } finally {
+      setGenBusy(false);
+    }
+  };
+
+  const onClearVision = async () => {
+    if (!confirm('비전 분석 캐시를 삭제하시겠어요? 다음 생성 시 이미지 다시 분석합니다.')) return;
+    setClearBusy(true);
+    try {
+      const r = await clearVisionCache(productId);
+      if (r.ok) {
+        flash('🗑 비전 캐시 삭제');
+        await reload();
+      } else {
+        flash(`실패: ${r.error || 'unknown'}`);
+      }
+    } finally {
+      setClearBusy(false);
+    }
+  };
+
+  const C = dark ? {
+    bg: 'bg-[#1c1c2e]', border: 'border-[#2a2a40]',
+    text: 'text-white', sub: 'text-gray-400', muted: 'text-gray-500',
+    input: 'bg-[#252540] border-[#2a2a40] text-white placeholder-gray-500',
+    panel: 'bg-[#252540]', label: 'text-gray-300',
+  } : {
+    bg: 'bg-white', border: 'border-gray-200',
+    text: 'text-gray-900', sub: 'text-gray-600', muted: 'text-gray-500',
+    input: 'bg-white border-gray-300 text-gray-900 placeholder-gray-400',
+    panel: 'bg-gray-50', label: 'text-gray-700',
+  };
+
+  const v = d?.image_analysis;
+  const folderName = folders.find(f => f.id === form.folder_id)?.name || `#${form.folder_id}`;
+
+  return (
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 px-4 py-4"
+         onClick={onClose}>
+      <div className={`${C.bg} ${C.border} border rounded-xl shadow-2xl w-full max-w-5xl max-h-[92vh] flex flex-col`}
+           onClick={e => e.stopPropagation()}>
+        {/* Header */}
+        <div className={`flex items-center justify-between px-5 py-3 border-b ${C.border}`}>
+          <div className="flex items-center gap-3">
+            <span className="text-lg">📋</span>
+            <h2 className={`text-sm font-bold ${C.text}`}>
+              상품 상세 / 편집
+              {d && <span className={`ml-2 text-xs font-mono ${C.muted}`}>#{d.id} · W{d.product_code}</span>}
+            </h2>
+            {d?.is_modified === 1 && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-600 dark:text-amber-400">수정됨</span>
+            )}
+          </div>
+          <button onClick={onClose}
+                  className={`text-xl ${dark ? 'text-gray-400 hover:text-gray-200' : 'text-gray-400 hover:text-gray-700'}`}>
+            ×
+          </button>
+        </div>
+
+        {msg && (
+          <div className="px-5 py-1.5 text-xs bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 border-b border-emerald-200 dark:border-emerald-800">
+            {msg}
+          </div>
+        )}
+
+        {loading || !d ? (
+          <div className={`flex-1 flex items-center justify-center text-sm ${C.muted}`}>
+            로딩 중...
+          </div>
+        ) : (
+          <div className="flex-1 overflow-y-auto p-5 grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-5">
+            {/* 좌측: 이미지 + 비전 분석 */}
+            <div className="space-y-3">
+              {d.image_large ? (
+                <a href={d.image_large} target="_blank" rel="noreferrer">
+                  <img src={d.image_large} alt={d.product_name || ''}
+                       className={`w-full h-auto rounded border ${C.border} object-contain`} />
+                </a>
+              ) : (
+                <div className={`w-full aspect-square rounded ${C.panel}`} />
+              )}
+
+              <div className={`${C.panel} rounded p-3 text-xs space-y-1.5`}>
+                <div className={`font-bold ${C.text} flex items-center justify-between`}>
+                  <span>👁 비전 분석</span>
+                  {v && d.image_analyzed_at && (
+                    <span className={`text-[10px] ${C.muted}`}>{d.image_analyzed_at.slice(5,16).replace('T',' ')}</span>
+                  )}
+                </div>
+                {!v ? (
+                  <div className={C.muted}>아직 분석 안됨 (재생성 버튼 누르면 자동 분석)</div>
+                ) : (
+                  <>
+                    {v.form && <div><span className={C.muted}>형태:</span> <b className={C.text}>{v.form}</b></div>}
+                    {v.color && Array.isArray(v.color) && v.color.length > 0 && (
+                      <div><span className={C.muted}>색상:</span> {v.color.join(', ')}</div>
+                    )}
+                    {v.material && <div><span className={C.muted}>소재:</span> {v.material}</div>}
+                    {v.package_qty && <div><span className={C.muted}>패키지:</span> {v.package_qty}</div>}
+                    {v.readable_text && <div><span className={C.muted}>글자:</span> {v.readable_text}</div>}
+                    {v.key_features && Array.isArray(v.key_features) && v.key_features.length > 0 && (
+                      <div><span className={C.muted}>특징:</span> {v.key_features.join(', ')}</div>
+                    )}
+                  </>
+                )}
+              </div>
+
+              {/* 가격 / 메타 */}
+              <div className={`${C.panel} rounded p-3 text-xs space-y-1`}>
+                <div className={`font-bold ${C.text}`}>💰 가격 / 메타</div>
+                <div><span className={C.muted}>판매가:</span> {d.market_price?.toLocaleString() || 0}원</div>
+                <div><span className={C.muted}>오너클랜:</span> {d.ownerclan_price?.toLocaleString() || 0}원</div>
+                <div><span className={C.muted}>배송비:</span> {d.shipping_fee?.toLocaleString() || 0}원 / 반품 {d.return_fee?.toLocaleString() || 0}원</div>
+                {d.source_id && <div><span className={C.muted}>11st source_id:</span> {d.source_id}</div>}
+                {d.copied_at && <div><span className={C.muted}>가져온 시각:</span> {d.copied_at.slice(0,16).replace('T',' ')}</div>}
+              </div>
+            </div>
+
+            {/* 우측: 편집 폼 */}
+            <div className="space-y-3 text-xs">
+              {/* 11번가 AI상품명 (read-only) */}
+              {d.ai_recommended_name && (
+                <div>
+                  <label className={`block ${C.label} font-bold mb-1`}>11번가 AI 상품명 (참고)</label>
+                  <div className={`${C.panel} rounded px-2 py-1.5 ${C.sub}`}>{d.ai_recommended_name}</div>
+                </div>
+              )}
+
+              {/* 네이버 상품명 — 가장 중요 */}
+              <div>
+                <label className={`block ${C.label} font-bold mb-1`}>
+                  🌐 네이버 상품명 (이 컬럼이 네이버용 최종 결과)
+                  <span className={`ml-2 text-[10px] ${C.muted}`}>
+                    {form.naver_product_name.length}자 / 권장 50자
+                  </span>
+                </label>
+                <textarea
+                  value={form.naver_product_name}
+                  onChange={e => setForm(s => ({ ...s, naver_product_name: e.target.value }))}
+                  rows={2}
+                  className={`${C.input} border rounded w-full px-2 py-1.5`}
+                />
+              </div>
+
+              {/* 원본 상품명 */}
+              <div>
+                <label className={`block ${C.label} font-bold mb-1`}>원본 상품명</label>
+                <textarea
+                  value={form.product_name}
+                  onChange={e => setForm(s => ({ ...s, product_name: e.target.value }))}
+                  rows={2}
+                  className={`${C.input} border rounded w-full px-2 py-1.5`}
+                />
+              </div>
+
+              {/* 사용자 편집명 */}
+              <div>
+                <label className={`block ${C.label} font-bold mb-1`}>사용자 편집명 (선택)</label>
+                <input
+                  value={form.edited_product_name}
+                  onChange={e => setForm(s => ({ ...s, edited_product_name: e.target.value }))}
+                  className={`${C.input} border rounded w-full px-2 py-1.5`}
+                />
+              </div>
+
+              {/* 카테고리 / 브랜드 / 제조사 / 원산지 / 모델명 / 폴더 */}
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className={`block ${C.label} mb-0.5`}>카테고리</label>
+                  <input value={form.category_name}
+                         onChange={e => setForm(s => ({ ...s, category_name: e.target.value }))}
+                         className={`${C.input} border rounded w-full px-2 py-1`} />
+                </div>
+                <div>
+                  <label className={`block ${C.label} mb-0.5`}>브랜드</label>
+                  <input value={form.brand}
+                         onChange={e => setForm(s => ({ ...s, brand: e.target.value }))}
+                         className={`${C.input} border rounded w-full px-2 py-1`} />
+                </div>
+                <div>
+                  <label className={`block ${C.label} mb-0.5`}>제조사</label>
+                  <input value={form.manufacturer}
+                         onChange={e => setForm(s => ({ ...s, manufacturer: e.target.value }))}
+                         className={`${C.input} border rounded w-full px-2 py-1`} />
+                </div>
+                <div>
+                  <label className={`block ${C.label} mb-0.5`}>원산지</label>
+                  <input value={form.origin}
+                         onChange={e => setForm(s => ({ ...s, origin: e.target.value }))}
+                         className={`${C.input} border rounded w-full px-2 py-1`} />
+                </div>
+                <div>
+                  <label className={`block ${C.label} mb-0.5`}>모델명</label>
+                  <input value={form.model_name}
+                         onChange={e => setForm(s => ({ ...s, model_name: e.target.value }))}
+                         className={`${C.input} border rounded w-full px-2 py-1`} />
+                </div>
+                <div>
+                  <label className={`block ${C.label} mb-0.5`}>폴더 → {folderName}</label>
+                  <select value={form.folder_id}
+                          onChange={e => setForm(s => ({ ...s, folder_id: Number(e.target.value) }))}
+                          className={`${C.input} border rounded w-full px-2 py-1`}>
+                    {folders.map(f => (
+                      <option key={f.id} value={f.id}>{f.is_system === 1 ? '📦 ' : ''}{f.name}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* 키워드 */}
+              <div>
+                <label className={`block ${C.label} font-bold mb-1`}>네이버 전용 키워드</label>
+                <textarea
+                  value={form.naver_keywords}
+                  onChange={e => setForm(s => ({ ...s, naver_keywords: e.target.value }))}
+                  rows={2} placeholder="쉼표 또는 줄바꿈으로 구분"
+                  className={`${C.input} border rounded w-full px-2 py-1.5`}
+                />
+              </div>
+              <div>
+                <label className={`block ${C.label} mb-1`}>11번가 원본 keywords</label>
+                <textarea
+                  value={form.keywords}
+                  onChange={e => setForm(s => ({ ...s, keywords: e.target.value }))}
+                  rows={2}
+                  className={`${C.input} border rounded w-full px-2 py-1.5`}
+                />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Footer */}
+        <div className={`border-t ${C.border} px-5 py-3 flex items-center gap-2 ${dark ? 'bg-[#181828]' : 'bg-gray-50'} rounded-b-xl`}>
+          <button
+            onClick={onClearVision}
+            disabled={clearBusy || loading || !d?.image_analysis}
+            title="비전 분석 캐시 삭제 (다음 생성 시 이미지 재분석)"
+            className={`px-3 py-1.5 text-xs rounded ${dark ? 'bg-[#252540] text-gray-300 hover:bg-[#2f2f50]' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'} disabled:opacity-40`}
+          >
+            🗑 비전 캐시 삭제
+          </button>
+          <button
+            onClick={onRegenerate}
+            disabled={genBusy || loading}
+            className="px-3 py-1.5 text-xs font-bold rounded bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-40"
+          >
+            {genBusy ? '⏳ 생성 중...' : '🤖 재생성'}
+          </button>
+          <div className="flex-1" />
+          <button onClick={onClose}
+                  className={`px-3 py-1.5 text-xs rounded ${dark ? 'bg-[#252540] text-gray-300 hover:bg-[#2f2f50]' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}>
+            취소
+          </button>
+          <button
+            onClick={onSave}
+            disabled={saving || loading}
+            className="px-4 py-1.5 text-xs font-bold rounded bg-violet-600 hover:bg-violet-700 text-white disabled:opacity-40"
+          >
+            {saving ? '저장 중...' : '💾 저장'}
+          </button>
+        </div>
       </div>
     </div>
   );

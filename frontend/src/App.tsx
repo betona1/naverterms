@@ -3,6 +3,7 @@ import { useTheme } from './hooks/useTheme';
 import TopNav from './components/TopNav';
 import StoreSettingsModal from './components/smartstore/StoreSettingsModal';
 import PowerControlModal from './components/PowerControlModal';
+import GpuMonitorModal from './components/GpuMonitorModal';
 import NaverTermsPage from './pages/NaverTermsPage';
 import NaverResultsPage from './pages/NaverResultsPage';
 import NaverRankPage from './pages/NaverRankPage';
@@ -59,6 +60,7 @@ export default function App() {
   });
   const [showStoreSettings, setShowStoreSettings] = useState(false);
   const [showPowerControl, setShowPowerControl] = useState(false);
+  const [showGpuMonitor, setShowGpuMonitor] = useState(false);
 
   const changePage = useCallback((p: string) => {
     setPage(p);
@@ -96,6 +98,7 @@ export default function App() {
           onPageChange={changePage}
           onStoreSettings={() => setShowStoreSettings(true)}
           onPowerControl={() => setShowPowerControl(true)}
+          onGpuMonitor={() => setShowGpuMonitor(true)}
           dark={dark}
           onToggleTheme={toggle}
         />
@@ -128,6 +131,9 @@ export default function App() {
       )}
       {showPowerControl && (
         <PowerControlModal onClose={() => setShowPowerControl(false)} />
+      )}
+      {showGpuMonitor && (
+        <GpuMonitorModal onClose={() => setShowGpuMonitor(false)} />
       )}
     </div>
   );

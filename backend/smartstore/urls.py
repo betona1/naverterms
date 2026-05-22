@@ -100,4 +100,8 @@ urlpatterns = [
     path('naver-products/<int:pk>/analyze-image/', views.NaverMyProductAnalyzeImageView.as_view()),
     path('naver-products/enqueue/', views.NaverMyProductEnqueueView.as_view()),
     path('naver-products/queue-status/', views.NaverMyProductQueueStatusView.as_view()),
+    path('naver-products/excel/', views.NaverMyProductExcelView.as_view()),
+    path('naver-products/move/', views.NaverMyProductMoveView.as_view()),
+    path('naver-products/<int:pk>/', views.NaverMyProductDetailView.as_view()),
+    path('naver-products/<int:pk>/clear-vision/', views.NaverMyProductClearVisionView.as_view()),
 ]

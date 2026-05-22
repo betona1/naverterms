@@ -1032,14 +1032,29 @@ class NaverMyProductListView(APIView):
             per_page=int(q.get('per_page', 50)),
             folder_id=int(folder_id) if folder_id not in (None, '', 'all') else None,
             search=q.get('search') or None,
+            sort=q.get('sort') or 'id_desc',
+            include_sales=q.get('include_sales') == '1',
         ))
 
 
 class NaverMyProductGenerateNameView(APIView):
-    """단건 네이버 상품명 생성 (이미지 분석 캐싱 + Ollama 텍스트, 동기)."""
+    """단건 네이버 상품명 생성 (이미지 분석 캐싱 + Ollama 텍스트, 동기).
+
+    use_vision 기본값:
+      - body 에 명시 안 하면 False (벤치마크 모드, 텍스트만)
+      - 단건 [🤖 재생성] 모달 호출은 명시적으로 True 보냄
+    ollama_url:
+      - 11st 워커가 자기 endpoint 를 body 로 전달 → 분산 호출
+      - 없으면 backend default (localhost:11438)
+    """
     def post(self, request, pk):
-        use_vision = (request.data or {}).get('use_vision', True) if request.data else True
-        result = naver_name_generator.generate_naver_name(int(pk), use_vision=use_vision)
+        body = request.data or {}
+        use_vision = bool(body.get('use_vision', False))
+        ollama_url = body.get('ollama_url') or None
+        if ollama_url and not ollama_url.startswith('http'):
+            ollama_url = f'http://{ollama_url}'
+        result = naver_name_generator.generate_naver_name(
+            int(pk), use_vision=use_vision, url=ollama_url)
         status = 200 if result.get('ok') else 502
         return Response(result, status=status)
 
@@ -1055,16 +1070,18 @@ class NaverMyProductAnalyzeImageView(APIView):
 
 class NaverMyProductEnqueueView(APIView):
     """일괄 enqueue (ads.ai_keyword_task, platform='naver'). 워커 11개가 분산 처리.
-    body: {ids:[...]} 또는 {folder_id: N} 또는 {} (=빠진 전체).
+    body: {ids:[...]} 또는 {folder_id:N} 또는 {top_sales:500} 또는 {} (=빠진 전체).
     """
     def post(self, request):
         d = request.data or {}
         ids = d.get('ids')
         folder_id = d.get('folder_id')
+        top_sales = d.get('top_sales')
         only_missing = d.get('only_missing', True)
         result = naver_my_product_service.enqueue_products(
             ids=ids,
             folder_id=int(folder_id) if folder_id is not None else None,
+            top_sales=int(top_sales) if top_sales is not None else None,
             only_missing=bool(only_missing),
         )
         return Response(result)
@@ -1074,3 +1091,219 @@ class NaverMyProductQueueStatusView(APIView):
     """큐 상태 + 워커별 처리 현황 (최근 1시간)."""
     def get(self, request):
         return Response(naver_my_product_service.get_queue_status())
+
+
+class NaverMyProductDetailView(APIView):
+    """단건 전체 정보 조회 + 편집 (PATCH).
+    GET   /naver-products/<pk>/        → 전체 컬럼 + image_analysis JSON
+    PATCH /naver-products/<pk>/        → body 의 화이트리스트 필드 UPDATE
+    DELETE /naver-products/<pk>/image-analysis/ 는 별도 뷰
+    """
+    def get(self, request, pk):
+        d = naver_my_product_service.get_product_detail(int(pk))
+        if not d:
+            return Response({'ok': False, 'error': 'not_found'}, status=404)
+        return Response(d)
+
+    def patch(self, request, pk):
+        r = naver_my_product_service.patch_product(int(pk), request.data or {})
+        status = 200 if r.get('ok') else (404 if r.get('error') == 'not_found' else 400)
+        return Response(r, status=status)
+
+
+class NaverMyProductClearVisionView(APIView):
+    """비전 분석 캐시 삭제."""
+    def post(self, request, pk):
+        r = naver_my_product_service.clear_image_analysis(int(pk))
+        return Response(r, status=200 if r.get('ok') else 404)
+
+
+class NaverMyProductExcelView(APIView):
+    """필터/정렬 그대로 엑셀 다운로드.
+    Query params:
+      folder_id, search, sort=sales|id_desc, top_sales=N (TOP N만), limit=N
+    """
+    def get(self, request):
+        from io import BytesIO
+        from urllib.parse import quote
+        from datetime import datetime as _dt
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment
+
+        q = request.query_params
+        folder_id = q.get('folder_id')
+        sort = q.get('sort') or 'id_desc'
+        top_sales = q.get('top_sales')
+        # 매출 모드: top_sales 있거나 sort=sales 면 자동 매출 정렬 + sales 조인
+        if top_sales:
+            sort = 'sales'
+        include_sales = sort == 'sales' or q.get('include_sales') == '1'
+        # limit: top_sales 우선, 없으면 q.get('limit') 또는 5000 (안전 상한)
+        limit = int(top_sales) if top_sales else int(q.get('limit', 5000))
+        limit = min(limit, 10000)
+
+        data = naver_my_product_service.get_products(
+            page=1, per_page=limit,
+            folder_id=int(folder_id) if folder_id not in (None, '', 'all') else None,
+            search=q.get('search') or None,
+            sort=sort, include_sales=include_sales,
+        )
+        items = data['items']
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = '네이버상품목록'
+
+        # 헤더 정의 (매출 모드 여부에 따라)
+        headers = ['순위', 'W코드']
+        if include_sales:
+            headers += ['총매출', '판매수량', '주문수']
+        headers += [
+            '원본상품명', '11번가 AI상품명', '편집명',
+            '🌐 네이버상품명', '글자수', '바이트',
+            '카테고리', '브랜드', '제조사', '원산지', '모델명',
+            '판매가', '오너클랜가', '배송비', '반품비',
+            '폴더', '이미지URL',
+            '비전:형태', '비전:소재', '비전:색상', '비전:패키지',
+            '비전:특징', '비전:글자',
+            '비전분석일', '상품명생성일',
+        ]
+        header_font = Font(bold=True, color='FFFFFF', size=10)
+        header_fill = PatternFill('solid', fgColor='03c75a')
+        center = Alignment(horizontal='center', vertical='center')
+
+        for col, h in enumerate(headers, 1):
+            c = ws.cell(row=1, column=col, value=h)
+            c.font = header_font
+            c.fill = header_fill
+            c.alignment = center
+
+        # 컬럼 너비 자동
+        widths = {
+            '순위': 6, 'W코드': 10,
+            '총매출': 12, '판매수량': 9, '주문수': 8,
+            '원본상품명': 35, '11번가 AI상품명': 35, '편집명': 30,
+            '🌐 네이버상품명': 50, '글자수': 7, '바이트': 7,
+            '카테고리': 30, '브랜드': 15, '제조사': 15, '원산지': 12, '모델명': 15,
+            '판매가': 10, '오너클랜가': 10, '배송비': 8, '반품비': 8,
+            '폴더': 12, '이미지URL': 40,
+            '비전:형태': 12, '비전:소재': 12, '비전:색상': 20, '비전:패키지': 12,
+            '비전:특징': 35, '비전:글자': 20,
+            '비전분석일': 17, '상품명생성일': 17,
+        }
+        for col, h in enumerate(headers, 1):
+            ws.column_dimensions[ws.cell(row=1, column=col).column_letter].width = widths.get(h, 12)
+
+        import json as _json
+        # naverdb 의 image_analysis JSON 가져오기 (get_products 응답엔 없음)
+        from django.db import connections
+        ids = [it['id'] for it in items]
+        vision_map = {}
+        if ids:
+            ph = ','.join(['%s'] * len(ids))
+            with connections['naverdb'].cursor() as cur:
+                cur.execute(
+                    f"SELECT id, image_analysis, image_analyzed_at FROM naver_my_product WHERE id IN ({ph})",
+                    ids,
+                )
+                for row in cur.fetchall():
+                    raw = row[1]
+                    va = None
+                    if raw:
+                        try:
+                            va = _json.loads(raw) if isinstance(raw, str) else raw
+                        except Exception:
+                            va = None
+                    vision_map[row[0]] = (va, row[2])
+
+        # 폴더 이름 매핑
+        with connections['naverdb'].cursor() as cur:
+            cur.execute("SELECT id, name FROM naver_my_product_folder")
+            folder_name_map = {r[0]: r[1] for r in cur.fetchall()}
+
+        def _calc_bytes(s):
+            if not s:
+                return 0
+            return sum(2 if '가' <= c <= '힣' else 1 for c in s)
+
+        def _color_str(v):
+            c = v.get('color') if v else None
+            if isinstance(c, list):
+                return ', '.join(c)
+            return c or ''
+
+        def _list_str(v, key):
+            x = v.get(key) if v else None
+            if isinstance(x, list):
+                return ', '.join(x)
+            return x or ''
+
+        for idx, it in enumerate(items, start=1):
+            va, va_at = vision_map.get(it['id'], (None, None))
+            name = it.get('naver_product_name') or ''
+            sales = it.get('sales') or {}
+            row = [idx, it.get('product_code', '')]
+            if include_sales:
+                row += [sales.get('total_amount', 0), sales.get('total_quantity', 0), sales.get('order_count', 0)]
+            row += [
+                it.get('product_name', ''),
+                it.get('ai_recommended_name', '') or it.get('ai_product_name', ''),
+                it.get('edited_product_name', '') or '',
+                name,
+                len(name) if name else 0,
+                _calc_bytes(name),
+                it.get('category_name', ''),
+                it.get('brand', ''),
+                it.get('manufacturer', ''),
+                it.get('origin', ''),
+                '',  # model_name (not in list response)
+                it.get('market_price', 0),
+                it.get('ownerclan_price', 0),
+                it.get('shipping_fee', 0),
+                it.get('return_fee', 0),
+                folder_name_map.get(it.get('folder_id'), ''),
+                it.get('image_large', '') or it.get('image_small', ''),
+                (va or {}).get('form', '') or '',
+                (va or {}).get('material', '') or '',
+                _color_str(va),
+                (va or {}).get('package_qty', '') or '',
+                _list_str(va, 'key_features'),
+                (va or {}).get('readable_text', '') or '',
+                va_at.strftime('%Y-%m-%d %H:%M') if va_at else '',
+                (it.get('synced_at') or '')[:16].replace('T', ' ') if it.get('synced_at') else '',
+            ]
+            for col, v in enumerate(row, 1):
+                ws.cell(row=idx + 1, column=col, value=v)
+
+        ws.freeze_panes = 'C2'
+
+        buf = BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+
+        ts = _dt.now().strftime('%Y%m%d_%H%M%S')
+        suffix = f'_TOP{top_sales}' if top_sales else (f'_매출정렬' if sort == 'sales' else '')
+        filename = f'네이버상품목록{suffix}_{ts}.xlsx'
+
+        resp = HttpResponse(
+            buf.getvalue(),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        resp['Content-Disposition'] = f"attachment; filename*=UTF-8''{quote(filename)}"
+        return resp
+
+
+class NaverMyProductMoveView(APIView):
+    """선택된 상품들을 지정 폴더로 이동.
+    body: {"ids": [1,2,3], "folder_id": 5}
+    """
+    def post(self, request):
+        d = request.data or {}
+        ids = d.get('ids') or []
+        folder_id = d.get('folder_id')
+        if not ids or folder_id is None:
+            return Response({'ok': False, 'error': 'ids와 folder_id 필수'}, status=400)
+        result = naver_my_product_service.move_products(
+            ids=[int(x) for x in ids], folder_id=int(folder_id))
+        status = 200 if result.get('ok') else 400
+        return Response(result, status=status)

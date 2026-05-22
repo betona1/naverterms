@@ -337,7 +337,8 @@ def generate_naver_name(product_id: int,
             vision_result = cached
             vision_meta = {'vision_cached': True}
         else:
-            va = naver_vision_analyzer.analyze_product_image(product_id)
+            # 텍스트 호출과 같은 endpoint 사용 — 11 GPU 분산
+            va = naver_vision_analyzer.analyze_product_image(product_id, url=url or use_url)
             if va.get('ok'):
                 vision_result = va.get('analysis')
                 vision_meta = {
