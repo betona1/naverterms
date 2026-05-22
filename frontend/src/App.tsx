@@ -3,7 +3,7 @@ import { useTheme } from './hooks/useTheme';
 import TopNav from './components/TopNav';
 import StoreSettingsModal from './components/smartstore/StoreSettingsModal';
 import PowerControlModal from './components/PowerControlModal';
-import GpuMonitorModal from './components/GpuMonitorModal';
+import UnifiedWorkerModal from './components/UnifiedWorkerModal';
 import NaverTermsPage from './pages/NaverTermsPage';
 import NaverResultsPage from './pages/NaverResultsPage';
 import NaverRankPage from './pages/NaverRankPage';
@@ -133,7 +133,7 @@ export default function App() {
         <PowerControlModal onClose={() => setShowPowerControl(false)} />
       )}
       {showGpuMonitor && (
-        <GpuMonitorModal onClose={() => setShowGpuMonitor(false)} />
+        <UnifiedWorkerModal onClose={() => setShowGpuMonitor(false)} />
       )}
     </div>
   );

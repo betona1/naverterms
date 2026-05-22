@@ -17,6 +17,7 @@ django.setup()
 
 from django.db import connections
 from smartstore import missing_attrs_service
+from smartstore.worker_log_handler import WorkerLog
 
 
 def main():
@@ -29,6 +30,13 @@ def main():
     args = ap.parse_args()
 
     skip_set = {int(x) for x in args.skip_stores.split(',') if x.strip()}
+
+    wl = WorkerLog(
+        f'register_auto_candidates' + (f'_w{args.offset}' if args.total > 1 else ''),
+        name=f'상품 자동등록' + (f' (w{args.offset}/{args.total})' if args.total > 1 else ''),
+    )
+    wl.start(meta={'limit': args.limit, 'offset': args.offset, 'total': args.total,
+                   'skip_stores': args.skip_stores})
 
     # 1) summary 에서 자동 후보 있는 SKU 선택 (가벼움)
     with connections['myproduct'].cursor() as c:
@@ -49,9 +57,11 @@ def main():
 
     if not sku_keys:
         print('[load] no targets')
+        wl.done('대상 SKU 없음')
         return
 
     print(f'[load] target SKUs: {len(sku_keys):,}')
+    wl.heartbeat(f'대상 SKU {len(sku_keys):,}건 로드')
 
     # 2) 각 SKU 의 자동 후보 attribute_seq + recommended_value 조회 (SKU 별 lookup, index 사용)
     sku_list = []
@@ -95,15 +105,24 @@ def main():
             err = r.get('error', '?')
             if len(fail_samples) < 10:
                 fail_samples.append(f'{seller}: {err[:150]}')
+            wl.error(f'{seller}: {err[:150]}', meta={'sku': seller, 'store_id': sid})
 
         if i % args.print_every == 0 or i == len(sku_list):
             elapsed = time.time() - start
             rate = i / max(elapsed, 0.001)
+            wl.heartbeat(
+                f'{i}/{len(sku_list)} 처리 — OK {total_ok} 실패 {total_fail} 속성 {total_attrs} ({rate:.1f}/s)',
+                meta={'progress': i, 'total': len(sku_list), 'ok': total_ok, 'fail': total_fail,
+                      'attrs': total_attrs, 'rate_per_sec': round(rate, 1)},
+            )
             eta = (len(sku_list) - i) / max(rate, 0.001)
             print(f'  [{i}/{len(sku_list)}] OK {total_ok} FAIL {total_fail} attrs {total_attrs} | {rate:.2f}/s ETA={eta/60:.1f}분')
 
     elapsed = (time.time() - start) / 60
+    summary = f'완료 — OK {total_ok:,} / FAIL {total_fail:,} attrs {total_attrs:,} ({elapsed:.1f}분)'
     print(f'\n=== DONE === SKU OK {total_ok:,} / FAIL {total_fail:,}  attrs {total_attrs:,}  경과 {elapsed:.1f}분')
+    wl.done(summary, meta={'ok': total_ok, 'fail': total_fail, 'attrs': total_attrs,
+                           'elapsed_min': round(elapsed, 1)})
     if fail_samples:
         print('샘플 에러:')
         for e in fail_samples:
@@ -111,4 +130,9 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except Exception as e:
+        from smartstore.worker_log_handler import WorkerLog as _WL
+        _WL('register_auto_candidates').dead(f'예외: {e}')
+        raise

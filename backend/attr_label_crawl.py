@@ -26,6 +26,7 @@ os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
 django.setup()
 
 from django.db import connections
+from smartstore.worker_log_handler import WorkerLog
 from smartstore.store_collector import (
     _create_driver, _login, _close_popups, _switch_store,
     _get_store_list, _ensure_display, _get_display_env, _safe_quit_driver,
@@ -284,6 +285,8 @@ def login_and_navigate(driver, login_id, store_pw, store_name, display_env):
 
 
 def main():
+    wl = WorkerLog('attr_label_crawl', name='속성 라벨 크롤')
+    wl.start()
     ap = argparse.ArgumentParser()
     ap.add_argument('--limit', type=int, default=0)
     ap.add_argument('--force', action='store_true', help='이미 OK 처리된 카테고리도 재수집')
@@ -375,4 +378,11 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+        from smartstore.worker_log_handler import WorkerLog as _WL
+        _WL('attr_label_crawl').done('완료')
+    except Exception as _e:
+        from smartstore.worker_log_handler import WorkerLog as _WL
+        _WL('attr_label_crawl').dead(f'예외: {_e}')
+        raise

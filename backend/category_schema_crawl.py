@@ -31,6 +31,7 @@ os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
 django.setup()
 
 from django.db import connections
+from smartstore.worker_log_handler import WorkerLog
 
 from smartstore.store_collector import (
     _create_driver, _login, _close_popups, _switch_store,
@@ -411,6 +412,8 @@ def save_to_db(category_id, item, data, now):
 
 
 def main():
+    wl = WorkerLog('category_schema_crawl', name='카테고리 스키마 크롤')
+    wl.start()
     ap = argparse.ArgumentParser()
     ap.add_argument('--limit', type=int, default=0)
     ap.add_argument('--login-id', default='')
@@ -455,4 +458,11 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+        from smartstore.worker_log_handler import WorkerLog as _WL
+        _WL('category_schema_crawl').done('완료')
+    except Exception as _e:
+        from smartstore.worker_log_handler import WorkerLog as _WL
+        _WL('category_schema_crawl').dead(f'예외: {_e}')
+        raise
