@@ -188,6 +188,13 @@ _SYSTEM_PROMPT = f"""당신은 네이버 쇼핑 상품명 SEO 전문가입니다
 - 롱테일 키워드 조합 우선 (메인키워드 단독보다 세부키워드 조합이 노출 유리)
 - 핵심 정보는 앞쪽 25자 안에 배치
 
+[색상 규칙 — 매우 중요]
+- 입력에 "⭐ 상품 옵션1번 색상(필수반영): X" 가 있으면 **반드시 X** 를 색상으로 사용
+- 그게 없고 비전이 추측한 색상만 있을 때:
+  * 원본 상품명/카테고리/키워드에 다른 색상 단어가 없으면 **색상 단어를 상품명에 넣지 마**
+  * 비전 추측만으로 색상 박는 건 금지 (오류 위험)
+- 비전 색상과 옵션 색상이 다르면 옵션 색상이 정답
+
 [절대 금지]
 - 수식어: "고급", "프리미엄", "최고급", "명품급"
 - 홍보문구: "인기", "베스트", "베스트셀러", "1위", "BEST", "신상", "신상품"
@@ -217,12 +224,176 @@ _SYSTEM_PROMPT = f"""당신은 네이버 쇼핑 상품명 SEO 전문가입니다
 """
 
 
+# ── 카테고리 타입 추론 + 카테고리별 룰 ───────────────────────
+
+def _infer_category_type(category_name: str | None) -> str:
+    """category_name 의 1~2 depth 보고 카테고리 타입 추론.
+    반환: 'apparel' / 'food' / 'kitchen' / 'living' / 'beauty' / 'electronics' / 'baby' / 'pet' / 'sports' / 'office' / 'general'
+    """
+    if not category_name:
+        return 'general'
+    s = category_name.lower()
+    # 의류 / 패션
+    if any(k in category_name for k in ('패션의류', '의류>', '아우터', '상의', '하의', '원피스', '점퍼', '자켓', '코트', '니트', '셔츠', '티셔츠', '드레스', '바지')):
+        return 'apparel'
+    if any(k in category_name for k in ('가방', '잡화', '신발', '시계', '주얼리', '액세서리')):
+        return 'fashion_acc'
+    # 식품
+    if any(k in category_name for k in ('식품', '음료', '건강식품', '간식', '농수산')):
+        return 'food'
+    # 주방
+    if any(k in category_name for k in ('주방용품', '주방>', '식기', '조리도구', '냄비', '프라이팬')):
+        return 'kitchen'
+    # 화장품/뷰티
+    if any(k in category_name for k in ('화장품', '뷰티', '미용', '스킨케어', '메이크업')):
+        return 'beauty'
+    # 가전
+    if any(k in category_name for k in ('가전', 'TV>', '냉장고', '세탁기', '컴퓨터', '노트북', '스마트폰', '디지털')):
+        return 'electronics'
+    # 출산/유아
+    if any(k in category_name for k in ('출산', '유아', '아기', '아동', '베이비')):
+        return 'baby'
+    # 반려동물
+    if any(k in category_name for k in ('반려', '강아지', '고양이', '펫', '애견')):
+        return 'pet'
+    # 스포츠
+    if any(k in category_name for k in ('스포츠', '레저', '운동', '캠핑', '낚시', '자전거', '골프')):
+        return 'sports'
+    # 사무용품
+    if any(k in category_name for k in ('사무용품', '문구', '도서')):
+        return 'office'
+    # 생활용품
+    if any(k in category_name for k in ('생활/건강', '생활용품', '욕실', '세제', '정리')):
+        return 'living'
+    return 'general'
+
+
+_CATEGORY_PROMPTS: dict[str, str] = {
+    'apparel': """
+[패션의류 전용 룰 — 매우 중요]
+- 필드 순서: [브랜드] [성별] [시즌(선택)] [소재(선택)] [상품유형] [색상] [사이즈(선택)] [핏/디테일(선택)]
+- 좋은 예: "유니클로 남성 여름 린넨 반팔 셔츠 네이비 L 루즈핏"
+- 좋은 예: "여성 가을 면 혼방 후드 자켓 블랙 오버핏"
+- 성별: 원본/카테고리에서 명확하면 반드시 명시. 불명확하면 생략 (혼성 표기 금지)
+- 시즌: 1개만 — '봄가을' 같은 합성은 OK. "봄,가을,겨울" 동시 나열 금지
+- 사이즈: 원본/옵션에 명시되어 있으면 끝쪽에 추가, 추측 금지
+- 핏: 원본/비전에 있을 때만 ("루즈핏/오버핏/슬림핏/레귤러핏") — 추측 금지
+- 소매 길이(반팔/긴팔/민소매): 원본에 명시되어 있을 때만 (사진은 신뢰도 낮음)
+""",
+    'fashion_acc': """
+[패션잡화 전용 룰]
+- 필드 순서: [브랜드] [성별/연령] [재질] [상품유형] [색상] [사이즈/용량]
+- 예: "닥스 남성 가죽 장지갑 블랙"
+- 예: "여성 캔버스 토트백 베이지 대용량"
+""",
+    'food': """
+[식품 전용 룰]
+- 필드 순서: [브랜드/생산자] [상품명] [원재료/원산지] [중량] [패키지 수량] [용도]
+- 예: "정관장 홍삼정 6년근 100g 선물세트"
+- 예: "지리산 9회 용융죽염 300g 고체 미네랄"
+- "국산/국내산" 명시되어 있으면 반드시 포함
+- 신선식품: 원산지/등급 우선
+""",
+    'kitchen': """
+[주방용품 전용 룰]
+- 필드 순서: [브랜드] [재질] [상품유형] [용량/사이즈] [패키지 수량] [색상] [용도]
+- 예: "락앤락 스테인리스 텀블러 500ml 2개입 보온"
+- 예: "테팔 인덕션 프라이팬 28cm 논스틱"
+- 재질이 중요 — 명시되어 있으면 반드시 포함 (스테인리스/유리/실리콘/도자기)
+""",
+    'living': """
+[생활용품 전용 룰]
+- 필드 순서: [브랜드] [재질] [상품명] [용량/사이즈] [패키지 수량] [용도/장소]
+- 예: "옥시 표백제 1.5L 4개입 흰빨래용"
+- 예: "디플로 욕실 미끄럼방지 매트 그레이 60x40"
+""",
+    'beauty': """
+[뷰티/화장품 전용 룰]
+- 필드 순서: [브랜드] [라인/시리즈] [상품유형] [용량] [효능/기능]
+- 예: "이니스프리 그린티 세럼 80ml 수분"
+- 효능 어뷰징 금지 ("주름개선/미백" 류는 식약처 인증 표기 있는 경우만)
+""",
+    'electronics': """
+[가전/디지털 전용 룰]
+- 필드 순서: [브랜드] [모델명/코드] [상품유형] [핵심 스펙] [색상]
+- 예: "삼성 BESPOKE 비스포크 냉장고 4도어 875L 화이트"
+- 예: "LG 그램 17 노트북 i7 16GB 512GB 실버"
+- 모델명 정확 표기 (예: BR-300 같은 코드)
+""",
+    'baby': """
+[출산/유아 전용 룰]
+- 필드 순서: [브랜드] [개월수/연령] [상품유형] [재질] [색상] [사이즈]
+- 예: "맘앤리틀 0-12개월 신생아 모자 면 베이지"
+- 안전/친환경 단어 OK ("유기농/오가닉/안전인증")
+""",
+    'pet': """
+[반려동물 전용 룰]
+- 필드 순서: [브랜드] [대상(강아지/고양이)] [상품유형] [재질/맛] [중량/사이즈]
+- 예: "로얄캐닌 강아지 사료 어덜트 7kg"
+- 대상 종 명확 표기
+""",
+    'sports': """
+[스포츠/레저 전용 룰]
+- 필드 순서: [브랜드] [성별(선택)] [종목/용도] [상품유형] [재질/사이즈] [색상]
+- 예: "콜핑 남성 등산화 방수 280mm 블랙"
+- 예: "캠핑 4인용 텐트 방수 차박 텐트 그레이"
+""",
+    'office': """
+[사무용품/문구 전용 룰]
+- 필드 순서: [브랜드] [상품유형] [규격/사이즈] [수량] [색상] [용도]
+- 예: "모나미 153 볼펜 검정 0.7mm 12자루"
+- 예: "옥스포드 A4 노트 80매 라인 5권"
+""",
+}
+
+
+def _fetch_relevance_cache(product_id: int) -> tuple[list, list] | None:
+    """GPU 검증 캐시 가장 최근 1건 — 이 상품의 가장 큰 키워드 셋 우선.
+    반환: (relevant, irrelevant) 또는 None.
+    """
+    try:
+        from django.db import connections as _conns
+        import json as _json
+        with _conns['naverdb'].cursor() as cur:
+            cur.execute(
+                "SELECT relevant_keywords, irrelevant_keywords FROM keyword_relevance_cache "
+                "WHERE product_id=%s ORDER BY fetched_at DESC LIMIT 1",
+                [product_id],
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            rel = row[0] if isinstance(row[0], list) else (_json.loads(row[0]) if row[0] else [])
+            irrel = row[1] if isinstance(row[1], list) else (_json.loads(row[1]) if row[1] else [])
+            return rel or [], irrel or []
+    except Exception:
+        return None
+
+
 def _build_user(p: dict, vision: dict | None = None) -> str:
     parts = [f'원본 상품명: {p.get("product_name") or ""}']
     if p.get('ai_product_name'):
         parts.append(f'11번가 AI상품명(참고만): {p["ai_product_name"]}')
+
+    # 카테고리 별 룰 — system 보다 우선되는 카테고리 특화 가이드
+    cat_type = _infer_category_type(p.get('category_name'))
+    cat_rule = _CATEGORY_PROMPTS.get(cat_type)
+    if cat_rule:
+        parts.append(cat_rule.strip())
+
     if p.get('category_name'):
         parts.append(f'카테고리: {p["category_name"]}')
+
+    # GPU 적합도 캐시 — 이전 검증에서 사용자가 인증한 키워드 우선 활용 + 부적합 회피
+    pid = p.get('id')
+    if pid:
+        cached = _fetch_relevance_cache(int(pid))
+        if cached:
+            rel, irrel = cached
+            if rel:
+                parts.append(f'⭐ GPU 검증 적합 키워드(이 단어 우선 활용): {", ".join(rel[:20])}')
+            if irrel:
+                parts.append(f'🚫 GPU 검증 부적합 키워드(절대 사용 금지): {", ".join(irrel[:20])}')
     if p.get('brand'):
         parts.append(f'브랜드: {p["brand"]}')
     if p.get('manufacturer'):
@@ -232,11 +403,36 @@ def _build_user(p: dict, vision: dict | None = None) -> str:
     if p.get('keywords'):
         parts.append(f'키워드: {p["keywords"]}')
 
+    # 옵션1번 색상 — 공급사 등록 정보로 신뢰도 높음. 비전 색상보다 우선.
+    try:
+        from . import naver_my_product_service as _s
+        opt_color = _s._first_option_color(p.get('option1_name'), p.get('option1_values'))
+        if opt_color:
+            parts.append(f'⭐ 상품 옵션1번 색상(필수반영): {opt_color}')
+    except Exception:
+        opt_color = None
+
+    # 상세 페이지 추출 키워드 (있을 때만, 상위 12개) — 사진에 안 보이는 정보 (소재/스펙) 보강
+    detail_html = p.get('detail_html')
+    if detail_html:
+        try:
+            from . import naver_my_product_service as _s
+            dks = _s._extract_html_keywords(detail_html, max_words=12)
+            if dks:
+                parts.append(f'상세페이지 키워드: {", ".join(dks)}')
+        except Exception:
+            pass
+
     # 이미지 분석 결과(있을 때만) — 비전 모델이 본 시각 속성
     if vision:
-        v_lines = ['', '── 이미지 분석 결과(비전 모델) ──']
+        v_lines = ['', '── 이미지 분석 결과(비전 모델) — 참고용 ──']
         if vision.get('color'):
-            v_lines.append(f'색상: {", ".join(vision["color"]) if isinstance(vision["color"], list) else vision["color"]}')
+            colors_str = ", ".join(vision["color"]) if isinstance(vision["color"], list) else vision["color"]
+            # 옵션 색상과 비전 색상 불일치 시 옵션 우선 명시
+            if opt_color and colors_str and opt_color not in colors_str:
+                v_lines.append(f'색상(비전 추측 — 옵션과 불일치, 옵션 우선): {colors_str}')
+            else:
+                v_lines.append(f'색상: {colors_str}')
         if vision.get('material'):
             v_lines.append(f'소재: {vision["material"]}')
         if vision.get('form'):
@@ -290,7 +486,8 @@ def _extract_first_line(text: str) -> str:
 def _fetch_product(product_id: int) -> dict | None:
     fields = (
         'id, product_code, product_name, ai_product_name, ai_recommended_name, '
-        'category_name, brand, manufacturer, model_name, keywords'
+        'category_name, brand, manufacturer, model_name, keywords, detail_html, '
+        'option1_name, option1_values'
     )
     with connections['naverdb'].cursor() as cur:
         cur.execute(f"SELECT {fields} FROM naver_my_product WHERE id=%s", [product_id])

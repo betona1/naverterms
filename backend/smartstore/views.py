@@ -1125,10 +1125,55 @@ class NaverMyProductClearVisionView(APIView):
 
 
 class NaverMyProductKeywordPoolView(APIView):
-    """편집 모달용 키워드 풀 (비전 + 11번가 ad_keyword + naver preset)."""
+    """편집 모달용 키워드 풀 (비전 + 11번가 ad_keyword + naver preset + 조회수 캐시)."""
     def get(self, request, pk):
         r = naver_my_product_service.get_keyword_pool(int(pk))
         return Response(r, status=200 if r.get('ok') else 404)
+
+
+class NaverKeywordRelatedView(APIView):
+    """GET /api/smartstore/naver-keyword-related/?seed=후드&limit=30
+    또는 ?seeds=후드,자켓,여성&limit=1500  (multi-seed 대량 수집)
+    네이버 검색광고 연관키워드 — 조회수 desc 정렬."""
+    def get(self, request):
+        seeds_str = (request.query_params.get('seeds') or '').strip()
+        seed = (request.query_params.get('seed') or '').strip()
+        from . import keyword_volume_service as kvs
+        if seeds_str:
+            seeds = [s.strip() for s in seeds_str.split(',') if s.strip()]
+            limit = int(request.query_params.get('limit', 1500))
+            items = kvs.get_related_keywords_multi(seeds, limit=limit)
+            return Response({'ok': True, 'seeds': seeds, 'items': items})
+        if not seed:
+            return Response({'ok': False, 'error': 'seed or seeds required'}, status=400)
+        limit = int(request.query_params.get('limit', 30))
+        items = kvs.get_related_keywords(seed, limit=limit)
+        return Response({'ok': True, 'seed': seed, 'items': items})
+
+
+class NaverKeywordRelevanceView(APIView):
+    """POST /api/smartstore/naver-products/<pk>/keyword-relevance/
+    body: { keywords: [...], force?: bool }
+    LLM 으로 키워드 적합도 검증 — 캐시 hit 시 즉시. naver_my_product 컨텍스트 활용.
+    """
+    def post(self, request, pk):
+        d = request.data or {}
+        kws = d.get('keywords') or []
+        force = bool(d.get('force', False))
+        if not kws or not isinstance(kws, list):
+            return Response({'ok': False, 'error': 'keywords (list) required'}, status=400)
+        from . import keyword_relevance_service as krs
+        return Response(krs.get_relevance(int(pk), kws, force=force))
+
+
+class NaverKeywordHotView(APIView):
+    """GET /api/smartstore/naver-keyword-hot/?category=패션의류>여성의류
+    카테고리 핫 키워드 (캐시 — 캐시 없으면 빈 배열)."""
+    def get(self, request):
+        cat = request.query_params.get('category') or ''
+        from . import keyword_volume_service as kvs
+        items = kvs.get_category_hot_keywords(cat, limit=int(request.query_params.get('limit', 20)))
+        return Response({'ok': True, 'category': cat, 'items': items})
 
 
 class NaverMyProductExcelView(APIView):

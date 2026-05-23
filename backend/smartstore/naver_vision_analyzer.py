@@ -40,21 +40,68 @@ IMAGE_MAX_BYTES = 5 * 1024 * 1024  # 5MB 안전 한도
 _VISION_PROMPT = """당신은 한국 이커머스 상품 이미지 분석 전문가입니다.
 주어진 상품 사진을 보고 네이버 쇼핑 상품명 작성에 도움될 시각적 속성을 JSON으로만 출력하세요.
 
-추출 항목:
-- color: 주요 색상 1~3개 (한글, 예: ["블랙", "화이트"])
-- material: 소재/재질 (한글, 예: "스테인리스" / "면" / "플라스틱" / null)
-- form: 상품 형태/유형 (한글, 예: "텀블러" / "후크" / "캐리어" / null)
-- package_qty: 패키지 구성 정보 (예: "1세트", "10개입", "2팩", null)
-- key_features: 눈에 띄는 특징 3~6개 한글 키워드 배열 (예: ["접이식", "휴대용", "이중구조"])
-- readable_text: 이미지 안에서 보이는 글자 (모델명/용량/숫자 등, 그대로 1줄, 없으면 null)
+[추출 항목]
+- color: 주요 색상 1~3개 — **반드시 한국어 단어만** (예: ["블랙", "화이트", "네이비"])
+- material: 소재/재질 1개 — **다음 중에서 가장 정확한 것 하나만 선택, 없으면 null**:
+  * 의류: 면 / 린넨 / 폴리에스터 / 나일론 / 울 / 데님 / 가죽 / 합성가죽 / 스판덱스 / 니트 / 혼방
+  * 식기/주방: 스테인리스 / 알루미늄 / 유리 / 도자기 / 실리콘 / 트라이탄
+  * 일반: 플라스틱 / 종이 / 페이퍼 / 목재 / 금속 / 카펫 / 메쉬
+  * 추측 금지 — 명확히 안 보이면 null
+- form: 상품 형태/유형 1개 — **한국어 단어만** (예: "자켓", "텀블러", "후크", "캐리어", "신발")
+- package_qty: 패키지 구성 정보 — 한국어 (예: "1세트", "10개입", "2팩", null)
+- key_features: 눈에 띄는 특징 3~6개 — **반드시 한국어 단어/짧은 합성어만**
+  * 좋은 예: ["접이식", "휴대용", "이중구조", "방수", "보온"]
+  * 절대 금지: 영어 단어("hooded", "lightweight"), 한자, 키릴문자(рукав, дом), 일본어, 구문(여러 단어 공백)
+  * 영어로 떠올랐다면 한국어로 번역: hooded→후드, lightweight→경량, loose fit→루즈핏
+- readable_text: 이미지 안에서 보이는 **모든** 글자를 줄바꿈/공백 그대로 추출.
+  * 상세 페이지 사진은 광고 문구, 카피, 소재 설명, 사이즈, 모델컷 글씨가 풍부 — 다 뽑아라
+  * 큰 카피 ("부드러운 면 혼방 자켓") + 작은 디테일 ("색상: 핑크, 사이즈: M") 모두 포함
+  * 광고 문구도 OK (홍보문구 reject 는 후처리에서)
+  * 외국어/숫자도 그대로
+  * 없으면 null. 짧게 1단어만 보이면 그것만이라도 적어라.
 
-규칙:
-- 보이지 않는/추측해야 하는 항목은 null 또는 빈 배열
-- 한국어로만 작성
-- 광고 문구/홍보 어휘는 무시
-- 출력은 JSON 한 개 객체. ```json``` fence 도 붙이지 말 것. 설명 문장 금지.
+[절대 규칙]
+1. **모든 텍스트 필드는 한국어만**. 영어/한자/일본어/키릴 단어는 출력 금지.
+   (단 readable_text 와 브랜드 로고 영문은 예외 — 그대로)
+2. 추측하지 말 것 — 명확히 안 보이면 null 또는 빈 배열
+3. 광고 문구/홍보 어휘는 무시
+4. 출력은 JSON 한 객체만. ```json``` fence 금지. 설명 문장 금지.
 
 JSON:"""
+
+
+_HANGUL_RE = re.compile(r'[가-힣]')
+
+
+def _is_korean_token(s: str) -> bool:
+    """한국어 단어 검증 — 한글 1자 이상 + 영어 단어 4자 이상은 reject.
+    합성어/짧은 영문 약어(B, S, L, 3D, 4K) 는 허용.
+    """
+    if not s or not isinstance(s, str):
+        return False
+    s = s.strip()
+    if not s:
+        return False
+    # 공백 포함 = 구문 → reject
+    if ' ' in s:
+        return False
+    has_hangul = bool(_HANGUL_RE.search(s))
+    # 영어 4자 이상 단독은 reject
+    if not has_hangul:
+        # 짧은 ascii (1~3자, 사이즈/모델 코드용) 만 허용
+        if all(c.isascii() and (c.isalnum() or c in '-_') for c in s) and len(s) <= 3:
+            return True
+        return False
+    # 한자/일본어/키릴 문자 reject
+    for c in s:
+        cp = ord(c)
+        if 0x4E00 <= cp <= 0x9FFF:  # 한자
+            return False
+        if 0x3040 <= cp <= 0x30FF:  # 가나
+            return False
+        if 0x0400 <= cp <= 0x04FF:  # 키릴
+            return False
+    return True
 
 
 def _download_image_b64(url: str) -> str | None:
@@ -117,7 +164,7 @@ def _parse_json(text: str) -> dict | None:
 
 
 def _normalize(data: dict) -> dict:
-    """필드 정규화 — 누락 키는 None/[]로 채움."""
+    """필드 정규화 + 한국어 필터링."""
     out = {
         'color': data.get('color'),
         'material': data.get('material'),
@@ -132,8 +179,24 @@ def _normalize(data: dict) -> dict:
     if isinstance(out['key_features'], str):
         out['key_features'] = [c.strip() for c in re.split(r'[,/]', out['key_features']) if c.strip()]
     # 빈 문자열 → None
-    for k in ('material', 'form', 'package_qty', 'readable_text'):
+    for k in ('material', 'form', 'package_qty'):
         if out[k] in ('', '없음', 'null', 'None', None):
+            out[k] = None
+    # color / key_features — 한국어 필터링
+    if isinstance(out['color'], list):
+        out['color'] = [c for c in out['color'] if _is_korean_token(c)]
+    if isinstance(out['key_features'], list):
+        out['key_features'] = [k for k in out['key_features'] if _is_korean_token(k)]
+        # 비전 신뢰도 낮은 항목 reject — 의류 소매길이는 사진으로 자주 오판 (반팔/긴팔 혼동)
+        # 원본 상품명에 명시 안 됐으면 이런 추측은 위험
+        UNRELIABLE_FEATURES = {
+            '반팔', '긴팔', '민소매', '7부', '9부',  # 소매 — 사진 각도 의존
+        }
+        out['key_features'] = [k for k in out['key_features'] if k not in UNRELIABLE_FEATURES]
+    # material / form 도 한국어만
+    for k in ('material', 'form'):
+        v = out[k]
+        if v and not _is_korean_token(v):
             out[k] = None
     return out
 
@@ -143,7 +206,7 @@ def _normalize(data: dict) -> dict:
 def _fetch_product_image(product_id: int) -> dict | None:
     with connections['naverdb'].cursor() as cur:
         cur.execute(
-            "SELECT id, image_large, image_medium, image_small, image_analysis "
+            "SELECT id, image_large, image_medium, image_small, image_analysis, detail_html "
             "FROM naver_my_product WHERE id=%s",
             [product_id],
         )
@@ -156,6 +219,7 @@ def _fetch_product_image(product_id: int) -> dict | None:
             'image_medium': row[2],
             'image_small': row[3],
             'image_analysis': row[4],
+            'detail_html': row[5],
         }
 
 
@@ -187,11 +251,31 @@ def get_cached_analysis(product_id: int) -> dict | None:
 
 # ── Public ─────────────────────────────────────────
 
+def _extract_detail_image_urls(html: str | None, max_urls: int = 3) -> list[str]:
+    """detail_html 안의 <img src="..."> 추출 (광고/배너 우선, 최대 N개)."""
+    if not html:
+        return []
+    urls = re.findall(r'<img[^>]*\s(?:data-original|data-src|src)="([^"]+)"', html)
+    out: list[str] = []
+    seen: set = set()
+    for u in urls:
+        if not u or u.startswith('data:'):
+            continue
+        if u in seen:
+            continue
+        seen.add(u)
+        out.append(u)
+        if len(out) >= max_urls:
+            break
+    return out
+
+
 def analyze_product_image(product_id: int,
                           force: bool = False,
                           url: str | None = None,
                           models: list[str] | None = None) -> dict:
     """상품 이미지 분석 (캐시 우선).
+    image_large 1차 분석 + detail_html 안의 추가 이미지 OCR (readable_text 만 흡수).
 
     Args:
         product_id: naver_my_product.id
@@ -235,6 +319,34 @@ def analyze_product_image(product_id: int,
             continue
 
         analysis = _normalize(data)
+
+        # detail_html 안의 추가 이미지들도 OCR — readable_text 만 흡수
+        # (form/color/material 등은 사진마다 달라질 수 있어 건드리지 않음)
+        detail_urls = _extract_detail_image_urls(p.get('detail_html'), max_urls=3)
+        # 메인 image_large 와 동일한 URL 제외
+        detail_urls = [u for u in detail_urls if u != img_url]
+        extra_texts: list[str] = []
+        if analysis.get('readable_text'):
+            extra_texts.append(analysis['readable_text'])
+        for du in detail_urls:
+            db64 = _download_image_b64(du)
+            if not db64:
+                continue
+            try:
+                draw = _call_ollama_vision(db64, model, use_url)
+            except Exception:
+                continue
+            ddata = _parse_json(draw)
+            if not ddata:
+                continue
+            rt = ddata.get('readable_text')
+            if rt and isinstance(rt, str) and rt.strip() and rt.strip().lower() not in ('null', 'none'):
+                extra_texts.append(rt.strip())
+
+        if extra_texts:
+            # 합쳐서 저장 — 모달의 detail_keywords 처럼 토큰 풀에 활용 가능
+            analysis['readable_text'] = ' '.join(extra_texts)[:2000]
+
         _save_analysis(product_id, analysis)
         elapsed_ms = int((time.time() - t0) * 1000)
         return {
@@ -244,6 +356,7 @@ def analyze_product_image(product_id: int,
             'model': model,
             'elapsed_ms': elapsed_ms,
             'image_url': img_url,
+            'detail_image_count': len(detail_urls),
         }
 
     return {'ok': False, 'error': last_err or 'all_models_failed', 'image_url': img_url}

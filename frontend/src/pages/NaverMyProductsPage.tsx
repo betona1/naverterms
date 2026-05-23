@@ -5,9 +5,10 @@ import {
   startImportFrom11st, fetchImportStatus, generateNaverName,
   enqueueGenerate, fetchQueueStatus, moveNaverProducts,
   fetchNaverProductDetail, patchNaverProduct, clearVisionCache,
-  fetchKeywordPool,
+  fetchKeywordPool, fetchRelatedKeywords, fetchRelatedKeywordsMulti, fetchKeywordRelevance,
   type NaverProductItem, type NaverProductFolder, type ImportState,
   type QueueStatus, type NaverProductDetail, type KeywordPool,
+  type RelatedKeyword,
 } from '../api/naverProductApi';
 
 const POLL_MS = 1500;
@@ -729,6 +730,7 @@ function FolderMoveModal({
 
 // ── 상세/편집 모달 ──────────────────────────────────────────
 
+
 function ProductDetailModal({
   productId, folders, dark, onClose, onSaved,
 }: {
@@ -743,32 +745,31 @@ function ProductDetailModal({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [genBusy, setGenBusy] = useState(false);
-  const [clearBusy, setClearBusy] = useState(false);
+  const [visionBusy, setVisionBusy] = useState(false);
   const [msg, setMsg] = useState('');
-  const [expanded, setExpanded] = useState(false);
-
-  // 키워드 추가 입력
+  const [expanded, setExpanded] = useState(true);
   const [newKw, setNewKw] = useState('');
-  const [extraKws, setExtraKws] = useState<string[]>([]);  // 사용자가 직접 추가한 칩
-  // 선택된 키워드 (포함됨, 순서 유지)
-  const [selectedOrder, setSelectedOrder] = useState<string[]>([]);
-  // base 텍스트 (브랜드+핵심명사) — 기본은 brand + form
-  const [baseText, setBaseText] = useState('');
-
-  // 편집 가능 필드 (form state)
-  const [form, setForm] = useState({
-    product_name: '',
-    naver_product_name: '',
-    edited_product_name: '',
-    naver_keywords: '',
-    keywords: '',
-    category_name: '',
-    brand: '',
-    manufacturer: '',
-    origin: '',
-    model_name: '',
-    folder_id: 1,
-  });
+  const [relatedKws, setRelatedKws] = useState<RelatedKeyword[]>([]);
+  const [relatedLoading, setRelatedLoading] = useState(false);
+  // 정렬: 'pool' = 풀 그대로, 'vol_desc' = 조회수↓, 'vol_asc' = 조회수↑
+  const [poolSort, setPoolSort] = useState<'pool' | 'vol_desc' | 'vol_asc'>('pool');
+  const [minVol, setMinVol] = useState<number>(0);
+  const [hideHighComp, setHideHighComp] = useState(false);
+  // GPU 키워드 적합도
+  const [relevantSet, setRelevantSet] = useState<Set<string>>(new Set());
+  const [irrelevantSet, setIrrelevantSet] = useState<Set<string>>(new Set());
+  const [relevanceBusy, setRelevanceBusy] = useState(false);
+  const [hideIrrelevant, setHideIrrelevant] = useState(false);
+  // 자동 사입 모달
+  const [autoFillOpen, setAutoFillOpen] = useState(false);
+  const [afMin, setAfMin] = useState(1000);
+  const [afMax, setAfMax] = useState(50000);
+  const [afExcludeHigh, setAfExcludeHigh] = useState(true);
+  const [afStrategy, setAfStrategy] = useState<'desc' | 'longtail'>('desc');
+  // 자체 추가 칩 + comment 만 form 으로
+  const [extraKws, setExtraKws] = useState<string[]>([]);
+  const [naverName, setNaverName] = useState('');
+  const [comment, setComment] = useState('');
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -779,27 +780,33 @@ function ProductDetailModal({
       ]);
       setD(r);
       setPool(p && p.ok ? p : null);
-      setForm({
-        product_name: r.product_name || '',
-        naver_product_name: r.naver_product_name || '',
-        edited_product_name: r.edited_product_name || '',
-        naver_keywords: r.naver_keywords || '',
-        keywords: r.keywords || '',
-        category_name: r.category_name || '',
-        brand: r.brand || '',
-        manufacturer: r.manufacturer || '',
-        origin: r.origin || '',
-        model_name: r.model_name || '',
-        folder_id: r.folder_id || 1,
-      });
-      // base = brand + vision_meta.form (default), 비면 product_name 앞 부분
-      const brand = r.brand || r.manufacturer || '';
-      const form_ = p?.vision_meta?.form || '';
-      const composed = [brand, form_].filter(Boolean).join(' ').trim();
-      setBaseText(composed || (r.product_name || '').slice(0, 20));
-      // selectedOrder 는 빈 상태로 시작 (사용자가 클릭으로 채움)
-      setSelectedOrder([]);
+      setNaverName(r.naver_product_name || '');
+      setComment(((r as unknown) as { comment?: string }).comment || '');
       setExtraKws([]);
+      // 연관키워드 — multi-seed 대량 수집 (네이버 검색광고 한 호출에 ~1000개)
+      const isHan = (s: string) => /[가-힣]/.test(s);
+      const tokens = (r.product_name || '')
+        .split(/[\s/,()[\]\-_+]+/)
+        .map(t => t.trim())
+        .filter(t => t.length >= 2 && isHan(t));
+      // dedupe + 상위 5개 (API 한도)
+      const seedSet = new Set<string>();
+      const seeds: string[] = [];
+      for (const t of tokens) {
+        if (seedSet.has(t.toLowerCase())) continue;
+        seedSet.add(t.toLowerCase());
+        seeds.push(t);
+        if (seeds.length >= 5) break;
+      }
+      if (seeds.length > 0) {
+        setRelatedLoading(true);
+        fetchRelatedKeywordsMulti(seeds, 1500)
+          .then(res => setRelatedKws(res.items || []))
+          .catch(() => setRelatedKws([]))
+          .finally(() => setRelatedLoading(false));
+      } else {
+        setRelatedKws([]);
+      }
     } finally {
       setLoading(false);
     }
@@ -809,67 +816,233 @@ function ProductDetailModal({
 
   const flash = (m: string) => { setMsg(m); window.setTimeout(() => setMsg(prev => prev === m ? '' : prev), 3500); };
 
-  // ── 키워드 풀 헬퍼 ──
-  const calcBytes = (s: string) => {
-    let n = 0;
-    for (const c of s || '') n += (c >= '가' && c <= '힣') ? 2 : 1;
-    return n;
+  // 토큰화 (한글/영문/숫자 단어 단위)
+  const tokenize = (s: string | null | undefined): string[] => {
+    if (!s) return [];
+    return s.split(/[\s/,()[\]\-_]+/)
+      .map(x => x.trim())
+      .filter(t => t.length >= 1);
   };
-  const MAX_BYTES_KW = 100;
 
-  // 동적 미리보기: baseText + 선택된 키워드 들 (100바이트 안에서 채움, ' ' 구분)
-  const buildPreview = useMemo(() => {
-    const used = new Set<string>();
-    const norm = (s: string) => s.toLowerCase().trim();
-    const baseTokens = (baseText || '').split(/\s+/).filter(Boolean);
-    baseTokens.forEach(t => used.add(norm(t)));
+  // 현재 네이버상품명에 들어가있는 토큰 set
+  const currentTokens = useMemo(() => {
+    const set = new Set<string>();
+    tokenize(naverName).forEach(t => set.add(t.toLowerCase()));
+    return set;
+  }, [naverName]);
 
-    const out: string[] = [...baseTokens];
-    let bytes = calcBytes(out.join(' '));
-    for (const kw of selectedOrder) {
-      const k = norm(kw);
-      if (!k || used.has(k)) continue;
-      const add = (out.length > 0 ? 1 : 0) + calcBytes(kw);
-      if (bytes + add > MAX_BYTES_KW) continue;
-      out.push(kw);
-      used.add(k);
-      bytes += add;
+  const isSelected = (kw: string) => currentTokens.has(kw.toLowerCase());
+
+  // 키워드의 모든 음절이 상품명 토큰들의 조합으로 cover 되는가? (그리디 분해)
+  // 예: 상품명 "여성 블랙 숏 점퍼" → "여성숏점퍼" = covered (이미 부분 등장)
+  const isCoveredByTokens = (kw: string): boolean => {
+    if (!kw || kw.length < 3) return false;
+    if (currentTokens.has(kw.toLowerCase())) return false; // selected = noun 으로 covered 아님 (다른 색)
+    const tokens = tokenize(naverName).map(t => t.toLowerCase());
+    if (tokens.length === 0) return false;
+    // 길이 desc 정렬 (긴 토큰 먼저 매치)
+    const sortedTokens = tokens.slice().sort((a, b) => b.length - a.length);
+    let s = kw.toLowerCase();
+    while (s.length > 0) {
+      let matched = false;
+      for (const t of sortedTokens) {
+        if (t && s.startsWith(t)) {
+          s = s.slice(t.length);
+          matched = true;
+          break;
+        }
+      }
+      if (!matched) return false;
     }
-    return out.join(' ');
-  }, [baseText, selectedOrder]);
-
-  const previewBytes = calcBytes(buildPreview);
-
-  const toggleKeyword = (kw: string) => {
-    setSelectedOrder(prev => prev.includes(kw) ? prev.filter(x => x !== kw) : [...prev, kw]);
+    return true;
   };
 
-  const applyPreviewToForm = () => {
-    if (!buildPreview.trim()) return;
-    setForm(s => ({ ...s, naver_product_name: buildPreview }));
-    flash(`✅ 미리보기 → 네이버 상품명 (${buildPreview.length}자/${previewBytes}B)`);
+  // 키워드 풀 — 모든 후보 dedupe (case-insensitive)
+  const pooledKeywords = useMemo(() => {
+    const seen = new Set<string>();
+    const result: Array<{ kw: string; source: string }> = [];
+    const add = (arr: string[] | null | undefined, source: string) => {
+      (arr || []).forEach(k => {
+        if (!k) return;
+        const key = k.toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+        result.push({ kw: k, source });
+      });
+    };
+    // 1순위: 네이버 상품명 자체 토큰 (필수, 첫 줄)
+    add(tokenize(naverName), 'naver');
+    // 2순위: 11번가 AI 상품명 토큰
+    add(tokenize(d?.ai_recommended_name || d?.ai_product_name), '11st');
+    // 3순위: 비전 features + color
+    if (pool) {
+      add(pool.vision_features, 'vision');
+      const vc = pool.vision_meta?.color;
+      if (Array.isArray(vc)) add(vc, 'vision');
+      if (pool.vision_meta?.material) add([pool.vision_meta.material], 'vision');
+      if (pool.vision_meta?.form) add([pool.vision_meta.form], 'vision');
+    }
+    // 4순위: 원본 검색태그 (detail 은 별도 섹션으로 분리)
+    add(pool?.preset_keywords, 'preset');
+    // 5순위: 11번가 best/good/ad/functional
+    add(pool?.best_picks, 'best');
+    add(pool?.good_picks, 'good');
+    add(pool?.ad_keywords, 'ad');
+    add(pool?.functional_keywords, 'func');
+    // 6순위: 저장된 네이버 키워드
+    add(pool?.naver_keywords, 'saved');
+    // 7순위: 사용자 직접 추가
+    add(extraKws, 'extra');
+    return result;
+  }, [naverName, d, pool, extraKws]);
+
+  // 상세 페이지 추출 키워드 — 별도 표시 (메인 풀과 분리)
+  const detailKwsList = useMemo(() => {
+    const main = new Set(pooledKeywords.map(p => p.kw.toLowerCase()));
+    return (pool?.detail_keywords || []).filter(k => !main.has(k.toLowerCase()));
+  }, [pool, pooledKeywords]);
+
+  // 연관 키워드 — 메인 풀 + 상세 모두에서 dedupe
+  const relatedKwsFiltered = useMemo(() => {
+    const seen = new Set<string>(pooledKeywords.map(p => p.kw.toLowerCase()));
+    detailKwsList.forEach(k => seen.add(k.toLowerCase()));
+    return relatedKws.filter(r => !seen.has(r.keyword.toLowerCase()));
+  }, [relatedKws, pooledKeywords, detailKwsList]);
+
+  // 조회수 helper
+  const volOf = (kw: string): number => {
+    const v = pool?.keyword_volumes?.[kw];
+    return v?.total ?? 0;
+  };
+  const compOf = (kw: string): string => pool?.keyword_volumes?.[kw]?.comp || '';
+  const fmtVol = (n: number): string => {
+    if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+    if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
+    return String(n);
+  };
+
+  // 자동 사입 — 미리보기 (pool + related 통합)
+  const autoFillCandidates = useMemo(() => {
+    type Cand = { kw: string; total: number; comp: string };
+    const all: Cand[] = [];
+    pooledKeywords.forEach(p => {
+      const v = volOf(p.kw);
+      const c = compOf(p.kw);
+      if (v >= afMin && v <= afMax && (!afExcludeHigh || c !== '높음') && !isSelected(p.kw)) {
+        all.push({ kw: p.kw, total: v, comp: c });
+      }
+    });
+    relatedKws.forEach(r => {
+      if (r.total >= afMin && r.total <= afMax && (!afExcludeHigh || r.comp !== '높음') && !isSelected(r.keyword)) {
+        // dedupe with pool
+        if (!all.find(a => a.kw.toLowerCase() === r.keyword.toLowerCase())) {
+          all.push({ kw: r.keyword, total: r.total, comp: r.comp });
+        }
+      }
+    });
+    all.sort((a, b) => afStrategy === 'desc' ? b.total - a.total : a.total - b.total);
+    return all;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pooledKeywords, relatedKws, afMin, afMax, afExcludeHigh, afStrategy, currentTokens, pool?.keyword_volumes]);
+
+  // GPU 검증 실행
+  const runRelevance = async (force = false) => {
+    if (!pool) return;
+    const allKws = pooledKeywords.map(p => p.kw).concat(detailKwsList).concat(relatedKws.map(r => r.keyword));
+    const uniq = Array.from(new Set(allKws));
+    if (uniq.length === 0) return;
+    setRelevanceBusy(true);
+    try {
+      const r = await fetchKeywordRelevance(productId, uniq, force);
+      if (r.ok) {
+        setRelevantSet(new Set(r.relevant.map(k => k.toLowerCase())));
+        setIrrelevantSet(new Set(r.irrelevant.map(k => k.toLowerCase())));
+        flash(`🧠 GPU 검증: 적합 ${r.relevant.length} / 부적합 ${r.irrelevant.length} (${r.cached ? '캐시' : r.elapsed_ms + 'ms'})`);
+      } else {
+        flash(`검증 실패: ${r.error}`);
+      }
+    } catch (e: unknown) {
+      flash(`에러: ${(e as Error).message}`);
+    } finally {
+      setRelevanceBusy(false);
+    }
+  };
+
+  const applyAutoFill = () => {
+    const adds = autoFillCandidates.filter(c => !currentTokens.has(c.kw.toLowerCase())).map(c => c.kw);
+    if (adds.length === 0) { flash('추가할 키워드 없음'); return; }
+    setSelectedOrder(prev => [...prev, ...adds]);
+    setNaverName(prev => {
+      const tokens = tokenize(prev);
+      const used = new Set(tokens.map(t => t.toLowerCase()));
+      const add: string[] = [];
+      for (const k of adds) {
+        if (used.has(k.toLowerCase())) continue;
+        used.add(k.toLowerCase());
+        add.push(k);
+      }
+      return [...tokens, ...add].join(' ');
+    });
+    flash(`🎯 ${adds.length}개 자동 추가`);
+    setAutoFillOpen(false);
+  };
+
+  // 풀 정렬/필터 적용
+  const visiblePool = useMemo(() => {
+    let arr = pooledKeywords.slice();
+    if (minVol > 0) arr = arr.filter(p => volOf(p.kw) >= minVol);
+    if (hideHighComp) arr = arr.filter(p => compOf(p.kw) !== '높음');
+    if (hideIrrelevant) arr = arr.filter(p => !irrelevantSet.has(p.kw.toLowerCase()));
+    if (poolSort === 'vol_desc') arr.sort((a, b) => volOf(b.kw) - volOf(a.kw));
+    if (poolSort === 'vol_asc')  arr.sort((a, b) => volOf(a.kw) - volOf(b.kw));
+    return arr;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pooledKeywords, poolSort, minVol, hideHighComp, hideIrrelevant, irrelevantSet, pool?.keyword_volumes]);
+
+  // 클릭 = 네이버 상품명에 자동 추가/제거
+  const toggleKw = (kw: string) => {
+    const tokens = tokenize(naverName);
+    const lc = kw.toLowerCase();
+    if (currentTokens.has(lc)) {
+      // 제거
+      const filtered = tokens.filter(t => t.toLowerCase() !== lc);
+      setNaverName(filtered.join(' '));
+    } else {
+      // 추가 (끝에)
+      setNaverName(tokens.length ? `${tokens.join(' ')} ${kw}` : kw);
+    }
   };
 
   const addExtraKw = () => {
     const k = newKw.trim();
     if (!k) return;
     if (!extraKws.includes(k)) setExtraKws(s => [...s, k]);
-    setSelectedOrder(s => s.includes(k) ? s : [...s, k]);
     setNewKw('');
+    // 추가 즉시 상품명에 반영
+    if (!currentTokens.has(k.toLowerCase())) {
+      const tokens = tokenize(naverName);
+      setNaverName(tokens.length ? `${tokens.join(' ')} ${k}` : k);
+    }
   };
 
-  const removeExtraKw = (kw: string) => {
-    setExtraKws(s => s.filter(x => x !== kw));
-    setSelectedOrder(s => s.filter(x => x !== kw));
+  const calcBytes = (s: string) => {
+    let n = 0;
+    for (const c of s || '') n += (c >= '가' && c <= '힣') ? 2 : 1;
+    return n;
   };
+  const nameBytes = calcBytes(naverName);
 
   const onSave = async () => {
     setSaving(true);
     try {
-      const r = await patchNaverProduct(productId, form);
+      const payload = {
+        naver_product_name: naverName,
+        comment: comment || null,
+        naver_keywords: extraKws.length ? extraKws.join(', ') : (pool?.naver_keywords || []).join(', '),
+      } as Partial<NaverProductDetail>;
+      const r = await patchNaverProduct(productId, payload);
       if (r.ok) {
         flash('💾 저장 완료');
-        if (r.detail) setD(r.detail);
         onSaved();
       } else {
         flash(`저장 실패: ${r.error || 'unknown'}`);
@@ -884,9 +1057,9 @@ function ProductDetailModal({
   const onRegenerate = async () => {
     setGenBusy(true);
     try {
-      const r = await generateNaverName(productId);
+      const r = await generateNaverName(productId, true);
       if (r.ok && r.naver_product_name) {
-        flash(`🤖 재생성: ${r.naver_product_name} (${r.byte_length}B / ${r.elapsed_ms}ms)`);
+        flash(`🤖 ${r.naver_product_name}`);
         await reload();
         onSaved();
       } else {
@@ -897,19 +1070,22 @@ function ProductDetailModal({
     }
   };
 
-  const onClearVision = async () => {
-    if (!confirm('비전 분석 캐시를 삭제하시겠어요? 다음 생성 시 이미지 다시 분석합니다.')) return;
-    setClearBusy(true);
+  const onReanalyzeVision = async () => {
+    if (!confirm('이미지 비전 분석을 다시 실행합니다. 진행할까요?')) return;
+    setVisionBusy(true);
     try {
-      const r = await clearVisionCache(productId);
+      await clearVisionCache(productId);
+      // generate-name 호출이 자동으로 vision 분석 → 캐시 후 텍스트 생성
+      const r = await generateNaverName(productId, true);
       if (r.ok) {
-        flash('🗑 비전 캐시 삭제');
+        flash(`👁 비전 재분석 + 상품명 갱신: ${r.naver_product_name}`);
         await reload();
+        onSaved();
       } else {
-        flash(`실패: ${r.error || 'unknown'}`);
+        flash(`재분석 실패: ${r.error}`);
       }
     } finally {
-      setClearBusy(false);
+      setVisionBusy(false);
     }
   };
 
@@ -925,388 +1101,516 @@ function ProductDetailModal({
     panel: 'bg-gray-50', label: 'text-gray-700',
   };
 
-  const v = d?.image_analysis;
-  const folderName = folders.find(f => f.id === form.folder_id)?.name || `#${form.folder_id}`;
+  // 소스별 색상
+  const sourceColor = (src: string): string => {
+    switch (src) {
+      case 'naver':  return dark ? 'border-emerald-500' : 'border-emerald-400';
+      case '11st':   return dark ? 'border-violet-500'  : 'border-violet-400';
+      case 'vision': return dark ? 'border-sky-500'     : 'border-sky-400';
+      case 'detail': return dark ? 'border-cyan-500'    : 'border-cyan-400';
+      case 'preset': return dark ? 'border-gray-500'    : 'border-gray-400';
+      case 'best':   return dark ? 'border-yellow-500'  : 'border-yellow-400';
+      case 'good':   return dark ? 'border-orange-500'  : 'border-orange-400';
+      case 'ad':     return dark ? 'border-pink-500'    : 'border-pink-400';
+      case 'func':   return dark ? 'border-blue-500'    : 'border-blue-400';
+      case 'saved':  return dark ? 'border-teal-500'    : 'border-teal-400';
+      case 'extra':  return dark ? 'border-fuchsia-500' : 'border-fuchsia-400';
+      default:       return C.border;
+    }
+  };
+  const sourceLabel = (src: string): string => ({
+    naver: '네이버', '11st': '11번가', vision: '비전', detail: '상세',
+    preset: '원본', best: '베스트', good: '우수', ad: '광고', func: '기능성',
+    saved: '저장', extra: '직접',
+  })[src] || src;
+
+  const v = (pool?.vision_meta) || {};
 
   return (
     <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 px-4 py-4"
          onClick={onClose}>
-      <div className={`${C.bg} ${C.border} border rounded-xl shadow-2xl flex flex-col transition-all ${
-             expanded ? 'w-[98vw] max-w-[98vw] h-[96vh] max-h-[96vh]' : 'w-full max-w-5xl max-h-[92vh]'
+      <div className={`${C.bg} ${C.border} border rounded-xl shadow-2xl flex flex-col transition-all relative ${
+             expanded ? 'w-[98vw] max-w-[98vw] h-[96vh] max-h-[96vh]' : 'w-full max-w-3xl max-h-[92vh]'
            }`}
            onClick={e => e.stopPropagation()}>
+
         {/* Header */}
-        <div className={`flex items-center justify-between px-5 py-3 border-b ${C.border}`}>
-          <div className="flex items-center gap-3">
-            <span className="text-lg">📋</span>
-            <h2 className={`text-sm font-bold ${C.text}`}>
-              상품 상세 / 편집
-              {d && <span className={`ml-2 text-xs font-mono ${C.muted}`}>#{d.id} · W{d.product_code}</span>}
-            </h2>
+        <div className={`flex items-center justify-between px-4 py-2 border-b ${C.border}`}>
+          <div className="flex items-center gap-2">
+            <span>📋</span>
+            <h2 className={`text-sm font-bold ${C.text}`}>상품 편집</h2>
+            {d && <span className={`text-xs font-mono ${C.muted}`}>#{d.id} · W{d.product_code}</span>}
             {d?.is_modified === 1 && (
               <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-600 dark:text-amber-400">수정됨</span>
             )}
           </div>
           <div className="flex items-center gap-2">
-            <button onClick={() => setExpanded(v => !v)}
-                    title={expanded ? '상세페이지 닫기' : '상세페이지 펼치기 (우측에 큰 이미지 + 상세 HTML)'}
-                    className={`px-2.5 py-1 text-[11px] rounded font-bold border ${
+            <button onClick={() => setExpanded(v2 => !v2)}
+                    className={`px-2.5 py-1 text-[11px] rounded font-bold ${
                       expanded
-                        ? 'bg-sky-600 text-white border-sky-700 hover:bg-sky-700'
-                        : dark
-                          ? 'bg-sky-900/30 text-sky-300 border-sky-700 hover:bg-sky-900/50'
-                          : 'bg-sky-50 text-sky-700 border-sky-300 hover:bg-sky-100'
+                        ? 'bg-sky-600 text-white hover:bg-sky-700'
+                        : dark ? 'bg-sky-900/30 text-sky-300 hover:bg-sky-900/50' : 'bg-sky-50 text-sky-700 hover:bg-sky-100'
                     }`}>
               {expanded ? '◀ 상세 닫기' : '🔍 상세페이지'}
             </button>
-            <button onClick={onClose}
-                    className={`text-xl ${dark ? 'text-gray-400 hover:text-gray-200' : 'text-gray-400 hover:text-gray-700'}`}>
-              ×
-            </button>
+            <button onClick={onClose} className={`text-xl ${C.muted} hover:text-rose-500`}>×</button>
           </div>
         </div>
 
         {msg && (
-          <div className="px-5 py-1.5 text-xs bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 border-b border-emerald-200 dark:border-emerald-800">
+          <div className="px-4 py-1 text-xs bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 border-b border-emerald-200 dark:border-emerald-800">
             {msg}
           </div>
         )}
 
         {loading || !d ? (
-          <div className={`flex-1 flex items-center justify-center text-sm ${C.muted}`}>
-            로딩 중...
-          </div>
+          <div className={`flex-1 flex items-center justify-center text-sm ${C.muted}`}>로딩 중...</div>
         ) : (
           <div className={`flex-1 min-h-0 ${expanded ? 'flex flex-row' : ''}`}>
-          <div className={`overflow-y-auto p-5 grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-5 ${
-            expanded ? 'flex-1 min-w-0 max-w-[55%] border-r ' + C.border : ''
-          }`}>
-            {/* 좌측: 이미지 + 비전 분석 */}
-            <div className="space-y-3">
-              {d.image_large ? (
-                <a href={d.image_large} target="_blank" rel="noreferrer">
-                  <img src={d.image_large} alt={d.product_name || ''}
-                       className={`w-full h-auto rounded border ${C.border} object-contain`} />
-                </a>
-              ) : (
-                <div className={`w-full aspect-square rounded ${C.panel}`} />
-              )}
 
-              <div className={`${C.panel} rounded p-3 text-xs space-y-1.5`}>
-                <div className={`font-bold ${C.text} flex items-center justify-between`}>
-                  <span>👁 비전 분석</span>
-                  {v && d.image_analyzed_at && (
-                    <span className={`text-[10px] ${C.muted}`}>{d.image_analyzed_at.slice(5,16).replace('T',' ')}</span>
-                  )}
-                </div>
-                {!v ? (
-                  <div className={C.muted}>아직 분석 안됨 (재생성 버튼 누르면 자동 분석)</div>
-                ) : (
-                  <>
-                    {v.form && <div><span className={C.muted}>형태:</span> <b className={C.text}>{v.form}</b></div>}
-                    {v.color && Array.isArray(v.color) && v.color.length > 0 && (
-                      <div><span className={C.muted}>색상:</span> {v.color.join(', ')}</div>
-                    )}
-                    {v.material && <div><span className={C.muted}>소재:</span> {v.material}</div>}
-                    {v.package_qty && <div><span className={C.muted}>패키지:</span> {v.package_qty}</div>}
-                    {v.readable_text && <div><span className={C.muted}>글자:</span> {v.readable_text}</div>}
-                    {v.key_features && Array.isArray(v.key_features) && v.key_features.length > 0 && (
-                      <div><span className={C.muted}>특징:</span> {v.key_features.join(', ')}</div>
-                    )}
-                  </>
-                )}
-              </div>
+            {/* ── 좌측 편집 ── */}
+            <div className={`overflow-y-auto p-4 space-y-3 ${expanded ? `flex-1 min-w-0 max-w-[55%] border-r ${C.border}` : ''}`}>
 
-              {/* 가격 / 메타 */}
-              <div className={`${C.panel} rounded p-3 text-xs space-y-1`}>
-                <div className={`font-bold ${C.text}`}>💰 가격 / 메타</div>
-                <div><span className={C.muted}>판매가:</span> {d.market_price?.toLocaleString() || 0}원</div>
-                <div><span className={C.muted}>오너클랜:</span> {d.ownerclan_price?.toLocaleString() || 0}원</div>
-                <div><span className={C.muted}>배송비:</span> {d.shipping_fee?.toLocaleString() || 0}원 / 반품 {d.return_fee?.toLocaleString() || 0}원</div>
-                {d.source_id && <div><span className={C.muted}>11st source_id:</span> {d.source_id}</div>}
-                {d.copied_at && <div><span className={C.muted}>가져온 시각:</span> {d.copied_at.slice(0,16).replace('T',' ')}</div>}
-              </div>
-            </div>
-
-            {/* 우측: 편집 폼 */}
-            <div className="space-y-3 text-xs">
-              {/* 11번가 AI상품명 (read-only) */}
-              {d.ai_recommended_name && (
-                <div>
-                  <label className={`block ${C.label} font-bold mb-1`}>11번가 AI 상품명 (참고)</label>
-                  <div className={`${C.panel} rounded px-2 py-1.5 ${C.sub}`}>{d.ai_recommended_name}</div>
-                </div>
-              )}
-
-              {/* 네이버 상품명 — 가장 중요 */}
+              {/* 1) 네이버 상품명 — 크게, 메인 */}
               <div>
-                <label className={`block ${C.label} font-bold mb-1`}>
-                  🌐 네이버 상품명 (이 컬럼이 네이버용 최종 결과)
-                  <span className={`ml-2 text-[10px] ${C.muted}`}>
-                    {form.naver_product_name.length}자 / 권장 50자
+                <div className="flex items-center justify-between mb-1">
+                  <label className={`text-[11px] font-bold ${dark ? 'text-emerald-300' : 'text-emerald-700'}`}>
+                    🌐 네이버 상품명
+                  </label>
+                  <span className={`text-[10px] font-mono ${
+                    nameBytes > 100 ? 'text-rose-500 font-bold' :
+                    nameBytes > 80 ? 'text-amber-500' : C.muted
+                  }`}>
+                    {naverName.length}자 / {nameBytes}바이트 (권장 100)
                   </span>
-                </label>
+                </div>
                 <textarea
-                  value={form.naver_product_name}
-                  onChange={e => setForm(s => ({ ...s, naver_product_name: e.target.value }))}
+                  value={naverName}
+                  onChange={e => setNaverName(e.target.value)}
                   rows={2}
-                  className={`${C.input} border rounded w-full px-2 py-1.5`}
+                  className={`${C.input} border-2 rounded w-full px-2.5 py-2 text-base font-bold ${
+                    dark ? 'border-emerald-700' : 'border-emerald-300'
+                  }`}
+                  placeholder="아래 키워드 풀에서 클릭하면 자동 추가/제거됩니다"
                 />
               </div>
 
-              {/* 원본 상품명 */}
+              {/* 2) 11번가 AI 상품명 (참고) */}
               <div>
-                <label className={`block ${C.label} font-bold mb-1`}>원본 상품명</label>
-                <textarea
-                  value={form.product_name}
-                  onChange={e => setForm(s => ({ ...s, product_name: e.target.value }))}
-                  rows={2}
-                  className={`${C.input} border rounded w-full px-2 py-1.5`}
-                />
+                <label className={`block text-[10px] ${C.label} mb-0.5`}>11번가 AI 상품명 (참고)</label>
+                <div className={`${C.panel} ${C.sub} rounded px-2 py-1.5 text-sm`}>
+                  {d.ai_recommended_name || d.ai_product_name || '—'}
+                </div>
               </div>
 
-              {/* 사용자 편집명 */}
-              <div>
-                <label className={`block ${C.label} font-bold mb-1`}>사용자 편집명 (선택)</label>
-                <input
-                  value={form.edited_product_name}
-                  onChange={e => setForm(s => ({ ...s, edited_product_name: e.target.value }))}
-                  className={`${C.input} border rounded w-full px-2 py-1.5`}
-                />
-              </div>
-
-              {/* 카테고리 / 브랜드 / 제조사 / 원산지 / 모델명 / 폴더 */}
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className={`block ${C.label} mb-0.5`}>카테고리</label>
-                  <input value={form.category_name}
-                         onChange={e => setForm(s => ({ ...s, category_name: e.target.value }))}
-                         className={`${C.input} border rounded w-full px-2 py-1`} />
+              {/* 3) 키워드 풀 — 자동 토큰화 + 하이라이트 */}
+              <div className={`border-2 rounded-lg p-2.5 ${dark ? 'border-amber-700 bg-amber-900/10' : 'border-amber-300 bg-amber-50/40'}`}>
+                <div className={`text-[11px] font-bold mb-1.5 flex items-center justify-between ${dark ? 'text-amber-300' : 'text-amber-700'}`}>
+                  <span>✨ 키워드 풀 ({visiblePool.length}/{pooledKeywords.length})</span>
+                  <div className="flex items-center gap-1">
+                    <button onClick={() => runRelevance(false)}
+                            disabled={relevanceBusy}
+                            className="text-[10px] px-2 py-0.5 rounded bg-violet-600 hover:bg-violet-700 text-white font-bold disabled:opacity-40">
+                      {relevanceBusy ? '⏳' : '🧠'} GPU 검증
+                    </button>
+                    <button onClick={() => setAutoFillOpen(true)}
+                            className="text-[10px] px-2 py-0.5 rounded bg-fuchsia-600 hover:bg-fuchsia-700 text-white font-bold">
+                      🎯 자동 채우기
+                    </button>
+                  </div>
                 </div>
-                <div>
-                  <label className={`block ${C.label} mb-0.5`}>브랜드</label>
-                  <input value={form.brand}
-                         onChange={e => setForm(s => ({ ...s, brand: e.target.value }))}
-                         className={`${C.input} border rounded w-full px-2 py-1`} />
-                </div>
-                <div>
-                  <label className={`block ${C.label} mb-0.5`}>제조사</label>
-                  <input value={form.manufacturer}
-                         onChange={e => setForm(s => ({ ...s, manufacturer: e.target.value }))}
-                         className={`${C.input} border rounded w-full px-2 py-1`} />
-                </div>
-                <div>
-                  <label className={`block ${C.label} mb-0.5`}>원산지</label>
-                  <input value={form.origin}
-                         onChange={e => setForm(s => ({ ...s, origin: e.target.value }))}
-                         className={`${C.input} border rounded w-full px-2 py-1`} />
-                </div>
-                <div>
-                  <label className={`block ${C.label} mb-0.5`}>모델명</label>
-                  <input value={form.model_name}
-                         onChange={e => setForm(s => ({ ...s, model_name: e.target.value }))}
-                         className={`${C.input} border rounded w-full px-2 py-1`} />
-                </div>
-                <div>
-                  <label className={`block ${C.label} mb-0.5`}>폴더 → {folderName}</label>
-                  <select value={form.folder_id}
-                          onChange={e => setForm(s => ({ ...s, folder_id: Number(e.target.value) }))}
-                          className={`${C.input} border rounded w-full px-2 py-1`}>
-                    {folders.map(f => (
-                      <option key={f.id} value={f.id}>{f.is_system === 1 ? '📦 ' : ''}{f.name}</option>
-                    ))}
+                {(relevantSet.size > 0 || irrelevantSet.size > 0) && (
+                  <div className={`text-[10px] mb-1 flex items-center gap-3 ${C.muted}`}>
+                    <span>🧠 GPU 적합도: <b className="text-emerald-600 dark:text-emerald-400">{relevantSet.size} 적합</b> / <span className="text-rose-500">{irrelevantSet.size} 부적합</span></span>
+                    <label className="flex items-center gap-1 cursor-pointer">
+                      <input type="checkbox" checked={hideIrrelevant} onChange={e => setHideIrrelevant(e.target.checked)} />
+                      부적합 숨김
+                    </label>
+                  </div>
+                )}
+                {/* 정렬/필터 컨트롤 */}
+                <div className={`flex flex-wrap items-center gap-2 mb-2 text-[10px] ${C.muted}`}>
+                  <span>정렬:</span>
+                  <select value={poolSort} onChange={e => setPoolSort(e.target.value as 'pool'|'vol_desc'|'vol_asc')}
+                          className={`${C.input} border rounded px-1.5 py-0.5 text-[11px]`}>
+                    <option value="pool">기본(소스순)</option>
+                    <option value="vol_desc">📊 조회수 ↓</option>
+                    <option value="vol_asc">📊 조회수 ↑ (롱테일)</option>
                   </select>
+                  <span>최소 조회수:</span>
+                  <input type="number" value={minVol} onChange={e => setMinVol(Number(e.target.value) || 0)}
+                         className={`${C.input} border rounded px-1.5 py-0.5 text-[11px] w-20`}
+                         placeholder="0" />
+                  <label className="flex items-center gap-1 cursor-pointer">
+                    <input type="checkbox" checked={hideHighComp} onChange={e => setHideHighComp(e.target.checked)} />
+                    경쟁 '높음' 제외
+                  </label>
                 </div>
-              </div>
-
-              {/* ── 키워드 풀 + 동적 미리보기 ── */}
-              <div className={`border-2 rounded-lg p-2.5 ${dark ? 'border-amber-700 bg-amber-900/10' : 'border-amber-300 bg-amber-50/30'}`}>
-                <div className={`text-[11px] font-bold mb-1.5 ${dark ? 'text-amber-300' : 'text-amber-700'}`}>
-                  ✨ 키워드 풀 — 클릭으로 포함/제외 토글, 미리보기 확인 후 [적용]
+                <div className="flex flex-wrap gap-1">
+                  {visiblePool.map(({ kw, source }) => {
+                    const on = isSelected(kw);
+                    const covered = !on && isCoveredByTokens(kw);
+                    const vol = volOf(kw);
+                    const comp = compOf(kw);
+                    const lcKw = kw.toLowerCase();
+                    const isRel = relevantSet.has(lcKw);
+                    const isIrrel = irrelevantSet.has(lcKw);
+                    const intensity = Math.min(vol / 30000, 1);
+                    const volBadgeColor = comp === '높음' ? 'text-rose-500' : comp === '중간' ? 'text-amber-500' : 'text-emerald-500';
+                    return (
+                      <button key={`${source}:${kw}`}
+                              onClick={() => toggleKw(kw)}
+                              title={`${sourceLabel(source)}${vol > 0 ? ` · 월간 ${vol.toLocaleString()} (PC ${pool?.keyword_volumes?.[kw]?.pc?.toLocaleString() || 0} / 모바일 ${pool?.keyword_volumes?.[kw]?.mobile?.toLocaleString() || 0}) · 경쟁 ${comp || '?'}` : ''}${isRel ? ' · 🧠 GPU 적합' : ''}${isIrrel ? ' · ⚠ GPU 부적합' : ''}${covered ? ' · ⚠ 토큰들이 이미 상품명에 분리되어 들어있음' : ''}`}
+                              className={`px-2 py-0.5 rounded text-[12px] border-2 transition-all inline-flex items-center gap-1 ${
+                                on
+                                  ? 'bg-amber-400 text-gray-900 border-amber-500 font-bold shadow'
+                                  : isIrrel
+                                    ? `${dark ? 'bg-rose-900/20 text-rose-400 border-rose-700 opacity-50' : 'bg-rose-50 text-rose-400 border-rose-200 opacity-60'} hover:opacity-100`
+                                    : covered
+                                      ? `${dark ? 'bg-orange-900/20 text-orange-300 border-orange-700/60' : 'bg-orange-100/70 text-orange-700 border-orange-300'} hover:bg-amber-100 dark:hover:bg-amber-900/30`
+                                      : `${dark ? 'bg-[#1c1c2e] text-gray-200' : 'bg-white text-gray-700'} ${isRel ? (dark ? 'border-emerald-500 ring-1 ring-emerald-500/40' : 'border-emerald-500 ring-1 ring-emerald-300') : sourceColor(source)} hover:bg-amber-100 dark:hover:bg-amber-900/30`
+                              }`}
+                              style={!on && !isIrrel && !covered && intensity > 0 ? { backgroundColor: dark ? `rgba(250,200,50,${intensity*0.15})` : `rgba(250,180,40,${intensity*0.2})` } : undefined}>
+                        {isRel && !on && <span className="text-emerald-500 text-[10px]">✓</span>}
+                        {isIrrel && !on && <span className="text-rose-400 text-[10px]">✕</span>}
+                        <span>{kw}</span>
+                        {vol > 0 && (
+                          <span className={`text-[9px] font-mono ${on ? 'opacity-70' : volBadgeColor}`}>
+                            {fmtVol(vol)}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
                 </div>
 
-                {/* base 텍스트 (브랜드 + 핵심) */}
-                <div className="mb-2">
-                  <label className={`block ${C.label} text-[10px] mb-0.5`}>기본(필수) — 브랜드 + 핵심 명사</label>
-                  <input
-                    value={baseText}
-                    onChange={e => setBaseText(e.target.value)}
-                    placeholder="예: 시온전자 무선 차임벨"
-                    className={`${C.input} border rounded w-full px-2 py-1 text-xs`}
-                  />
-                </div>
-
-                {/* 키워드 버킷들 (칩) */}
-                {pool && (() => {
-                  const buckets: Array<[string, string, string[]]> = [
-                    ['👁 비전 특징', dark ? 'bg-emerald-900/30 border-emerald-700' : 'bg-emerald-50 border-emerald-300', pool.vision_features],
-                    ['📌 원본 검색태그', dark ? 'bg-gray-700/50 border-gray-600' : 'bg-gray-100 border-gray-300', pool.preset_keywords],
-                    ['🌐 네이버 키워드(저장)', dark ? 'bg-sky-900/30 border-sky-700' : 'bg-sky-50 border-sky-300', pool.naver_keywords],
-                    ['🌟 11번가 베스트', dark ? 'bg-yellow-900/30 border-yellow-700' : 'bg-yellow-50 border-yellow-300', pool.best_picks],
-                    ['⭐ 11번가 우수', dark ? 'bg-orange-900/30 border-orange-700' : 'bg-orange-50 border-orange-300', pool.good_picks],
-                    ['✨ 11번가 광고', dark ? 'bg-violet-900/30 border-violet-700' : 'bg-violet-50 border-violet-300', pool.ad_keywords],
-                    ['🔧 11번가 기능성', dark ? 'bg-blue-900/30 border-blue-700' : 'bg-blue-50 border-blue-300', pool.functional_keywords],
-                    ['➕ 직접 추가', dark ? 'bg-fuchsia-900/30 border-fuchsia-700' : 'bg-fuchsia-50 border-fuchsia-300', extraKws],
-                  ];
-                  return buckets.map(([label, cls, items]) => items.length > 0 && (
-                    <div key={label} className={`mb-1.5 p-1.5 rounded border ${cls}`}>
-                      <div className={`text-[9px] font-bold mb-1 ${C.muted}`}>{label} ({items.length})</div>
-                      <div className="flex flex-wrap gap-1">
-                        {items.map(kw => {
-                          const on = selectedOrder.includes(kw);
-                          const isExtra = extraKws.includes(kw);
-                          return (
-                            <span key={kw}
-                                  onClick={() => toggleKeyword(kw)}
-                                  className={`px-1.5 py-0.5 rounded text-[11px] cursor-pointer border transition-all ${
-                                    on
-                                      ? 'bg-amber-500 text-white border-amber-600 font-bold'
-                                      : dark
-                                        ? 'bg-[#1c1c2e] border-[#2a2a40] text-gray-300 hover:border-amber-500'
-                                        : 'bg-white border-gray-300 text-gray-700 hover:border-amber-500'
-                                  }`}>
-                              {kw}
-                              {isExtra && (
-                                <button onClick={e => { e.stopPropagation(); removeExtraKw(kw); }}
-                                        className="ml-1 text-rose-400 hover:text-rose-600 text-[10px]"
-                                        title="이 추가 키워드 삭제">×</button>
-                              )}
-                            </span>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  ));
-                })()}
-
-                {/* 직접 키워드 추가 */}
-                <div className="flex items-center gap-1.5 mt-2">
+                {/* 직접 추가 */}
+                <div className="flex items-center gap-1.5 mt-2.5">
                   <input value={newKw} onChange={e => setNewKw(e.target.value)}
                          onKeyDown={e => { if (e.key === 'Enter') addExtraKw(); }}
-                         placeholder="키워드 입력 후 Enter / 추가"
+                         placeholder="새 키워드 + Enter (즉시 상품명에 추가)"
                          className={`${C.input} flex-1 border rounded px-2 py-1 text-xs`} />
                   <button onClick={addExtraKw}
                           className="px-2 py-1 text-xs rounded bg-fuchsia-600 hover:bg-fuchsia-700 text-white font-bold">
                     + 추가
                   </button>
                 </div>
+              </div>
 
-                {/* 미리보기 */}
-                <div className={`mt-2.5 p-2 rounded border-2 ${dark ? 'border-amber-500 bg-amber-900/20' : 'border-amber-400 bg-amber-100/50'}`}>
-                  <div className={`text-[10px] font-bold mb-0.5 flex items-center justify-between ${dark ? 'text-amber-300' : 'text-amber-800'}`}>
-                    <span>📋 미리보기</span>
-                    <span className={`text-[10px] font-normal ${
-                      previewBytes > MAX_BYTES_KW ? 'text-rose-500' :
-                      previewBytes > 80 ? 'text-amber-500' : C.muted
-                    }`}>
-                      {buildPreview.length}자 / {previewBytes}바이트 (한도 {MAX_BYTES_KW})
+              {/* 3.3) 추천 (필수 포함) 키워드 — must_have */}
+              {pool && (pool.must_have_keywords || []).length > 0 && (
+                <div className={`border-2 rounded-lg p-2.5 ${dark ? 'border-emerald-700 bg-emerald-900/15' : 'border-emerald-400 bg-emerald-50/70'}`}>
+                  <div className={`text-[11px] font-bold mb-1.5 ${dark ? 'text-emerald-300' : 'text-emerald-700'}`}>
+                    ⭐ 추천 키워드 — 네이버 SEO 우대 단어, 빠져있어요. 클릭으로 추가
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {(pool.must_have_keywords || []).map(kw => (
+                      <button key={`must:${kw}`}
+                              onClick={() => toggleKw(kw)}
+                              className="px-2 py-0.5 rounded text-[12px] border-2 bg-emerald-500 text-white border-emerald-600 font-bold hover:bg-emerald-600 shadow animate-pulse">
+                        ⭐ {kw}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* 3.4) 어뷰징 키워드 — banned (반대 성별 등) */}
+              {pool && (pool.banned_keywords || []).length > 0 && (
+                <div className={`border rounded p-2 ${dark ? 'border-rose-800 bg-rose-900/15' : 'border-rose-200 bg-rose-50/60'}`}>
+                  <div className={`text-[10px] font-bold mb-1 ${dark ? 'text-rose-300' : 'text-rose-700'}`}>
+                    🚫 자동 제외 ({(pool.banned_keywords || []).length})
+                    {pool.inferred_gender === 'female' && ' — 여성 상품, 남성 키워드 자동 차단'}
+                    {pool.inferred_gender === 'male' && ' — 남성 상품, 여성 키워드 자동 차단'}
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {(pool.banned_keywords || []).map(kw => (
+                      <span key={`banned:${kw}`}
+                            title="원본 keywords 에 있던 반대 성별 단어 — 어뷰징 방지 자동 제외"
+                            className={`px-1.5 py-0.5 rounded text-[10px] line-through ${
+                              dark ? 'bg-rose-900/40 text-rose-300 border border-rose-800' : 'bg-rose-100 text-rose-600 border border-rose-300'
+                            }`}>
+                        {kw}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* 3.45) 시즌 비호환 키워드 (의류 한정) */}
+              {pool && (pool.season_banned_keywords || []).length > 0 && (
+                <div className={`border rounded p-2 ${dark ? 'border-amber-800 bg-amber-900/15' : 'border-amber-200 bg-amber-50/60'}`}>
+                  <div className={`text-[10px] font-bold mb-1 ${dark ? 'text-amber-300' : 'text-amber-700'}`}>
+                    🍂 시즌 비추천 ({(pool.season_banned_keywords || []).length})
+                    {pool.inferred_season === 'summer' && ' — 여름 상품, 겨울/간절기 단어 비추천'}
+                    {pool.inferred_season === 'winter' && ' — 겨울 상품, 여름/간절기 단어 비추천'}
+                    {pool.inferred_season === 'spring_fall' && ' — 봄·가을 간절기 상품, 여름/겨울 단어 비추천'}
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {(pool.season_banned_keywords || []).map(kw => (
+                      <button key={`sb:${kw}`}
+                              onClick={() => toggleKw(kw)}
+                              title="시즌 비호환 — 클릭하면 강제 추가 가능"
+                              className={`px-1.5 py-0.5 rounded text-[10px] line-through hover:no-underline ${
+                                dark ? 'bg-amber-900/30 text-amber-300 border border-amber-800' : 'bg-amber-100 text-amber-700 border border-amber-300'
+                              }`}>
+                        {kw}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* 3.5) 상세 페이지 키워드 — 별도 섹션 (형용사/문구 다수) */}
+              {pool && (detailKwsList.length > 0 || (pool.detail_html_length || 0) > 0) && (
+                <div className={`border-2 rounded-lg p-2.5 ${dark ? 'border-cyan-700 bg-cyan-900/10' : 'border-cyan-300 bg-cyan-50/40'}`}>
+                  <div className={`text-[11px] font-bold mb-1.5 flex items-center justify-between ${dark ? 'text-cyan-300' : 'text-cyan-700'}`}>
+                    <span>📄 상세 페이지 키워드 ({detailKwsList.length}) — 클릭 = 상품명에 추가/제거</span>
+                    <span className={`text-[9px] font-normal ${C.muted}`}>
+                      HTML {(pool.detail_html_length || 0).toLocaleString()}자
                     </span>
                   </div>
-                  <div className={`text-sm font-medium ${dark ? 'text-amber-200' : 'text-amber-900'}`}>
-                    {buildPreview || <span className={C.muted}>키워드를 선택하세요</span>}
+                  {detailKwsList.length === 0 ? (
+                    <div className={`text-[11px] ${C.muted} italic`}>
+                      상세 HTML 에서 추출된 키워드가 모두 다른 풀과 중복됨
+                    </div>
+                  ) : (
+                    <div className="flex flex-wrap gap-1">
+                      {detailKwsList.map(kw => {
+                        const on = isSelected(kw);
+                        const covered = !on && isCoveredByTokens(kw);
+                        return (
+                          <button key={`detail:${kw}`}
+                                  onClick={() => toggleKw(kw)}
+                                  title={`상세 페이지 추출 · 클릭 = 상품명에 ${on ? '제거' : '추가'}${covered ? ' · ⚠ 분리 토큰으로 이미 포함' : ''}`}
+                                  className={`px-2 py-0.5 rounded text-[12px] border-2 transition-all ${
+                                    on
+                                      ? 'bg-amber-400 text-gray-900 border-amber-500 font-bold shadow'
+                                      : covered
+                                        ? `${dark ? 'bg-orange-900/20 text-orange-300 border-orange-700/60' : 'bg-orange-100/70 text-orange-700 border-orange-300'} hover:bg-amber-100 dark:hover:bg-amber-900/30`
+                                        : `${dark ? 'bg-[#1c1c2e] text-gray-200' : 'bg-white text-gray-700'} ${dark ? 'border-cyan-500' : 'border-cyan-400'} hover:bg-amber-100 dark:hover:bg-amber-900/30`
+                                  }`}>
+                            {kw}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* 3.6) 연관 키워드 (네이버 검색광고 API, 풀+상세와 중복 제거) */}
+              {(relatedLoading || relatedKwsFiltered.length > 0) && (
+                <div className={`border-2 rounded-lg p-2.5 ${dark ? 'border-indigo-700 bg-indigo-900/10' : 'border-indigo-300 bg-indigo-50/40'}`}>
+                  <div className={`text-[11px] font-bold mb-1.5 flex items-center justify-between ${dark ? 'text-indigo-300' : 'text-indigo-700'}`}>
+                    <span>🔗 연관 키워드 ({relatedKwsFiltered.length}) — 네이버 검색광고 API · 조회수 desc</span>
+                    {relatedLoading && <span className={`text-[9px] font-normal ${C.muted}`}>로딩…</span>}
                   </div>
-                  <button onClick={applyPreviewToForm}
-                          disabled={!buildPreview.trim()}
-                          className="mt-1.5 px-2.5 py-1 text-[11px] font-bold rounded bg-amber-600 hover:bg-amber-700 text-white disabled:opacity-40 disabled:cursor-not-allowed">
-                    ⬇ 적용해서 네이버 상품명에 반영
+                  {relatedKwsFiltered.length === 0 && !relatedLoading ? (
+                    <div className={`text-[11px] ${C.muted} italic`}>연관 키워드가 모두 다른 풀과 중복됨 또는 검색 실패</div>
+                  ) : (
+                    <div className="flex flex-wrap gap-1">
+                      {relatedKwsFiltered.slice(0, 50).map(r => {
+                        const on = isSelected(r.keyword);
+                        const covered = !on && isCoveredByTokens(r.keyword);
+                        const compCol = r.comp === '높음' ? 'text-rose-500' : r.comp === '중간' ? 'text-amber-500' : 'text-emerald-500';
+                        const intensity = Math.min(r.total / 30000, 1);
+                        return (
+                          <button key={`rel:${r.keyword}`}
+                                  onClick={() => toggleKw(r.keyword)}
+                                  title={`연관 · 월간 ${r.total.toLocaleString()} (PC ${r.pc.toLocaleString()} / 모바일 ${r.mobile.toLocaleString()}) · 경쟁 ${r.comp}${covered ? ' · ⚠ 분리 토큰으로 이미 포함' : ''}`}
+                                  className={`px-2 py-0.5 rounded text-[12px] border-2 transition-all inline-flex items-center gap-1 ${
+                                    on
+                                      ? 'bg-amber-400 text-gray-900 border-amber-500 font-bold shadow'
+                                      : covered
+                                        ? `${dark ? 'bg-orange-900/20 text-orange-300 border-orange-700/60' : 'bg-orange-100/70 text-orange-700 border-orange-300'} hover:bg-amber-100 dark:hover:bg-amber-900/30`
+                                        : `${dark ? 'bg-[#1c1c2e] text-gray-200 border-indigo-500' : 'bg-white text-gray-700 border-indigo-400'} hover:bg-amber-100 dark:hover:bg-amber-900/30`
+                                  }`}
+                                  style={!on && !covered && intensity > 0 ? { backgroundColor: dark ? `rgba(250,200,50,${intensity*0.15})` : `rgba(250,180,40,${intensity*0.2})` } : undefined}>
+                            <span>{r.keyword}</span>
+                            {r.total > 0 && (
+                              <span className={`text-[9px] font-mono ${on ? 'opacity-70' : compCol}`}>
+                                {fmtVol(r.total)}
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* 4) 코멘트 (프롬프트 엔지니어링) */}
+              <div>
+                <label className={`block text-[10px] font-bold ${dark ? 'text-violet-300' : 'text-violet-700'} mb-1`}>
+                  📝 코멘트 (DB 저장 · 추후 프롬프트 학습용)
+                </label>
+                <textarea
+                  value={comment}
+                  onChange={e => setComment(e.target.value)}
+                  rows={3}
+                  placeholder="이 상품에서 좋았던 키워드, 나빴던 키워드, 비전 분석이 틀린 부분 등 자유 메모. 추후 모델 fine-tuning 에 활용."
+                  className={`${C.input} border rounded w-full px-2 py-1.5 text-xs`}
+                />
+              </div>
+
+              {/* 5) 비전 결과 (참고용 + 재분석 버튼) */}
+              <div className={`${C.panel} rounded p-2.5 text-xs space-y-1`}>
+                <div className={`font-bold ${C.text} flex items-center justify-between`}>
+                  <span>👁 비전 분석</span>
+                  <button onClick={onReanalyzeVision}
+                          disabled={visionBusy}
+                          className="text-[10px] px-2 py-0.5 rounded bg-sky-600 hover:bg-sky-700 text-white disabled:opacity-40 font-bold">
+                    {visionBusy ? '⏳ 재분석 중...' : '🔄 비전+상품명 재생성'}
                   </button>
                 </div>
-              </div>
-
-              {/* 11번가 원본 keywords (참고만, 편집 가능) */}
-              <div>
-                <label className={`block ${C.label} mb-1 text-[10px]`}>11번가 원본 keywords (저장됨)</label>
-                <textarea
-                  value={form.keywords}
-                  onChange={e => setForm(s => ({ ...s, keywords: e.target.value }))}
-                  rows={2}
-                  className={`${C.input} border rounded w-full px-2 py-1 text-[11px]`}
-                />
-              </div>
-              <div>
-                <label className={`block ${C.label} mb-1 text-[10px]`}>네이버 전용 키워드 (저장됨, 쉼표 구분)</label>
-                <textarea
-                  value={form.naver_keywords}
-                  onChange={e => setForm(s => ({ ...s, naver_keywords: e.target.value }))}
-                  rows={2}
-                  className={`${C.input} border rounded w-full px-2 py-1 text-[11px]`}
-                />
+                {v.form && <div><span className={C.muted}>형태:</span> <b className={C.text}>{v.form}</b></div>}
+                {v.material && <div><span className={C.muted}>소재:</span> <b className={C.text}>{v.material}</b></div>}
+                {Array.isArray(v.color) && v.color.length > 0 && (
+                  <div><span className={C.muted}>색상:</span> {v.color.join(', ')}</div>
+                )}
+                {v.package_qty && <div><span className={C.muted}>패키지:</span> {v.package_qty}</div>}
+                {pool?.vision_features && pool.vision_features.length > 0 && (
+                  <div><span className={C.muted}>특징:</span> {pool.vision_features.join(', ')}</div>
+                )}
+                {v.readable_text && <div><span className={C.muted}>글자:</span> {v.readable_text}</div>}
+                {!pool?.vision_meta?.form && (
+                  <div className={`text-[10px] ${C.muted} italic`}>비전 분석 캐시 없음 — 재분석 권장</div>
+                )}
               </div>
             </div>
-          </div>
 
-          {/* ── 확장 시 우측 상세 panel ── */}
-          {expanded && (
-            <div className={`flex-1 min-w-0 overflow-y-auto p-4 ${dark ? 'bg-[#0f0f1a]' : 'bg-gray-50'}`}>
-              <div className={`text-xs font-bold mb-2 flex items-center gap-2 ${C.text}`}>
-                <span>🔍 상품 원본 상세</span>
+            {/* ── 우측: 상세 페이지 ── */}
+            {expanded && (
+              <div className={`flex-1 min-w-0 overflow-y-auto p-3 ${dark ? 'bg-[#0f0f1a]' : 'bg-gray-50'}`}>
+                <div className={`text-xs font-bold mb-2 ${C.text}`}>🔍 상품 원본 상세</div>
+
+                {/* 원본 상품명 — 썸네일 위 */}
+                <div className={`${C.panel} rounded mb-2 p-2.5 border ${C.border}`}>
+                  <div className={`text-[10px] font-bold mb-1 ${C.muted}`}>원본 상품명</div>
+                  <div className={`text-sm ${C.text} leading-snug`}>{d.product_name || '—'}</div>
+                </div>
+
                 {d.image_large && (
-                  <a href={d.image_large} target="_blank" rel="noreferrer"
-                     className={`text-[10px] font-normal underline ${dark ? 'text-sky-300' : 'text-sky-600'}`}>
-                    이미지 새창
-                  </a>
+                  <div className={`${C.panel} rounded mb-2 p-2 border ${C.border}`}>
+                    <img src={d.image_large} alt="" className="w-full max-h-[350px] object-contain rounded" />
+                  </div>
                 )}
+
+                {/* 네이버 상품명 — 썸네일 아래, 현재 편집 중인 값 실시간 반영 */}
+                <div className={`rounded mb-2 p-2.5 border-2 ${
+                  dark ? 'border-emerald-700 bg-emerald-900/15' : 'border-emerald-400 bg-emerald-50/70'
+                }`}>
+                  <div className={`text-[10px] font-bold mb-1 flex items-center justify-between ${
+                    dark ? 'text-emerald-300' : 'text-emerald-700'
+                  }`}>
+                    <span>🌐 네이버 상품명 (편집 중)</span>
+                    <span className={`font-mono font-normal ${C.muted}`}>
+                      {naverName.length}자 / {calcBytes(naverName)}B
+                    </span>
+                  </div>
+                  <div className={`text-sm font-bold leading-snug ${
+                    dark ? 'text-emerald-200' : 'text-emerald-900'
+                  }`}>
+                    {naverName || <span className={`${C.muted} italic font-normal`}>(아직 입력 안 됨)</span>}
+                  </div>
+                </div>
+
+                {(d.option1_name || d.option2_name || d.product_attribute) && (
+                  <div className={`${C.panel} rounded p-2 mb-2 text-[11px] space-y-1`}>
+                    <div className={`font-bold ${C.text}`}>📦 옵션/속성</div>
+                    {d.option1_name && <div><span className={C.muted}>{d.option1_name}:</span> {d.option1_values}</div>}
+                    {d.option2_name && <div><span className={C.muted}>{d.option2_name}:</span> {d.option2_values}</div>}
+                    {d.product_attribute && <div><span className={C.muted}>속성:</span> {d.product_attribute}</div>}
+                  </div>
+                )}
+                <div className={`${C.panel} rounded p-2 ${C.border} border`}>
+                  <div className={`font-bold ${C.text} text-xs mb-1.5 flex items-center justify-between`}>
+                    <span>📄 상세 페이지</span>
+                    <span className={`text-[10px] font-normal ${C.muted}`}>
+                      {d.detail_html ? `${d.detail_html.length.toLocaleString()}자` : '없음'}
+                    </span>
+                  </div>
+                  {d.detail_html ? (
+                    <div className="bg-white text-gray-900 rounded p-2 max-h-[55vh] overflow-y-auto text-xs"
+                         dangerouslySetInnerHTML={{ __html: d.detail_html }} />
+                  ) : (
+                    <div className={`text-xs ${C.muted} italic`}>저장된 상세 HTML 없음</div>
+                  )}
+                </div>
               </div>
+            )}
+          </div>
+        )}
 
-              {/* 큰 이미지 (있으면) */}
-              {d.image_large && (
-                <div className={`${C.panel} rounded mb-3 p-2 border ${C.border}`}>
-                  <img src={d.image_large} alt={d.product_name || ''}
-                       className="w-full max-h-[400px] object-contain rounded" />
+        {/* 자동 사입 모달 (nested) */}
+        {autoFillOpen && (
+          <div className="absolute inset-0 z-[90] flex items-center justify-center bg-black/50"
+               onClick={() => setAutoFillOpen(false)}>
+            <div className={`${C.bg} ${C.border} border rounded-xl shadow-2xl w-full max-w-md p-4`}
+                 onClick={e => e.stopPropagation()}>
+              <div className={`text-sm font-bold mb-3 ${C.text}`}>🎯 자동 채우기 — 조회수 범위로 일괄 추가</div>
+              <div className="grid grid-cols-2 gap-2 mb-2">
+                <label className={`text-[11px] ${C.label}`}>최소 조회수
+                  <input type="number" value={afMin} onChange={e => setAfMin(Number(e.target.value) || 0)}
+                         className={`${C.input} border rounded w-full px-2 py-1 mt-0.5 text-xs`} />
+                </label>
+                <label className={`text-[11px] ${C.label}`}>최대 조회수
+                  <input type="number" value={afMax} onChange={e => setAfMax(Number(e.target.value) || 0)}
+                         className={`${C.input} border rounded w-full px-2 py-1 mt-0.5 text-xs`} />
+                </label>
+              </div>
+              <label className="flex items-center gap-1.5 text-[11px] cursor-pointer mb-2">
+                <input type="checkbox" checked={afExcludeHigh} onChange={e => setAfExcludeHigh(e.target.checked)} />
+                경쟁도 '높음' 제외
+              </label>
+              <div className="flex items-center gap-2 mb-3 text-[11px]">
+                <span className={C.label}>우선순위:</span>
+                <label className="flex items-center gap-1 cursor-pointer">
+                  <input type="radio" checked={afStrategy === 'desc'} onChange={() => setAfStrategy('desc')} />
+                  조회수 ↓ (메인키워드)
+                </label>
+                <label className="flex items-center gap-1 cursor-pointer">
+                  <input type="radio" checked={afStrategy === 'longtail'} onChange={() => setAfStrategy('longtail')} />
+                  조회수 ↑ (롱테일)
+                </label>
+              </div>
+              <div className={`${C.panel} rounded p-2 mb-3 max-h-40 overflow-y-auto`}>
+                <div className={`text-[10px] font-bold mb-1 ${C.muted}`}>
+                  미리보기: {autoFillCandidates.length}개 추가 예정
                 </div>
-              )}
-
-              {/* 옵션 / 상품 속성 */}
-              {(d.option1_name || d.option2_name || d.combined_option || d.product_attribute) && (
-                <div className={`${C.panel} rounded p-3 mb-3 text-[11px] space-y-1.5`}>
-                  <div className={`font-bold ${C.text}`}>📦 옵션 / 속성</div>
-                  {d.option1_name && (
-                    <div><span className={C.muted}>옵션1 ({d.option1_name}):</span> <span className={C.text}>{d.option1_values}</span></div>
-                  )}
-                  {d.option2_name && (
-                    <div><span className={C.muted}>옵션2 ({d.option2_name}):</span> <span className={C.text}>{d.option2_values}</span></div>
-                  )}
-                  {d.product_attribute && (
-                    <div><span className={C.muted}>속성:</span> <span className={C.text}>{d.product_attribute}</span></div>
+                <div className="flex flex-wrap gap-1">
+                  {autoFillCandidates.slice(0, 30).map(c => (
+                    <span key={`pv:${c.kw}`} className={`text-[10px] px-1.5 py-0.5 rounded ${dark ? 'bg-fuchsia-900/40 text-fuchsia-200' : 'bg-fuchsia-100 text-fuchsia-700'}`}>
+                      {c.kw} <span className="opacity-60">{fmtVol(c.total)}</span>
+                    </span>
+                  ))}
+                  {autoFillCandidates.length > 30 && (
+                    <span className={`text-[10px] ${C.muted}`}>+ {autoFillCandidates.length - 30}개 더</span>
                   )}
                 </div>
-              )}
-
-              {/* 상세 HTML */}
-              <div className={`${C.panel} rounded p-3 ${C.border} border`}>
-                <div className={`font-bold ${C.text} text-xs mb-2 flex items-center justify-between`}>
-                  <span>📄 상세 페이지</span>
-                  <span className={`text-[10px] font-normal ${C.muted}`}>
-                    {d.detail_html ? `${d.detail_html.length.toLocaleString()}자` : '없음'}
-                  </span>
-                </div>
-                {d.detail_html ? (
-                  <div className={`prose prose-sm max-w-none ${dark ? 'prose-invert' : ''} bg-white text-gray-900 rounded p-3 max-h-[60vh] overflow-y-auto`}
-                       dangerouslySetInnerHTML={{ __html: d.detail_html }} />
-                ) : (
-                  <div className={`text-xs ${C.muted} italic`}>저장된 상세 HTML 없음</div>
-                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <button onClick={() => setAutoFillOpen(false)}
+                        className={`flex-1 px-3 py-1.5 text-xs rounded ${dark ? 'bg-[#252540] text-gray-300' : 'bg-gray-200 text-gray-700'}`}>
+                  취소
+                </button>
+                <button onClick={applyAutoFill}
+                        disabled={autoFillCandidates.length === 0}
+                        className="flex-1 px-3 py-1.5 text-xs font-bold rounded bg-fuchsia-600 hover:bg-fuchsia-700 text-white disabled:opacity-40">
+                  ✅ {autoFillCandidates.length}개 적용
+                </button>
               </div>
             </div>
-          )}
           </div>
         )}
 
         {/* Footer */}
-        <div className={`border-t ${C.border} px-5 py-3 flex items-center gap-2 ${dark ? 'bg-[#181828]' : 'bg-gray-50'} rounded-b-xl`}>
-          <button
-            onClick={onClearVision}
-            disabled={clearBusy || loading || !d?.image_analysis}
-            title="비전 분석 캐시 삭제 (다음 생성 시 이미지 재분석)"
-            className={`px-3 py-1.5 text-xs rounded ${dark ? 'bg-[#252540] text-gray-300 hover:bg-[#2f2f50]' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'} disabled:opacity-40`}
-          >
-            🗑 비전 캐시 삭제
-          </button>
-          <button
-            onClick={onRegenerate}
-            disabled={genBusy || loading}
-            className="px-3 py-1.5 text-xs font-bold rounded bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-40"
-          >
+        <div className={`border-t ${C.border} px-4 py-2.5 flex items-center gap-2 ${dark ? 'bg-[#181828]' : 'bg-gray-50'} rounded-b-xl`}>
+          <button onClick={onRegenerate}
+                  disabled={genBusy || loading}
+                  className="px-3 py-1.5 text-xs font-bold rounded bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-40">
             {genBusy ? '⏳ 생성 중...' : '🤖 재생성'}
           </button>
           <div className="flex-1" />
@@ -1314,11 +1618,9 @@ function ProductDetailModal({
                   className={`px-3 py-1.5 text-xs rounded ${dark ? 'bg-[#252540] text-gray-300 hover:bg-[#2f2f50]' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`}>
             취소
           </button>
-          <button
-            onClick={onSave}
-            disabled={saving || loading}
-            className="px-4 py-1.5 text-xs font-bold rounded bg-violet-600 hover:bg-violet-700 text-white disabled:opacity-40"
-          >
+          <button onClick={onSave}
+                  disabled={saving || loading}
+                  className="px-4 py-1.5 text-xs font-bold rounded bg-violet-600 hover:bg-violet-700 text-white disabled:opacity-40">
             {saving ? '저장 중...' : '💾 저장'}
           </button>
         </div>

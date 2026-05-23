@@ -106,4 +106,7 @@ urlpatterns = [
     path('naver-products/<int:pk>/', views.NaverMyProductDetailView.as_view()),
     path('naver-products/<int:pk>/clear-vision/', views.NaverMyProductClearVisionView.as_view()),
     path('naver-products/<int:pk>/keyword-pool/', views.NaverMyProductKeywordPoolView.as_view()),
+    path('naver-products/<int:pk>/keyword-relevance/', views.NaverKeywordRelevanceView.as_view()),
+    path('naver-keyword-related/', views.NaverKeywordRelatedView.as_view()),
+    path('naver-keyword-hot/', views.NaverKeywordHotView.as_view()),
 ]

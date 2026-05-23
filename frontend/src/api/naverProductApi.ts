@@ -212,6 +212,17 @@ export async function clearVisionCache(id: number): Promise<{ ok: boolean; error
   return r.data;
 }
 
+export interface KeywordVolume {
+  pc: number;
+  mobile: number;
+  total: number;
+  comp: string;          // 높음/중간/낮음
+  product_count?: number;
+  category?: string;
+  fetched_at?: string;
+  fresh: boolean;
+}
+
 export interface KeywordPool {
   ok: boolean;
   product_name: string;
@@ -230,7 +241,56 @@ export interface KeywordPool {
   functional_keywords: string[];
   preset_keywords: string[];
   naver_keywords: string[];
+  detail_keywords?: string[];
+  detail_html_length?: number;
+  banned_keywords?: string[];
+  must_have_keywords?: string[];
+  inferred_gender?: 'female' | 'male' | null;
+  inferred_season?: 'summer' | 'winter' | 'spring_fall' | null;
+  season_banned_keywords?: string[];
+  image_ocr_text?: string;
+  option_color?: string | null;
+  color_mismatch?: { option_color: string; vision_colors: string[] } | null;
+  keyword_volumes?: Record<string, KeywordVolume>;
   error?: string;
+}
+
+export interface RelatedKeyword {
+  keyword: string;
+  pc: number;
+  mobile: number;
+  total: number;
+  comp: string;
+}
+
+export async function fetchRelatedKeywords(seed: string, limit = 30): Promise<{ ok: boolean; seed: string; items: RelatedKeyword[] }> {
+  const r = await api.get('/naver-keyword-related/', { params: { seed, limit } });
+  return r.data;
+}
+
+export async function fetchRelatedKeywordsMulti(seeds: string[], limit = 1500): Promise<{ ok: boolean; seeds: string[]; items: RelatedKeyword[] }> {
+  const r = await api.get('/naver-keyword-related/', { params: { seeds: seeds.join(','), limit } });
+  return r.data;
+}
+
+export async function fetchHotKeywords(category: string, limit = 20): Promise<{ ok: boolean; items: Array<{ keyword: string; total: number; comp: string }> }> {
+  const r = await api.get('/naver-keyword-hot/', { params: { category, limit } });
+  return r.data;
+}
+
+export interface KeywordRelevance {
+  ok: boolean;
+  relevant: string[];
+  irrelevant: string[];
+  cached: boolean;
+  model?: string;
+  elapsed_ms?: number;
+  error?: string;
+}
+
+export async function fetchKeywordRelevance(productId: number, keywords: string[], force = false): Promise<KeywordRelevance> {
+  const r = await api.post(`/naver-products/${productId}/keyword-relevance/`, { keywords, force });
+  return r.data;
 }
 
 export async function fetchKeywordPool(id: number): Promise<KeywordPool> {
