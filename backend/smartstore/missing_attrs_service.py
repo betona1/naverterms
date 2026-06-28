@@ -385,25 +385,22 @@ def register_for_sku(seller_management_code, store_id, selections, dry_run=False
                 if t:
                     p['attributeRealValue'] = t
     # 2) 우리가 추가할 attribute_seq 와 겹치는 기존 항목 제거 (선택은 새로운 값으로 갱신)
-    sel_map = {}  # aseq → {value_seq, value_text}
-    for s in selections:
-        aseq = int(s['attribute_seq'])
-        sel_map[aseq] = {
-            'value_seq': int(s['value_seq']) if s.get('value_seq') else 0,
-            'value_text': s.get('value_text', '') or '',
-        }
-    pa = [p for p in pa if p.get('attributeSeq') not in sel_map]
-    # 3) 새 항목 추가
+    #    멀티셀렉트 지원 — selections 에 같은 attribute_seq 가 여러 값으로 올 수 있음.
+    sel_aseqs = set(int(s['attribute_seq']) for s in selections)
+    pa = [p for p in pa if p.get('attributeSeq') not in sel_aseqs]
+    # 3) 새 항목 추가 (selections 순회 — 속성당 다중값 그대로 추가)
     #    - 픽리스트 (value_seq>0): attributeValueSeq 만 — API 가 valueText 자동 매핑
     #    - 자유입력 (value_seq=0): attributeValueSeq=0 + attributeRealValue 필수
-    for aseq, sv in sel_map.items():
+    for s in selections:
+        aseq = int(s['attribute_seq'])
+        vseq = int(s['value_seq']) if s.get('value_seq') else 0
         item = {'attributeSeq': aseq}
-        if sv['value_seq']:
-            item['attributeValueSeq'] = sv['value_seq']
+        if vseq:
+            item['attributeValueSeq'] = vseq
         else:
             item['attributeValueSeq'] = 0
-            if sv['value_text']:
-                item['attributeRealValue'] = sv['value_text']
+            if s.get('value_text'):
+                item['attributeRealValue'] = s['value_text']
         pa.append(item)
     detail['productAttributes'] = pa
 
@@ -412,18 +409,21 @@ def register_for_sku(seller_management_code, store_id, selections, dry_run=False
     if seo and 'sellerTags' in seo:
         del seo['sellerTags']
 
-    # statusType 정규화 — PUT 은 OUTOFSTOCK/SUSPENSION 등 거부, SALE 만 허용 (실제 상태는 변경되지 않음)
-    if product.get('statusType') and product['statusType'] != 'SALE':
+    # statusType 정규화 — PUT 은 SALE 만 허용 (실제 상태는 변경되지 않음).
+    # 빈값/None/비정상 enum 도 SALE 로 강제 (NotValidEnum 400 방지)
+    if product.get('statusType') != 'SALE':
         product['statusType'] = 'SALE'
 
     if dry_run:
-        return {'ok': True, 'dry_run': True, 'attrs_set': len(sel_map)}
+        return {'ok': True, 'dry_run': True, 'attrs_set': len(sel_aseqs)}
 
     # 변경 전 상태 백업
     before_pa = list(detail.get('productAttributes', []))
     # 위에서 이미 수정한 후라 detail 의 pa 는 새로운 상태
     after_pa = list(pa)
-    added_pa = [{'attributeSeq': k, 'attributeValueSeq': v} for k, v in sel_map.items()]
+    added_pa = [{'attributeSeq': int(s['attribute_seq']),
+                 'attributeValueSeq': int(s['value_seq']) if s.get('value_seq') else 0}
+                for s in selections]
     now = datetime.now()
     with connections['myproduct'].cursor() as c:
         c.execute("""
@@ -433,14 +433,14 @@ def register_for_sku(seller_management_code, store_id, selections, dry_run=False
              source, status, changed_at)
             VALUES (%s,%s,%s,%s,%s,%s,'auto_register','pending',%s)
         """, [seller_management_code, store_id, opno,
-              json.dumps([p for p in before_pa if p.get('attributeSeq') in sel_map], ensure_ascii=False),
+              json.dumps([p for p in before_pa if p.get('attributeSeq') in sel_aseqs], ensure_ascii=False),
               json.dumps(after_pa, ensure_ascii=False),
               json.dumps(added_pa, ensure_ascii=False),
               now])
         change_id = c.lastrowid
 
     # 우리가 add 한 attribute_seq 들 (보존 대상)
-    new_aseqs = set(sel_map.keys())
+    new_aseqs = set(sel_aseqs)
 
     # PUT
     import re as _re
@@ -489,12 +489,35 @@ def register_for_sku(seller_management_code, store_id, selections, dry_run=False
                     if isinstance(uc, dict):
                         uc['unitPriceYn'] = False
                         handled = True
+            # 2.5) KC/어린이/친환경 인증 미비 → '인증대상 제외' 선언으로 통과 (무시하고 처리)
+            cert_ex = detail.get('certificationTargetExcludeContent')
+            cert_ex = cert_ex if isinstance(cert_ex, dict) else {}
+            cert_hit = False
+            for item in inv:
+                nm = item.get('name', '')
+                tp = item.get('type', '')
+                msg = item.get('message', '')
+                if not ('ertification' in nm or 'ertification' in tp or '인증' in msg):
+                    continue
+                cert_hit = True
+                if '어린이' in msg or 'hild' in nm:
+                    cert_ex['childCertifiedProductExclusionYn'] = True
+                elif '친환경' in msg or 'reen' in nm:
+                    cert_ex['greenCertifiedProductExclusionYn'] = True
+                else:
+                    cert_ex['kcCertifiedProductExclusionYn'] = 'TRUE'
+            if cert_hit:
+                detail['certificationTargetExcludeContent'] = cert_ex
+                detail['productCertificationInfos'] = []
+                handled = True
             # 3) 일반 dict path 필드 (statusType 등) 제거
             for item in inv:
                 field = item.get('name', '')
                 if 'productAttributes[' in field:
                     continue
                 if 'unitPriceYn' in item.get('type', '') or 'unitPriceYn' in field:
+                    continue
+                if 'ertification' in field:    # KC 인증은 2.5에서 처리 — 덮어쓰기 방지
                     continue
                 parts = field.replace('originProduct.', '').split('.')
                 obj = product

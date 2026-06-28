@@ -16,6 +16,8 @@ WORKERS = [
     {'host': 'ws229', 'ip': '192.168.219.229', 'group': 'cluster'},
     {'host': 'ws230', 'ip': '192.168.219.230', 'group': 'cluster'},
     {'host': 'ws231', 'ip': '192.168.219.231', 'group': 'cluster'},
+    {'host': 'ws218', 'ip': '192.168.219.218', 'group': 'cluster'},
+    {'host': 'ws226', 'ip': '192.168.219.226', 'group': 'cluster'},
     {'host': 'vm11', 'ip': '192.168.219.11', 'group': 'vm'},
     {'host': 'vm12', 'ip': '192.168.219.12', 'group': 'vm'},
     {'host': 'vm13', 'ip': '192.168.219.13', 'group': 'vm'},

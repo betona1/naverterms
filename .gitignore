@@ -37,3 +37,22 @@ backend/wcodes_backup.txt
 # 백업 파일
 *.bak
 *.bak.*
+
+# 이미지 AI 서비스 — venv / 모델 가중치 (대용량 바이너리)
+backend/image_ai_service/.venv/
+backend/image_ai_service/weights/
+backend/image_ai_service/__pycache__/
+
+# 런타임 미디어 산출물 (업스케일 썸네일 등, 수 GB)
+backend/media/
+
+# 데이터/엑셀 산출물 (상품 데이터 — 공개 리포에 올리지 않음)
+docs/*.xlsx
+docs/*.xls
+docs/*.png
+docs/*.csv
+frontend/public/downloads/*.xlsx
+backend/*.csv
+
+# 로컬 환경 설정 예시는 추적, 실제 .env 는 제외 (위 .env 규칙)
+!.env.example

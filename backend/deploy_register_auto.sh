@@ -1,9 +1,9 @@
 #!/bin/bash
 # 자동 등록 16,190 SKU 를 11 워커 + 100 box 에 분산
 set -e
-WORKERS=("ws220" "ws227" "ws228" "ws229" "ws230" "ws231" "vm11" "vm12" "vm13" "vm14" "ws15")
-TOTAL=12   # 11 워커 + 100 box
-LOCAL_OFFSET=11
+WORKERS=("ws220" "ws227" "ws228" "ws229" "ws230" "ws231" "ws218" "ws226" "vm11" "vm12" "vm13" "vm14" "ws15")
+TOTAL=14   # 13 워커 + 100 box (ws218/ws226 2026-05-26 추가)
+LOCAL_OFFSET=13
 
 echo "=== sync code to workers ==="
 for w in "${WORKERS[@]}"; do

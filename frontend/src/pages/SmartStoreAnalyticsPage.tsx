@@ -6,10 +6,11 @@ import {
 import { useTheme } from '../hooks/useTheme';
 import {
   fetchOverview, fetchStoreDetail, fetchBusinessDetail, fetchRegistrationLimits,
+  startPolicyCollect, fetchPolicyStatus,
   type OverviewData, type BusinessDetailData, type StoreDetailData,
   type TrendRow, type CategoryNode, type TopProductRow,
   type BusinessSummary, type StoreOverviewItem, type MiniCategory,
-  type RegistrationLimitData, type RegistrationLimitStore,
+  type RegistrationLimitData, type RegistrationLimitStore, type PolicyCollectStatus,
 } from '../api/smartstoreAnalyticsApi';
 import { formatKRW, formatKoreanWon, formatKoreanShort } from '../utils/format';
 import ProductOrdersModal from '../components/smartstore/ProductOrdersModal';
@@ -94,9 +95,10 @@ export default function SmartStoreAnalyticsPage() {
   }, [startDate, endDate]);
 
   // load registration limits once
-  useEffect(() => {
+  const reloadRegLimits = useCallback(() => {
     fetchRegistrationLimits().then(setRegLimitData).catch(() => {});
   }, []);
+  useEffect(() => { reloadRegLimits(); }, [reloadRegLimits]);
 
   // period preset handler
   const handlePreset = useCallback((key: string) => {
@@ -351,7 +353,7 @@ export default function SmartStoreAnalyticsPage() {
       </div>
 
       <div ref={dashboardRef} className="max-w-7xl mx-auto px-4 py-4 space-y-4">
-        {view === 'overview' && overviewData && <OverviewView data={overviewData} regLimitData={regLimitData} dark={dark}
+        {view === 'overview' && overviewData && <OverviewView data={overviewData} regLimitData={regLimitData} onReloadRegLimits={reloadRegLimits} dark={dark}
           overviewTab={overviewTab} setOverviewTab={setOverviewTab}
           onBusinessClick={goBusiness} onStoreClick={goStore}
           card={card} tHead={tHead} tRow={tRow} txt={txt} txtSub={txtSub} chartGrid={chartGrid} chartTick={chartTick} tooltipBg={tooltipBg} tooltipBorder={tooltipBorder} />}
@@ -376,9 +378,10 @@ interface StyleProps {
   tooltipBg: string; tooltipBorder: string;
 }
 
-function OverviewView({ data, regLimitData, dark, overviewTab, setOverviewTab, onBusinessClick, onStoreClick, ...s }: StyleProps & {
+function OverviewView({ data, regLimitData, onReloadRegLimits, dark, overviewTab, setOverviewTab, onBusinessClick, onStoreClick, ...s }: StyleProps & {
   data: OverviewData;
   regLimitData: RegistrationLimitData | null;
+  onReloadRegLimits: () => void;
   overviewTab: OverviewTab;
   setOverviewTab: (t: OverviewTab) => void;
   onBusinessClick: (b: BusinessSummary) => void;
@@ -477,7 +480,7 @@ function OverviewView({ data, regLimitData, dark, overviewTab, setOverviewTab, o
 
       {/* 상품등록한도 */}
       {regLimitData && regLimitData.stores.length > 0 && (
-        <RegistrationLimitPanel data={regLimitData} dark={dark} {...s} />
+        <RegistrationLimitPanel data={regLimitData} onReload={onReloadRegLimits} dark={dark} {...s} />
       )}
     </>
   );
@@ -1069,22 +1072,59 @@ function TopProductsTable({ products, ...s }: StyleProps & { products: TopProduc
    Registration Limit Panel
    ════════════════════════════════════════════ */
 
-function RegistrationLimitPanel({ data, ...s }: StyleProps & { data: RegistrationLimitData }) {
+function RegistrationLimitPanel({ data, onReload, ...s }: StyleProps & { data: RegistrationLimitData; onReload: () => void }) {
   const [expanded, setExpanded] = useState(true);
+  const [status, setStatus] = useState<PolicyCollectStatus | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const apiCount = data.stores.filter(st => st.limit_source === 'api').length;
+  const running = !!status?.running;
+
+  const poll = useCallback(() => {
+    fetchPolicyStatus().then(st => {
+      setStatus(st);
+      if (!st.running && pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+        onReload();   // 수집 완료 → 실측값 다시 로드
+      }
+    }).catch(() => {});
+  }, [onReload]);
+
+  const handleCollect = useCallback(async () => {
+    const r = await startPolicyCollect();
+    if (r.ok || r.error === 'already_running') {
+      poll();
+      if (!pollRef.current) pollRef.current = setInterval(poll, 3000);
+    }
+  }, [poll]);
+
+  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
 
   return (
     <div className={`rounded-xl border p-4 ${s.card}`}>
-      <div className="flex items-center gap-3 mb-3 cursor-pointer select-none" onClick={() => setExpanded(v => !v)}>
-        <h3 className={`text-sm font-bold ${s.txt}`}>
+      <div className="flex items-center gap-3 mb-3 flex-wrap">
+        <h3 className={`text-sm font-bold cursor-pointer select-none ${s.txt}`} onClick={() => setExpanded(v => !v)}>
           {expanded ? '▼' : '▶'} 상품등록한도
-          <span className={`text-[11px] font-normal ml-2 ${s.txtSub}`}>(6/2 신정책 기준)</span>
+          <span className={`text-[11px] font-normal ml-2 ${s.txtSub}`}>(네이버 판매정책준수현황 · 6/2 신정책)</span>
         </h3>
         <span className={`text-[11px] px-2 py-0.5 rounded ${s.dark ? 'bg-[#2a2a40] text-gray-300' : 'bg-gray-100 text-gray-600'}`}>
-          산출기간: {data.period_label}
+          실측 {apiCount}/{data.stores.length} · 미수집은 추정
         </span>
-        <span className={`text-[10px] ${s.txtSub}`}>
-          거래액 OR 판매건(3개월) + 판매상품비중(필수 3%)
-        </span>
+        <button
+          onClick={handleCollect}
+          disabled={running}
+          className={`text-[11px] px-2.5 py-1 rounded font-semibold transition-colors ${running
+            ? (s.dark ? 'bg-[#2a2a40] text-gray-500' : 'bg-gray-100 text-gray-400')
+            : 'bg-[#03c75a] text-white hover:bg-[#02b350]'}`}
+        >
+          {running ? `수집중 ${status?.login_idx ?? 0}/${status?.total_logins ?? 0}…` : '↻ 한도 실측 수집'}
+        </button>
+        {running && status && (
+          <span className={`text-[10px] ${s.txtSub}`}>
+            {status.current_login ?? ''} {status.current_store ? `/ ${status.current_store}` : ''}
+          </span>
+        )}
       </div>
 
       {expanded && (
@@ -1103,24 +1143,46 @@ function RegLimitCard({ store: st, dark, txt, txtSub }: {
 }) {
   const usagePct = st.current_limit > 0 ? Math.min((st.total_products / st.current_limit) * 100, 100) : 0;
   const overLimit = st.total_products > st.current_limit;
-  const lowRatio = st.sales_ratio < 3;
   const isMax = st.current_limit >= 50000;
+  const isApi = st.limit_source === 'api';
 
   const barColor = overLimit ? 'bg-red-500' : usagePct > 80 ? 'bg-yellow-500' : 'bg-[#03c75a]';
   const barBg = dark ? 'bg-[#2a2a40]' : 'bg-gray-200';
 
+  // 비중 3% 충족 여부 (실측은 API 이번달비중, 추정은 자체계산)
+  const ratioVal = isApi ? st.api_monthly_ratio : st.sales_ratio;
+  const ratioOk = isApi ? st.ratio_ok : st.sales_ratio >= 3;
+
+  const showAmount = isApi && st.api_sale_amount != null ? st.api_sale_amount : st.transaction_amount;
+  const showCount = isApi && st.api_sale_count != null ? st.api_sale_count : st.order_count;
+
   return (
     <div className={`rounded-lg border p-3 ${dark ? 'bg-[#1a1a2e] border-[#2a2a40]' : 'bg-gray-50 border-gray-200'}`}>
       {/* Header */}
-      <div className="flex items-center justify-between mb-2">
-        <span className={`text-[12px] font-bold ${txt}`}>{st.store_name}</span>
-        {isMax ? (
-          <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/20 text-green-400 font-bold">MAX</span>
-        ) : (
-          <span className={`text-[10px] px-1.5 py-0.5 rounded ${dark ? 'bg-[#2a2a40] text-gray-300' : 'bg-gray-200 text-gray-600'}`}>
-            한도 {st.current_limit.toLocaleString()}개
+      <div className="flex items-center justify-between mb-1 gap-1">
+        <span className={`text-[12px] font-bold truncate ${txt}`}>{st.store_name}</span>
+        <div className="flex items-center gap-1 shrink-0">
+          <span className={`text-[9px] px-1 py-0.5 rounded font-bold ${isApi
+            ? 'bg-blue-500/20 text-blue-400'
+            : (dark ? 'bg-[#2a2a40] text-gray-500' : 'bg-gray-200 text-gray-500')}`}
+            title={isApi ? `네이버 실측 (${st.captured_date ?? ''})` : '추정값 — 한도 실측 수집 전'}>
+            {isApi ? '실측' : '추정'}
           </span>
-        )}
+          {isMax ? (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/20 text-green-400 font-bold">MAX</span>
+          ) : (
+            <span className={`text-[10px] px-1.5 py-0.5 rounded ${dark ? 'bg-[#2a2a40] text-gray-300' : 'bg-gray-200 text-gray-600'}`}>
+              한도 {st.current_limit.toLocaleString()}개{isApi && <span className="font-normal ml-0.5">(이번달)</span>}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* 원본 사업자명 · 로그인 아이디 */}
+      <div className={`text-[10px] mb-2 truncate ${txtSub}`}>
+        {st.business_name && <span className="font-semibold">{st.business_name}</span>}
+        {st.business_name && st.login_id && <span className="mx-1">·</span>}
+        {st.login_id && <span>{st.login_id}</span>}
       </div>
 
       {/* Progress bar */}
@@ -1129,39 +1191,108 @@ function RegLimitCard({ store: st, dark, txt, txtSub }: {
           style={{ width: `${Math.min(usagePct, 100)}%` }} />
       </div>
       <div className={`text-[10px] mb-2 ${overLimit ? 'text-red-400 font-bold' : txtSub}`}>
-        {st.total_products.toLocaleString()} / {st.current_limit.toLocaleString()}
+        등록 {st.total_products.toLocaleString()} / {st.current_limit.toLocaleString()}
         {overLimit && ' (초과!)'}
         <span className="ml-1">({usagePct.toFixed(0)}%)</span>
       </div>
 
-      {/* Low ratio warning */}
-      {lowRatio && (
-        <div className={`text-[10px] px-2 py-1 rounded mb-2 ${dark ? 'bg-red-500/10 text-red-400' : 'bg-red-50 text-red-600'}`}>
-          비중 {st.sales_ratio}% &lt; 3% → 최대 1,000개 제한
-        </div>
-      )}
-
       {/* Metrics */}
       <div className="grid grid-cols-1 gap-1 text-[11px] mb-2">
         <div className="flex items-center justify-between">
-          <span className={txtSub}>거래액 (3개월)</span>
-          <span className={`font-bold ${txt}`}>{formatKoreanWon(st.transaction_amount)}</span>
+          <span className={txtSub}>거래액 {isApi ? '(최근 3개월)' : '(3개월)'}</span>
+          <span className={`font-bold ${txt}`}>{formatKoreanWon(showAmount)}</span>
         </div>
         <div className="flex items-center justify-between">
-          <span className={txtSub}>주문건 (3개월)</span>
-          <span className={`font-bold ${txt}`}>{st.order_count.toLocaleString()}건</span>
+          <span className={txtSub}>판매 건수 {isApi ? '(최근 3개월)' : '(3개월)'}</span>
+          <span className={`font-bold ${txt}`}>{showCount.toLocaleString()}건</span>
         </div>
         <div className="flex items-center justify-between">
-          <span className={txtSub}>판매상품비중</span>
-          <span className={`font-bold ${st.sales_ratio >= 3 ? 'text-green-400' : 'text-red-400'}`}>
-            {st.sales_ratio}%
-            <span className={`font-normal ml-1 ${txtSub}`}>({st.recent_sold_products}/{st.total_products})</span>
+          <span className={txtSub}>판매 상품 비중{isApi ? '(이번달)' : ''}</span>
+          <span className={`font-bold ${ratioOk ? 'text-green-400' : 'text-red-400'}`}>
+            {ratioVal != null ? ratioVal : '-'}%
+            <span className={`font-normal ml-1 ${ratioOk ? 'text-green-400' : 'text-red-400'}`}>
+              {ratioOk ? '✓ 3%↑' : '✗ <3%'}
+            </span>
           </span>
         </div>
       </div>
 
-      {/* Next tier */}
-      {st.next_limit && !lowRatio && (
+      {/* 비중 산식 (실측 전용) */}
+      {isApi && st.api_sale_product_count != null && st.api_90d_avg != null && (
+        <div className={`text-[10px] rounded px-2 py-1.5 mb-2 ${dark ? 'bg-[#222238]' : 'bg-white border border-gray-200'}`}>
+          <div className="flex items-center justify-between">
+            <span className={txtSub}>판매상품수<span className="opacity-60">(13개월)</span></span>
+            <span className={`font-bold ${txt}`}>{st.api_sale_product_count.toLocaleString()}개</span>
+          </div>
+          <div className="flex items-center justify-between">
+            <span className={txtSub}>÷ 평균등록상품수<span className="opacity-60">(90일)</span></span>
+            <span className={`font-bold ${txt}`}>{st.api_90d_avg.toLocaleString()}개</span>
+          </div>
+          <div className={`flex items-center justify-between pt-1 mt-1 border-t ${dark ? 'border-[#2a2a40]' : 'border-gray-200'}`}>
+            <span className={txtSub}>= 비중<span className="opacity-60">(전일)</span></span>
+            <span className={`font-bold ${(st.api_daily_ratio ?? 0) >= 3 ? 'text-green-400' : 'text-red-400'}`}>
+              {st.api_daily_ratio != null ? st.api_daily_ratio : '-'}%
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* 3% 미달 경고 + 도달 가이드 */}
+      {isApi && !ratioOk && (
+        <div className={`text-[10px] px-2 py-1 rounded mb-2 ${dark ? 'bg-red-500/10 text-red-400' : 'bg-red-50 text-red-600'}`}>
+          판매상품비중 {ratioVal}% &lt; 3% → 기본 한도 1,000개 유지
+        </div>
+      )}
+
+      {/* 90일 평균 추세 → 한도 상향 예상시점 */}
+      {isApi && !ratioOk && (
+        <div className={`text-[10px] px-2 py-1.5 rounded mb-2 flex items-center gap-1.5 ${dark ? 'bg-blue-500/10 text-blue-300' : 'bg-blue-50 text-blue-700'}`}>
+          {st.eta_status === 'projected' && st.eta_date ? (
+            <span>📈 예상 3% 도달 <b>{st.eta_date.slice(5).replace('-', '/')}</b>
+              {st.eta_days != null && <> (~{st.eta_days}일)</>}
+              {st.avg_slope_per_day != null && st.avg_slope_per_day < 0 && (
+                <span className="opacity-70"> · 평균 {Math.abs(st.avg_slope_per_day).toLocaleString()}개/일↓</span>
+              )}
+            </span>
+          ) : st.eta_status === 'collecting' ? (
+            <span className="opacity-80">📊 추세 데이터 축적 중 ({st.trend_points}일치) — 일일 수집 필요</span>
+          ) : st.eta_status === 'no_decline' ? (
+            <span className="opacity-80">📊 평균등록 감소 추세 없음 — 상품 정리 필요</span>
+          ) : st.eta_status === 'need_reduce' ? (
+            <span className="opacity-80">📉 현재 등록수가 목표 초과 — 추가 감축해야 도달</span>
+          ) : (
+            <span className="opacity-80">📊 추세 분석 대기</span>
+          )}
+        </div>
+      )}
+      {isApi && ratioOk && (
+        <div className={`text-[10px] px-2 py-1 rounded mb-2 ${dark ? 'bg-green-500/10 text-green-400' : 'bg-green-50 text-green-700'}`}>
+          ✓ 비중 3% 충족 — 거래액·판매건 볼륨 충족 시 한도 상향
+        </div>
+      )}
+      {isApi && !ratioOk && st.reg_target_3pct != null && (
+        st.reg_current_ok ? (
+          <div className={`text-[10px] px-2 py-1.5 rounded mb-2 ${dark ? 'bg-green-500/10 text-green-400' : 'bg-green-50 text-green-700'}`}>
+            🎯 3% 목표 평균등록 <b>{st.reg_target_3pct.toLocaleString()}개</b> 이하 ·
+            현재 등록 {st.total_products.toLocaleString()}개 → <b>이미 충족, 90일 평균 반영 대기</b>
+          </div>
+        ) : (
+          <div className={`text-[10px] px-2 py-1.5 rounded mb-2 ${dark ? 'bg-amber-500/10 text-amber-400' : 'bg-amber-50 text-amber-700'}`}>
+            🎯 3% 도달: 등록상품 <b>{st.reg_target_3pct.toLocaleString()}개</b> 이하로
+            {st.reg_reduce_avg != null && st.reg_reduce_avg > 0 && <> (현재평균 {st.api_90d_avg?.toLocaleString()} → 약 <b>{st.reg_reduce_avg.toLocaleString()}개↓</b>)</>}
+          </div>
+        )
+      )}
+      {isApi && (
+        <div className={`text-[9px] leading-snug pt-1.5 border-t ${dark ? 'border-[#2a2a40] text-gray-500' : 'border-gray-200 text-gray-400'}`}>
+          ⓘ 다음 달 한도는 <b>판매상품비중 3% 이상</b>일 때 상향됩니다.
+          비중은 순 상품 주문건수 기준(부정거래 제외).
+          {st.applied_ymd && <> · {st.applied_ymd.slice(0, 4)}.{st.applied_ymd.slice(4, 6)}.{st.applied_ymd.slice(6, 8)} 적용</>}
+        </div>
+      )}
+
+      {/* Next tier (추정 기준에서만 — 신정책 산식 미확정) */}
+      {!isApi && st.next_limit && st.sales_ratio >= 3 && (
         <div className={`text-[10px] pt-2 border-t ${dark ? 'border-[#2a2a40]' : 'border-gray-200'}`}>
           <div className={`font-bold mb-0.5 ${dark ? 'text-blue-400' : 'text-blue-600'}`}>
             ▷ 다음 {st.next_limit.toLocaleString()}개

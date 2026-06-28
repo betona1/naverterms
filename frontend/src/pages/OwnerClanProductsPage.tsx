@@ -1,4 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { useTheme } from '../hooks/useTheme';
+import WcodeBlacklistPanel from '../components/WcodeBlacklistPanel';
 import {
   fetchProducts,
   fetchProductDetail,
@@ -59,6 +61,8 @@ const FIELD_LABELS: Record<string, string> = {
 };
 
 export default function OwnerClanProductsPage() {
+  const { dark } = useTheme();
+  const [blacklistOpen, setBlacklistOpen] = useState(false);
   const [products, setProducts] = useState<OwnerClanProductItem[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -358,7 +362,14 @@ export default function OwnerClanProductsPage() {
       {/* Header */}
       <div className="sticky top-[42px] z-10 bg-white dark:bg-[#1e1e2e] border-b border-gray-200 dark:border-[#333] px-4 py-2.5">
         <div className="max-w-7xl mx-auto flex items-center justify-between">
-          <span className="text-sm font-bold">오너클랜 상품대장</span>
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-bold">오너클랜 상품대장</span>
+            <button
+              className="px-3 py-1 text-xs bg-rose-600 text-white rounded hover:bg-rose-700 font-bold shadow"
+              onClick={() => setBlacklistOpen(true)}
+              title="W코드 블랙리스트 — 등록/매칭/일괄 삭제"
+            >🚫 블랙리스트 상품</button>
+          </div>
           <div className="flex items-center gap-2 flex-wrap">
             <button
               className="px-3 py-1.5 text-xs bg-gray-500 text-white rounded hover:bg-gray-600 font-medium"
@@ -794,6 +805,9 @@ export default function OwnerClanProductsPage() {
           </div>
         </div>
       )}
+
+      {/* W코드 블랙리스트 사이드 패널 */}
+      <WcodeBlacklistPanel open={blacklistOpen} onClose={() => setBlacklistOpen(false)} dark={dark} />
     </div>
   );
 }

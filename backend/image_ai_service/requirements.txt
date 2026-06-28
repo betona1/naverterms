@@ -1,0 +1,24 @@
+# Naverterms image AI service (port 8902)
+# CPU + CUDA 자동 감지. 모델은 lazy load.
+
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.0
+python-multipart>=0.0.9
+pillow>=10.0
+numpy>=1.24,<2.0
+
+# 배경 제거
+rembg>=2.0.50
+
+# OCR (글씨 자동 검출) — torch 가져옴
+easyocr>=1.7
+
+# LaMa 인페인팅 (글씨 제거) — setup.sh 에서 --no-deps 로 설치 (pillow<10 핀 회피)
+# simple-lama-inpainting>=0.1.2
+
+# 옵션: GPU(CUDA)용 onnxruntime — rembg 가속
+# pip install onnxruntime-gpu  (별도 설치)
+
+# 생성형 AI — Gemini 2.5 Flash Image (nano-banana 후속)
+google-genai>=0.3.0

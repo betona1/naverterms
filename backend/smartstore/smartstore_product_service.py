@@ -737,6 +737,38 @@ def get_orphan_w_codes(store_ids=None):
         return [r['seller_management_code'] for r in _dictfetchall(cur)]
 
 
+def get_orphan_soldout(store_pk=0):
+    """오너클랜 카탈로그에서 사라진 W코드인데 SS는 SALE 로 박제된 상품(품절 박제).
+    seller_management_code LIKE 'W%' AND status_type='SALE' AND ads.ownerclan_product 에 없음.
+    반환: {count, by_store:[{store_id,store_name,count}], products:[...](최대 2000)}"""
+    where = ["p.status_type='SALE'", "p.seller_management_code LIKE 'W%%'",
+             "NOT EXISTS (SELECT 1 FROM ads.ownerclan_product o "
+             "WHERE o.product_code = p.seller_management_code)"]
+    params = []
+    if store_pk:
+        where.append('p.store_id=%s')
+        params.append(store_pk)
+    where_sql = ' AND '.join(where)
+    with connections['myproduct'].cursor() as cur:
+        cur.execute(f"SELECT COUNT(*) FROM smartstore_product p WHERE {where_sql}", params)
+        count = cur.fetchone()[0]
+        cur.execute(
+            f"SELECT s.id AS store_id, s.store_name, COUNT(*) AS cnt "
+            f"FROM smartstore_product p JOIN smartstoreIdList s ON s.id=p.store_id "
+            f"WHERE {where_sql} GROUP BY s.id, s.store_name ORDER BY cnt DESC", params)
+        by_store = [{'store_id': r['store_id'], 'store_name': r['store_name'],
+                     'count': r['cnt']} for r in _dictfetchall(cur)]
+        cur.execute(
+            f"SELECT p.id, p.store_id, s.store_name, p.origin_product_no, "
+            f"p.channel_product_no, p.seller_management_code, p.name, p.sale_price, "
+            f"p.stock_quantity, p.registered_at, p.last_modified_at "
+            f"FROM smartstore_product p JOIN smartstoreIdList s ON s.id=p.store_id "
+            f"WHERE {where_sql} ORDER BY s.store_name, p.seller_management_code "
+            f"LIMIT 2000", params)
+        products = [_serialize_row(r) for r in _dictfetchall(cur)]
+    return {'count': count, 'by_store': by_store, 'products': products}
+
+
 def _get_suspend_targets(product_ids, select_all=False, filters=None):
     """체크한 상품의 W코드 → 전 상점에서 SALE + ownerclan_soldout=1 대상 조회"""
     filters = filters or {}

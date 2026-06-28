@@ -5,6 +5,7 @@ import {
   type MissingSummary, type SkuRow,
 } from '../api/missingAttrsApi';
 import { fetchAttrProductDetail, type AttrGroup, type AttrGroupValue } from '../api/attrAnalyticsApi';
+import AttrAutoCheckModal from '../components/AttrAutoCheckModal';
 
 function fmt(n: number | null | undefined) {
   if (n === null || n === undefined) return '-';
@@ -25,6 +26,7 @@ export default function MissingAttrsPage() {
   const [storeFilter, setStoreFilter] = useState<number | undefined>(undefined);
   const [loading, setLoading] = useState(false);
   const [selectedSku, setSelectedSku] = useState<SkuRow | null>(null);
+  const [autoCheckOpen, setAutoCheckOpen] = useState(false);
 
   const card = dark ? 'bg-[#1c1c2e] border-[#2a2a40]' : 'bg-white border-gray-200';
   const text = dark ? 'text-white' : 'text-gray-900';
@@ -59,10 +61,16 @@ export default function MissingAttrsPage() {
             상품 클릭 → 빈 속성 모달에서 일괄 등록
           </p>
         </div>
-        <button onClick={() => { fetchSummary().then(setSummary); loadList(); }}
-                className={`px-3 py-1.5 rounded text-[12px] border ${dark ? 'border-[#2a2a40] hover:bg-[#252540] text-gray-300' : 'border-gray-300 hover:bg-gray-100 text-gray-600'}`}>
-          새로고침
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={() => setAutoCheckOpen(true)}
+                  className="px-3 py-1.5 rounded text-[12px] bg-[#03c75a] text-white hover:bg-[#02b150] font-semibold">
+            🤖 속성 자동체크
+          </button>
+          <button onClick={() => { fetchSummary().then(setSummary); loadList(); }}
+                  className={`px-3 py-1.5 rounded text-[12px] border ${dark ? 'border-[#2a2a40] hover:bg-[#252540] text-gray-300' : 'border-gray-300 hover:bg-gray-100 text-gray-600'}`}>
+            새로고침
+          </button>
+        </div>
       </div>
 
       {summary && (
@@ -170,6 +178,9 @@ export default function MissingAttrsPage() {
           sku={selectedSku}
           onClose={() => { setSelectedSku(null); loadList(); fetchSummary().then(setSummary); }}
         />
+      )}
+      {autoCheckOpen && (
+        <AttrAutoCheckModal onClose={() => { setAutoCheckOpen(false); loadList(); fetchSummary().then(setSummary); }} />
       )}
     </div>
   );

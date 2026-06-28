@@ -1,6 +1,6 @@
 #!/bin/bash
 # Stage 1 진행상황 스냅샷
-WORKERS=("ws220" "ws227" "ws228" "ws229" "ws230" "ws231" "vm11" "vm12" "vm13" "vm14" "ws15")
+WORKERS=("ws220" "ws227" "ws228" "ws229" "ws230" "ws231" "ws218" "ws226" "vm11" "vm12" "vm13" "vm14" "ws15")
 
 DB_USER=$(grep MYPRODUCT_DB_USER /home/joacham/projects/naverterms/.env | cut -d= -f2)
 DB_PASS=$(grep MYPRODUCT_DB_PASS /home/joacham/projects/naverterms/.env | cut -d= -f2)

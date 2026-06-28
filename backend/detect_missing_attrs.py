@@ -105,18 +105,27 @@ def detect(args):
             FROM smartstore_attr_crawl_log
             WHERE status='ok' AND category_id IS NOT NULL AND category_id<>''
         """
+        params = []
+        if getattr(args, 'store', None):
+            sql += ' AND store_id=%s'
+            params.append(int(args.store))
         if args.limit:
             sql += f' LIMIT {int(args.limit)}'
-        c.execute(sql)
+        c.execute(sql, params)
         all_skus = c.fetchall()
+
+    # category_id 풀패스 → leaf 변환 (스키마는 leaf 키)
+    def _leaf(cat):
+        return cat.split('>')[-1] if cat else cat
+    all_skus = [(s[0], s[1], _leaf(s[2])) for s in all_skus]
 
     print(f'[detect] OK SKU 수: {len(all_skus):,}')
     if not all_skus:
         return
 
-    # 2) 카테고리별로 스키마 미리 조회 (캐시)
+    # 2) 카테고리별로 스키마 미리 조회 (캐시) — leaf 기준
     cat_ids = sorted({s[2] for s in all_skus})
-    print(f'[detect] 고유 카테고리: {len(cat_ids):,} → 스키마 캐싱')
+    print(f'[detect] 고유 카테고리(leaf): {len(cat_ids):,} → 스키마 캐싱')
     schema_cache, _ = build_value_index(cat_ids)
     print(f'[detect] 스키마 매핑된 카테고리: {len(schema_cache):,}')
 
@@ -195,6 +204,7 @@ def _flush(batch):
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     ap.add_argument('--limit', type=int, default=0)
+    ap.add_argument('--store', type=int, default=0)
     ap.add_argument('--reset', action='store_true')
     args = ap.parse_args()
     detect(args)

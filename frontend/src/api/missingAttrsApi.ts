@@ -193,3 +193,119 @@ export async function registerForSku(payload: {
   });
   return data;
 }
+
+// ── 속성 AI 자동체크 ──
+const attrApi = axios.create({ baseURL: '/api/smartstore' });
+
+export interface AutoCheckSelection { attr_seq: number; attr_name: string; value: string; source: string; }
+export interface AutoCheckResult { seller_code: string; store_id: number; name: string; selections: AutoCheckSelection[]; }
+export interface AutoCheckPreview {
+  ok: boolean; scanned: number; matched_skus: number; attr_total: number;
+  sources: Record<string, number>; mode: string; results: AutoCheckResult[];
+}
+export interface AutoCheckStatus {
+  running: boolean;
+  worker: null | { key: string; name: string; status: string; log: string; heartbeat_at: string; idle_sec: number | null };
+  counts: Record<string, number>;
+}
+
+export async function autoCheckPreview(payload: { store_id?: number; limit?: number; codes?: string[]; mode?: string }): Promise<AutoCheckPreview> {
+  const { data } = await attrApi.post('/attr/auto-check/preview/', payload);
+  return data;
+}
+export async function autoCheckStart(payload: { store_id?: number; limit?: number; mode?: string }): Promise<{ ok: boolean; started?: boolean; error?: string }> {
+  const { data } = await attrApi.post('/attr/auto-check/start/', payload);
+  return data;
+}
+export async function autoCheckStatus(): Promise<AutoCheckStatus> {
+  const { data } = await attrApi.get('/attr/auto-check/status/');
+  return data;
+}
+
+export interface VisionStatus {
+  running: boolean;
+  worker: null | { key: string; name: string; status: string; log: string; heartbeat_at: string; idle_sec: number | null };
+  pending_targets: number;
+  gpus: string[];
+}
+export async function visionStart(payload: { store_id?: number; limit?: number }): Promise<{ ok: boolean; started?: boolean; error?: string }> {
+  const { data } = await attrApi.post('/attr/vision/start/', payload);
+  return data;
+}
+export async function visionStatus(): Promise<VisionStatus> {
+  const { data } = await attrApi.get('/attr/vision/status/');
+  return data;
+}
+
+// ── 속성 파이프라인 (수집→추론→동기화) + 상품별 속성 조회 ──
+export interface PipelineStore { store_id: number; store_name: string; pending: number; classified: number; registered: number; sale_skus: number; crawled_skus: number; }
+export interface ProductAttrItem { attribute_name: string; classification_type: string | null; status: string; candidate_values: { seq: number; text: string }[]; recommended_value_text: string | null; registered_value_text: string | null; }
+
+export async function pipelineStatus(storeId?: number): Promise<{ ok: boolean; stores: PipelineStore[]; totals: any }> {
+  const { data } = await attrApi.get('/attr/pipeline/status/', { params: storeId ? { store_id: storeId } : {} });
+  return data;
+}
+export async function productAttrs(sellerCode: string, storeId?: number): Promise<{ ok: boolean; seller_code: string; store_id: number; attributes: ProductAttrItem[] }> {
+  const { data } = await attrApi.get('/attr/product/', { params: { seller_code: sellerCode, store_id: storeId || undefined } });
+  return data;
+}
+
+// ── 상품 실물 컨텍스트 (상품명/대표이미지/상세) — 모달 오픈/SKU 선택 시에만 호출 ──
+export interface ProductContext {
+  ok: boolean;
+  seller_code: string;
+  store_id: number;
+  name?: string | null;
+  category_name?: string;
+  representative_image?: string | null;
+  option_images?: string[];
+  detail_images?: string[];
+  detail_text?: string;
+  error?: string;
+}
+export async function productContext(sellerCode: string, storeId?: number): Promise<ProductContext> {
+  const { data } = await attrApi.get<ProductContext>('/attr/product-context/', { params: { seller_code: sellerCode, store_id: storeId || undefined } });
+  return data;
+}
+
+// ── status별 SKU 드릴다운 + 수동검토 ──
+export interface StatusSkuItem { seller_code: string; store_id: number; store_name: string; name: string | null; status_type: string | null; is_sale: boolean; attr_count: number; }
+export async function listByStatus(status: string, storeId?: number, limit = 200, search = ''): Promise<{ ok: boolean; status: string; items: StatusSkuItem[]; error?: string }> {
+  const { data } = await attrApi.get('/attr/list-by-status/', { params: { status, store_id: storeId || undefined, limit, search: search || undefined } });
+  return data;
+}
+
+export interface ManualAttrItem { attribute_seq: number; attribute_name: string; classification_type: string | null; candidate_values: { seq: number; text: string }[]; recommended_value_seq: number | null; recommended_value_text: string | null; last_error: string | null; }
+export async function needsManualForSku(sellerCode: string, storeId?: number): Promise<{ ok: boolean; seller_code: string; store_id: number; attributes: ManualAttrItem[] }> {
+  const { data } = await attrApi.get('/attr/needs-manual-sku/', { params: { seller_code: sellerCode, store_id: storeId || undefined } });
+  return data;
+}
+
+export interface RecentChange { id: number; seller_code: string; store_id: number; store_name: string; added_count: number; status: string; changed_at: string | null; }
+export async function recentChanges(storeId?: number, limit = 100): Promise<{ ok: boolean; changes: RecentChange[] }> {
+  const { data } = await attrApi.get('/attr/changes/recent/', { params: { store_id: storeId || undefined, limit } });
+  return data;
+}
+export async function syncStart(payload: { store_id?: number; limit?: number }): Promise<{ ok: boolean; started?: boolean; error?: string }> {
+  const { data } = await attrApi.post('/attr/sync/start/', payload);
+  return data;
+}
+export async function syncStatusReq(): Promise<{ running: boolean; worker: any; counts: Record<string, number> }> {
+  const { data } = await attrApi.get('/attr/sync/status/');
+  return data;
+}
+
+// ── 파이프라인 단계 실행 (수집/추론) + 워커 상태 ──
+export interface PipelineWorkers { crawl: { running: boolean; log: string | null; name: string | null }; stage: { running: boolean; log: string | null; name: string | null }; sync: { running: boolean; log: string | null; name: string | null }; }
+export async function pipelineCrawlStart(storeId?: number): Promise<{ ok: boolean; started?: boolean; error?: string }> {
+  const { data } = await attrApi.post('/attr/pipeline/crawl/start/', storeId ? { store_id: storeId } : {});
+  return data;
+}
+export async function pipelineStageStart(payload: { store_id?: number; limit?: number }): Promise<{ ok: boolean; started?: boolean; error?: string }> {
+  const { data } = await attrApi.post('/attr/pipeline/stage/start/', payload);
+  return data;
+}
+export async function pipelineWorkers(): Promise<PipelineWorkers> {
+  const { data } = await attrApi.get('/attr/pipeline/workers/');
+  return data;
+}

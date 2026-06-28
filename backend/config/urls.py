@@ -9,4 +9,5 @@ urlpatterns = [
     path('api/power/', include('smartstore.power_urls')),
     path('api/gpu/', include('smartstore.gpu_monitor_urls')),
     path('api/workers/', include('smartstore.workers_unified_urls')),
-] + static(settings.STATIC_URL, document_root=settings.STATICFILES_DIRS[0])
+] + static(settings.STATIC_URL, document_root=settings.STATICFILES_DIRS[0]) \
+  + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

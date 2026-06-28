@@ -102,7 +102,7 @@ def _store_ids_for_business(code):
 def _get_stores_map():
     with connections['myproduct'].cursor() as cur:
         cur.execute(
-            "SELECT id, store_name, store_url, memo FROM smartstoreIdList WHERE is_active=1 ORDER BY memo, id"
+            "SELECT id, store_id, store_name, store_url, memo FROM smartstoreIdList WHERE is_active=1 ORDER BY memo, id"
         )
         rows = _dictfetchall(cur)
     return {r['id']: r for r in rows}
@@ -378,11 +378,177 @@ def _next_tier(current_limit):
     return None
 
 
+def _norm_store_name(name):
+    """끝자리 숫자/공백 무시한 정규화 (조아마미1 == 조아마미)."""
+    return re.sub(r'\d+$', '', (name or '').strip())
+
+
+def _load_policy_snapshots():
+    """최신 정책 스냅샷 로드.
+    반환: (by_pk, by_login_name) — store_pk 매칭 + (login_id, 정규화이름) 폴백 매칭."""
+    by_pk = {}
+    by_login_name = {}
+    try:
+        with connections['myproduct'].cursor() as cur:
+            cur.execute("SHOW TABLES LIKE 'smartstore_seller_policy_snapshot'")
+            if not cur.fetchone():
+                return by_pk, by_login_name
+            # 스토어별(store_pk 또는 login+name) 최신 1건
+            cur.execute("""
+                SELECT t.store_pk, t.login_id, t.store_name, t.sale_limit_count, t.applied_ymd,
+                       t.cumulation_sale_amount, t.cumulation_sale_count,
+                       t.monthly_sale_active_ratio, t.sale_active_ratio,
+                       t.product_count_90d_avg, t.sale_product_count_400d,
+                       t.captured_date
+                FROM smartstore_seller_policy_snapshot t
+                JOIN (
+                    SELECT login_id, store_name, MAX(captured_date) md
+                    FROM smartstore_seller_policy_snapshot
+                    WHERE sale_limit_count IS NOT NULL
+                    GROUP BY login_id, store_name
+                ) m ON m.login_id = t.login_id AND m.store_name = t.store_name
+                   AND m.md = t.captured_date
+                WHERE t.sale_limit_count IS NOT NULL
+            """)
+            for r in _dictfetchall(cur):
+                if r['store_pk'] is not None:
+                    by_pk[r['store_pk']] = r
+                key = (r['login_id'], _norm_store_name(r['store_name']))
+                by_login_name.setdefault(key, r)
+    except Exception:
+        pass
+    return by_pk, by_login_name
+
+
+def _load_policy_history():
+    """스토어별 평균등록상품수(90일) 시계열 — (date, avg_reg, monthly_ratio).
+    반환: (by_pk, by_login_name) 각 값은 날짜순 정렬 리스트."""
+    by_pk = defaultdict(list)
+    by_login_name = defaultdict(list)
+    try:
+        with connections['myproduct'].cursor() as cur:
+            cur.execute("SHOW TABLES LIKE 'smartstore_seller_policy_snapshot'")
+            if not cur.fetchone():
+                return {}, {}
+            cur.execute("""
+                SELECT store_pk, login_id, store_name, captured_date,
+                       product_count_90d_avg, monthly_sale_active_ratio
+                FROM smartstore_seller_policy_snapshot
+                WHERE sale_limit_count IS NOT NULL AND product_count_90d_avg IS NOT NULL
+                ORDER BY captured_date
+            """)
+            for r in _dictfetchall(cur):
+                pt = (r['captured_date'], int(r['product_count_90d_avg']),
+                      float(r['monthly_sale_active_ratio']) if r['monthly_sale_active_ratio'] is not None else None)
+                if r['store_pk'] is not None:
+                    by_pk[r['store_pk']].append(pt)
+                by_login_name[(r['login_id'], _norm_store_name(r['store_name']))].append(pt)
+    except Exception:
+        pass
+    return by_pk, by_login_name
+
+
+def _linfit_slope(xs, ys):
+    """일별 기울기 (최소제곱). 데이터 부족/수직이면 None."""
+    n = len(xs)
+    if n < 2:
+        return None
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    den = sum((x - mx) ** 2 for x in xs)
+    if den == 0:
+        return None
+    return sum((xs[i] - mx) * (ys[i] - my) for i in range(n)) / den
+
+
+def _project_3pct_eta(series, reg_target, total_prods, monthly_ratio):
+    """평균등록상품수(90일) 추세로 3% 도달 예상시점 추정.
+    반환 dict: trend_points, avg_slope_per_day, eta_days, eta_date, status."""
+    out = {'trend_points': len(series), 'avg_slope_per_day': None,
+           'eta_days': None, 'eta_date': None, 'status': 'collecting'}
+    if not series or reg_target is None:
+        return out
+    latest_date, latest_avg, _ = series[-1]
+    # 이미 3% 충족
+    if monthly_ratio is not None and monthly_ratio >= 3.0:
+        out['status'] = 'met'
+        out['eta_days'] = 0
+        return out
+    # 현재 등록수가 목표보다 많으면 대기로는 불가 (추가 감축 필요)
+    if total_prods > reg_target:
+        out['status'] = 'need_reduce'
+        return out
+    # 추세 외삽 (2점 이상)
+    if len(series) >= 2:
+        x0 = series[0][0]
+        xs = [(d - x0).days for d, _, _ in series]
+        ys = [a for _, a, _ in series]
+        slope = _linfit_slope(xs, ys)
+        out['avg_slope_per_day'] = round(slope, 2) if slope is not None else None
+        if slope is not None and slope < 0 and latest_avg > reg_target:
+            days = (latest_avg - reg_target) / (-slope)
+            days = max(1, min(int(round(days)), 90))  # 0~90일 클램프 (90일이면 완전 수렴)
+            out['eta_days'] = days
+            out['eta_date'] = (latest_date + timedelta(days=days)).isoformat()
+            out['status'] = 'projected'
+            return out
+        if slope is not None and slope >= 0:
+            out['status'] = 'no_decline'
+            return out
+    # 데이터 부족 (1점) — 현재 등록수가 목표 이하면 수렴 시 도달 예상
+    out['status'] = 'collecting'
+    return out
+
+
+def get_policy_trend(store_id=None):
+    """정책 스냅샷 시계열 — store_id 지정 시 해당 스토어, 아니면 전체 스토어별."""
+    stores_map = _get_stores_map()
+    targets = [store_id] if store_id else list(stores_map.keys())
+    result = []
+    try:
+        with connections['myproduct'].cursor() as cur:
+            cur.execute("SHOW TABLES LIKE 'smartstore_seller_policy_snapshot'")
+            if not cur.fetchone():
+                return {'stores': []}
+            for sid in targets:
+                info = stores_map.get(sid)
+                if not info:
+                    continue
+                cur.execute("""
+                    SELECT captured_date, sale_limit_count, product_count_90d_avg,
+                           sale_product_count_400d, monthly_sale_active_ratio, sale_active_ratio
+                    FROM smartstore_seller_policy_snapshot
+                    WHERE (store_pk=%s OR (login_id=%s AND store_name=%s))
+                      AND sale_limit_count IS NOT NULL
+                    ORDER BY captured_date
+                """, [sid, info.get('store_id'), info['store_name']])
+                rows = _dictfetchall(cur)
+                if not rows:
+                    continue
+                result.append({
+                    'store_id': sid,
+                    'store_name': info['store_name'],
+                    'points': [{
+                        'date': r['captured_date'].isoformat(),
+                        'limit': r['sale_limit_count'],
+                        'avg_reg': r['product_count_90d_avg'],
+                        'sold': r['sale_product_count_400d'],
+                        'monthly_ratio': float(r['monthly_sale_active_ratio']) if r['monthly_sale_active_ratio'] is not None else None,
+                        'daily_ratio': float(r['sale_active_ratio']) if r['sale_active_ratio'] is not None else None,
+                    } for r in rows],
+                })
+    except Exception:
+        pass
+    return {'stores': result}
+
+
 def get_registration_limits():
-    """24개 스토어별 상품등록한도 지표 계산"""
+    """24개 스토어별 상품등록한도 지표 — 네이버 API 실제값 우선, 미수집은 추정값."""
 
     stores_map = _get_stores_map()
     start_date, end_date, period_label = _calc_3month_period()
+    snaps_by_pk, snaps_by_login_name = _load_policy_snapshots()
+    hist_by_pk, hist_by_login_name = _load_policy_history()
 
     # 1) 3개월 주문건수 + 거래액
     where, params = _base_where()
@@ -439,22 +605,73 @@ def get_registration_limits():
         # 판매상품비중 (소수점 이하 버림)
         ratio = int(recent_sold / total_prods * 100) if total_prods > 0 else 0
 
-        current_limit = _determine_limit(amount, orders, ratio)
+        # 네이버 API 실제값 우선 (store_pk → login+정규화이름 폴백) — 없으면 추정 tier
+        snap = snaps_by_pk.get(sid)
+        if snap is None:
+            snap = snaps_by_login_name.get((info.get('store_id'), _norm_store_name(info['store_name'])))
+        if snap and snap.get('sale_limit_count') is not None:
+            current_limit = int(snap['sale_limit_count'])
+            limit_source = 'api'
+        else:
+            current_limit = _determine_limit(amount, orders, ratio)
+            limit_source = 'estimate'
         nt = _next_tier(current_limit)
+
+        # 원본 사업자명 (memo 02비트마인드2 → 비트마인드)
+        _, biz_name = _parse_business_code(info.get('memo'))
+
+        # 판매상품비중(이번달) — 3% 미만이면 기본 1,000개 한도
+        monthly_ratio = float(snap['monthly_sale_active_ratio']) if snap and snap.get('monthly_sale_active_ratio') is not None else None
+
+        # 비중 3% 도달 목표: 평균등록상품수 ≤ 판매상품수 / 0.03
+        api_sold = int(snap['sale_product_count_400d']) if snap and snap.get('sale_product_count_400d') is not None else None
+        api_avg_reg = int(snap['product_count_90d_avg']) if snap and snap.get('product_count_90d_avg') is not None else None
+        reg_target_3pct = round(api_sold / 0.03) if api_sold else None     # 평균등록 이 이하면 3% 충족
+        # 90일 평균을 목표 이하로 낮추려면 줄여야 할 양 (후행지표 기준)
+        reg_reduce_avg = max(0, api_avg_reg - reg_target_3pct) if (api_avg_reg is not None and reg_target_3pct is not None) else None
+        # 현재 등록수(우리 DB)가 이미 목표 이하면 90일 평균 반영 시 자동 도달 예상
+        reg_current_ok = (reg_target_3pct is not None and total_prods <= reg_target_3pct)
+
+        # 90일 평균 추세로 3% 도달 예상시점
+        series = hist_by_pk.get(sid) or hist_by_login_name.get(
+            (info.get('store_id'), _norm_store_name(info['store_name']))) or []
+        eta = _project_3pct_eta(series, reg_target_3pct, total_prods, monthly_ratio)
 
         stores_result.append({
             'store_id': sid,
             'store_name': info['store_name'],
+            'login_id': info.get('store_id'),       # 원본 로그인 아이디
+            'business_name': biz_name,              # 원본 사업자명
             'transaction_amount': amount,
             'order_count': orders,
             'recent_sold_products': recent_sold,
             'total_products': total_prods,
             'sales_ratio': ratio,
             'current_limit': current_limit,
+            'limit_source': limit_source,
             'next_limit': nt['limit'] if nt else None,
             'needed_amount': max(0, nt['amount'] - amount) if nt else None,
             'needed_orders': max(0, nt['orders'] - orders) if nt else None,
             'period_label': period_label,
+            # ── 네이버 API 실제값 (limit_source=='api' 일 때 유효) ──
+            'applied_ymd': snap.get('applied_ymd') if snap else None,
+            'api_sale_amount': int(snap['cumulation_sale_amount']) if snap and snap.get('cumulation_sale_amount') is not None else None,
+            'api_sale_count': int(snap['cumulation_sale_count']) if snap and snap.get('cumulation_sale_count') is not None else None,
+            'api_monthly_ratio': monthly_ratio,
+            'api_daily_ratio': float(snap['sale_active_ratio']) if snap and snap.get('sale_active_ratio') is not None else None,
+            'api_90d_avg': int(snap['product_count_90d_avg']) if snap and snap.get('product_count_90d_avg') is not None else None,
+            'api_sale_product_count': api_sold,
+            'ratio_ok': (monthly_ratio is not None and monthly_ratio >= 3.0),
+            'reg_target_3pct': reg_target_3pct,       # 3% 도달 목표 평균등록수
+            'reg_reduce_avg': reg_reduce_avg,         # 90일평균 기준 줄여야 할 양
+            'reg_current_ok': reg_current_ok,         # 현재 등록수가 이미 목표 이하
+            # ── 90일 평균 추세 → 3% 도달 예상시점 ──
+            'trend_points': eta['trend_points'],      # 보유 스냅샷 일수
+            'avg_slope_per_day': eta['avg_slope_per_day'],  # 평균등록 일별 변화량
+            'eta_days': eta['eta_days'],              # 3% 도달까지 예상 일수
+            'eta_date': eta['eta_date'],              # 예상 도달 날짜
+            'eta_status': eta['status'],              # met/projected/collecting/need_reduce/no_decline
+            'captured_date': snap['captured_date'].isoformat() if snap and snap.get('captured_date') else None,
         })
 
     stores_result.sort(key=lambda x: (-x['current_limit'], -x['transaction_amount']))

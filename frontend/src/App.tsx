@@ -3,7 +3,8 @@ import { useTheme } from './hooks/useTheme';
 import TopNav from './components/TopNav';
 import StoreSettingsModal from './components/smartstore/StoreSettingsModal';
 import PowerControlModal from './components/PowerControlModal';
-import UnifiedWorkerModal from './components/UnifiedWorkerModal';
+import GpuMonitorModal from './components/GpuMonitorModal';
+import BrandPolicyModal from './components/BrandPolicyModal';
 import NaverTermsPage from './pages/NaverTermsPage';
 import NaverResultsPage from './pages/NaverResultsPage';
 import NaverRankPage from './pages/NaverRankPage';
@@ -25,6 +26,7 @@ import MissingAttrsPage from './pages/MissingAttrsPage';
 import AttrRegisterPage from './pages/AttrRegisterPage';
 import WorkersPage from './pages/WorkersPage';
 import NaverMyProductsPage from './pages/NaverMyProductsPage';
+import NaverDupPage from './pages/NaverDupPage';
 
 const PAGE_KEY = 'nt-page';
 
@@ -49,6 +51,7 @@ const HASH_MAP: Record<string, string> = {
   '#attr-register': 'attr-register',
   '#workers': 'workers',
   '#naver-products': 'naver-products',
+  '#naver-dup': 'naver-dup',
 };
 
 export default function App() {
@@ -61,6 +64,7 @@ export default function App() {
   const [showStoreSettings, setShowStoreSettings] = useState(false);
   const [showPowerControl, setShowPowerControl] = useState(false);
   const [showGpuMonitor, setShowGpuMonitor] = useState(false);
+  const [showBrandPolicy, setShowBrandPolicy] = useState(false);
 
   const changePage = useCallback((p: string) => {
     setPage(p);
@@ -76,7 +80,7 @@ export default function App() {
         setPage('product-edit');
         return;
       }
-      if (h && ['terms', 'synonyms', 'autocomplete', 'results', 'rank', 'products', 'extension', 'ownerclan', 'analytics', 'keywords', 'catkeywords', 'cunning', 'purchase', 'reports', 'store-collect', 'attr-analytics', 'missing-attrs', 'attr-register', 'workers', 'naver-products'].includes(h)) {
+      if (h && ['terms', 'synonyms', 'autocomplete', 'results', 'rank', 'products', 'extension', 'ownerclan', 'analytics', 'keywords', 'catkeywords', 'cunning', 'purchase', 'reports', 'store-collect', 'attr-analytics', 'missing-attrs', 'attr-register', 'workers', 'naver-products', 'naver-dup'].includes(h)) {
         setPage(h);
         try { localStorage.setItem(PAGE_KEY, h); } catch { /* */ }
       }
@@ -99,6 +103,7 @@ export default function App() {
           onStoreSettings={() => setShowStoreSettings(true)}
           onPowerControl={() => setShowPowerControl(true)}
           onGpuMonitor={() => setShowGpuMonitor(true)}
+          onBrandPolicy={() => setShowBrandPolicy(true)}
           dark={dark}
           onToggleTheme={toggle}
         />
@@ -124,6 +129,7 @@ export default function App() {
           {page === 'attr-register' && <AttrRegisterPage />}
           {page === 'workers' && <WorkersPage />}
           {page === 'naver-products' && <NaverMyProductsPage />}
+          {page === 'naver-dup' && <NaverDupPage />}
         </main>
       </div>
       {showStoreSettings && (
@@ -133,7 +139,10 @@ export default function App() {
         <PowerControlModal onClose={() => setShowPowerControl(false)} />
       )}
       {showGpuMonitor && (
-        <UnifiedWorkerModal onClose={() => setShowGpuMonitor(false)} />
+        <GpuMonitorModal open={true} onClose={() => setShowGpuMonitor(false)} />
+      )}
+      {showBrandPolicy && (
+        <BrandPolicyModal dark={dark} onClose={() => setShowBrandPolicy(false)} />
       )}
     </div>
   );

@@ -2,7 +2,7 @@
 # Stage 1 — 11 워커에 24개 store 균등 분배 + 전체 SKU API 크롤
 set -e
 
-WORKERS=("ws220" "ws227" "ws228" "ws229" "ws230" "ws231" "vm11" "vm12" "vm13" "vm14" "ws15")
+WORKERS=("ws220" "ws227" "ws228" "ws229" "ws230" "ws231" "ws218" "ws226" "vm11" "vm12" "vm13" "vm14" "ws15")
 
 # store_id 분배 (smartstoreIdList.id 기준)
 # 24개 스토어 / 11 워커 — 일부 워커 3개 할당

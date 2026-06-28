@@ -124,16 +124,89 @@ class GpuLogsView(APIView):
 
 
 class GpuBulkProgressStubView(APIView):
-    """11번가 전용 bulk_progress 는 우리한테 부적합 — 빈 응답으로 stub.
-    모달이 호출하더라도 안 깨지게.
+    """naverterms 폴더 + 큐 진척률.
+    folders: 활성 폴더 모두 (queue_position NULL/NOT NULL)
+    main_queue: queue_position 순서대로 (드래그 정렬용)
+    rate_1h/10min: 최근 처리량 (ads.gpu_worker_log platform='naver')
     """
     authentication_classes = []
     permission_classes = []
 
     def get(self, request):
+        from datetime import datetime as _dt
+        # 폴더별 진척
+        with connections['naverdb'].cursor() as cur:
+            cur.execute(
+                """
+                SELECT f.id, f.name, f.queue_position,
+                       COUNT(p.id) AS total,
+                       SUM(p.naver_product_name IS NOT NULL AND p.naver_product_name<>'') AS done
+                  FROM naver_my_product_folder f
+                  LEFT JOIN naver_my_product p ON p.folder_id = f.id
+                 GROUP BY f.id, f.name, f.queue_position
+                 ORDER BY (f.queue_position IS NULL), f.queue_position, f.id
+                """
+            )
+            folders = []
+            queue_only = []
+            grand_total = grand_done = 0
+            for fid, name, qpos, total, done in cur.fetchall():
+                total = int(total or 0); done = int(done or 0)
+                if total == 0:
+                    continue
+                remaining = total - done
+                pct = round(done * 100 / total, 1) if total else 0
+                status = 'done' if remaining == 0 else ('progress' if qpos is not None else 'pending')
+                row = {
+                    'folder_id': fid, 'folder_name': name,
+                    'queue_position': qpos,
+                    'total': total, 'done': done, 'remaining': remaining,
+                    'pct': pct, 'status': status,
+                }
+                folders.append(row)
+                if qpos is not None:
+                    queue_only.append(row)
+                grand_total += total
+                grand_done += done
+            queue_only.sort(key=lambda x: x['queue_position'])
+
+        # 처리량 (platform='naver' 만)
+        with connections['ads'].cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                  (SELECT COUNT(*) FROM gpu_worker_log
+                    WHERE event_type='complete'
+                      AND JSON_UNQUOTE(JSON_EXTRACT(meta,'$.platform'))='naver'
+                      AND created_at >= DATE_SUB(NOW(), INTERVAL 1 HOUR)) AS rate_1h,
+                  (SELECT COUNT(*) FROM gpu_worker_log
+                    WHERE event_type='complete'
+                      AND JSON_UNQUOTE(JSON_EXTRACT(meta,'$.platform'))='naver'
+                      AND created_at >= DATE_SUB(NOW(), INTERVAL 10 MINUTE)) AS rate_10min,
+                  (SELECT AVG(elapsed_ms) FROM gpu_worker_log
+                    WHERE event_type='complete'
+                      AND JSON_UNQUOTE(JSON_EXTRACT(meta,'$.platform'))='naver'
+                      AND created_at >= DATE_SUB(NOW(), INTERVAL 1 HOUR)) AS avg_ms
+                """
+            )
+            row = cur.fetchone() or (0, 0, None)
+            rate_1h = int(row[0] or 0)
+            rate_10min = int(row[1] or 0)
+            avg_ms = int(row[2]) if row[2] else 0
+
+        grand_remaining = grand_total - grand_done
+        pct = round(grand_done * 100 / grand_total, 1) if grand_total else 0
+        stalled = rate_10min == 0 and grand_remaining > 0
+        # ETA: 시간당 처리량으로 추정
+        eta_hours = round(grand_remaining / rate_1h, 2) if rate_1h > 0 else None
+
         return Response({
-            'ok': True, 'folders': [], 'main_queue': [],
-            'total': 0, 'done': 0, 'remaining': 0, 'pct': 0,
-            'rate_1h': 0, 'rate_10min': 0, 'stalled': False, 'avg_ms': 0,
-            'eta_hours': None,
+            'ok': True,
+            'folders': folders,
+            'main_queue': queue_only,
+            'total': grand_total, 'done': grand_done, 'remaining': grand_remaining, 'pct': pct,
+            'rate_1h': rate_1h * 6 if rate_1h else 0,  # /h 가 아니라 분당으로 환산 (11st 모달 호환)
+            'rate_10min': rate_10min * 6 if rate_10min else 0,
+            'stalled': stalled, 'avg_ms': avg_ms,
+            'eta_hours': eta_hours,
         })

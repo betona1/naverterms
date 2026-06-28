@@ -6,12 +6,65 @@ import {
   enqueueGenerate, fetchQueueStatus, moveNaverProducts,
   fetchNaverProductDetail, patchNaverProduct, clearVisionCache,
   fetchKeywordPool, fetchRelatedKeywords, fetchRelatedKeywordsMulti, fetchKeywordRelevance,
+  confirmNaverName, fetchNaverNameConfirmations,
+  fetchNaverNameVersions, rollbackNaverName,
   type NaverProductItem, type NaverProductFolder, type ImportState,
   type QueueStatus, type NaverProductDetail, type KeywordPool,
-  type RelatedKeyword,
+  type RelatedKeyword, type NameCommentType, type NameConfirmationItem,
+  type NameVersionsResponse,
 } from '../api/naverProductApi';
+import { fetchWcodeBlacklist } from '../api/wcodeBlacklistApi';
+import { fetchProductMeta } from '../api/bulkRegisterApi';
+import WcodeBlacklistPanel from '../components/WcodeBlacklistPanel';
+import { ProductAttrModal } from '../components/ProductAttrModal';
+import BulkRegisterModal from '../components/BulkRegisterModal';
+import RegisterManagerModal from '../components/RegisterManagerModal';
+import LiveNameCheckModal from '../components/LiveNameCheckModal';
+import BadNameModal from '../components/BadNameModal';
+import DupSuspendModal from '../components/DupSuspendModal';
+import DiagnosisModal from '../components/DiagnosisModal';
+import AttrAutoCheckModal from '../components/AttrAutoCheckModal';
+import { ThumbnailEditor } from '../components/ThumbnailEditor';
+import { DetailThumbExtractor } from '../components/DetailThumbExtractor';
+import { ThumbnailVariantGallery } from '../components/ThumbnailVariantGallery';
 
 const POLL_MS = 1500;
+
+// 페이지네이션 — 현재 page 중심으로 최대 10개 숫자 + 처음/끝/이전/다음.
+// 양 끝 ... 표시는 안 함 (10개 슬라이딩 윈도우로 충분).
+function Pager({
+  page, totalPages, setPage, C,
+}: {
+  page: number;
+  totalPages: number;
+  setPage: (p: number) => void;
+  C: { border: string; text: string; muted: string };
+}) {
+  const MAX = 10;
+  const safeTotal = Math.max(1, totalPages || 1);
+  let start = Math.max(1, page - Math.floor(MAX / 2));
+  let end   = Math.min(safeTotal, start + MAX - 1);
+  if (end - start + 1 < MAX) start = Math.max(1, end - MAX + 1);
+  const nums: number[] = [];
+  for (let n = start; n <= end; n++) nums.push(n);
+
+  const btn = `px-2 py-0.5 text-xs border rounded ${C.border} ${C.text} disabled:opacity-30 hover:bg-violet-50 dark:hover:bg-violet-900/30`;
+  const active = `px-2 py-0.5 text-xs border rounded bg-violet-600 text-white border-violet-700 font-bold`;
+  return (
+    <div className="flex items-center gap-1">
+      <button disabled={page <= 1} onClick={() => setPage(1)} className={btn} title="처음">«</button>
+      <button disabled={page <= 1} onClick={() => setPage(Math.max(1, page - 1))} className={btn} title="이전">◀</button>
+      {nums.map(n => (
+        <button key={n} onClick={() => setPage(n)} className={n === page ? active : btn}>
+          {n.toLocaleString()}
+        </button>
+      ))}
+      <button disabled={page >= safeTotal} onClick={() => setPage(Math.min(safeTotal, page + 1))} className={btn} title="다음">▶</button>
+      <button disabled={page >= safeTotal} onClick={() => setPage(safeTotal)} className={btn} title="끝">»</button>
+      <span className={`text-[10px] ${C.muted} ml-1`}>총 {safeTotal.toLocaleString()}p</span>
+    </div>
+  );
+}
 
 export default function NaverMyProductsPage() {
   const { dark } = useTheme();
@@ -32,8 +85,21 @@ export default function NaverMyProductsPage() {
   const [queueStatus, setQueueStatus] = useState<QueueStatus | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [moveModalOpen, setMoveModalOpen] = useState(false);
+  const [bulkRegOpen, setBulkRegOpen] = useState(false);
+  const [regMgrOpen, setRegMgrOpen] = useState(false);
+  const [liveNameOpen, setLiveNameOpen] = useState(false);
+  const [badNameOpen, setBadNameOpen] = useState(false);
+  const [dupSuspendOpen, setDupSuspendOpen] = useState(false);
+  const [diagnosisOpen, setDiagnosisOpen] = useState(false);
+  const [autoCheckOpen, setAutoCheckOpen] = useState(false);
   const [detailId, setDetailId] = useState<number | null>(null);
   const [salesMode, setSalesMode] = useState(false);
+  // 블랙리스트 — W코드 set + 패널 toggle + 필터
+  const [blacklistSet, setBlacklistSet] = useState<Set<string>>(new Set());
+  const [productMeta, setProductMeta] = useState<Record<string, { tag_count: number; attr_count: number; tag_registered?: number }>>({});
+  const [attrModal, setAttrModal] = useState<{ code: string; store: number } | null>(null);
+  const [blacklistPanelOpen, setBlacklistPanelOpen] = useState(false);
+  const [blacklistOnly, setBlacklistOnly] = useState(false);
   const pollRef = useRef<number | null>(null);
   const queuePollRef = useRef<number | null>(null);
 
@@ -50,6 +116,8 @@ export default function NaverMyProductsPage() {
       setProducts(r.items);
       setTotal(r.total);
       setTotalPages(r.total_pages);
+      const codes = r.items.map((it: any) => it.product_code).filter(Boolean);
+      fetchProductMeta(codes).then(setProductMeta).catch(() => {});
     } catch {
       setProducts([]); setTotal(0); setTotalPages(0);
     } finally {
@@ -80,6 +148,16 @@ export default function NaverMyProductsPage() {
 
   // ── Effects ──
   useEffect(() => { loadProducts(); }, [loadProducts]);
+
+  // 블랙리스트 W코드 set — 페이지 진입 시 + 패널 닫힐 때 갱신
+  const reloadBlacklist = useCallback(async () => {
+    try {
+      const r = await fetchWcodeBlacklist({ per_page: 5000, only_unprocessed: true });
+      setBlacklistSet(new Set(r.items.map(it => it.product_code)));
+    } catch { /* silent */ }
+  }, []);
+  useEffect(() => { reloadBlacklist(); }, [reloadBlacklist]);
+  useEffect(() => { if (!blacklistPanelOpen) reloadBlacklist(); }, [blacklistPanelOpen, reloadBlacklist]);
   useEffect(() => { loadFolders(); }, [loadFolders]);
   useEffect(() => { loadImportStatus(); /* mount 시 1회 */ }, [loadImportStatus]);
   useEffect(() => () => { if (pollRef.current != null) window.clearInterval(pollRef.current); }, []);
@@ -365,6 +443,72 @@ export default function NaverMyProductsPage() {
           📊 매출 정렬
         </label>
 
+        {/* 블랙리스트 */}
+        <button
+          onClick={() => setRegMgrOpen(true)}
+          title="등록후보/작업대기 폴더 관리 + 체크이동 + 작업대기 엑셀저장 + 등록검증"
+          className="px-3 py-1.5 text-xs font-bold rounded bg-indigo-600 hover:bg-indigo-700 text-white shadow">
+          📋 등록관리
+        </button>
+
+        <button
+          onClick={() => setBulkRegOpen(true)}
+          title="확정상품을 네이버 엑셀 일괄등록 양식으로 생성 (500개 단위)"
+          className="px-3 py-1.5 text-xs font-bold rounded bg-[#03c75a] hover:opacity-90 text-white shadow">
+          📦 일괄등록
+        </button>
+
+        <button
+          onClick={() => setLiveNameOpen(true)}
+          title="네이버에 등록된 라이브 상품명에서 금지어(크록스 등) 검출·수정"
+          className="px-3 py-1.5 text-xs font-bold rounded bg-rose-600 hover:bg-rose-700 text-white shadow">
+          🔤 금지어점검
+        </button>
+
+        <button
+          onClick={() => setBadNameOpen(true)}
+          title="AI 안내문 누출·형식오류 등 불량 상품명 탐지 (등록 전 제외)"
+          className="px-3 py-1.5 text-xs font-bold rounded bg-amber-600 hover:bg-amber-700 text-white shadow">
+          🧹 불량명탐지
+        </button>
+
+        <button
+          onClick={() => setDupSuspendOpen(true)}
+          title="같은 W코드 중복 등록분 품절처리 (판매중·매출 1개 유지)"
+          className="px-3 py-1.5 text-xs font-bold rounded bg-orange-600 hover:bg-orange-700 text-white shadow">
+          🔁 중복품절
+        </button>
+
+        <button
+          onClick={() => setDiagnosisOpen(true)}
+          title="상품등록정보검토 — 속성/태그/브랜드 미등록 진단 (아이디별 병렬 동기화)"
+          className="px-3 py-1.5 text-xs font-bold rounded bg-indigo-600 hover:bg-indigo-700 text-white shadow">
+          🩺 등록정보검토
+        </button>
+
+        <button
+          onClick={() => setAutoCheckOpen(true)}
+          title="속성 AI 자동체크 — 상품명·상세·썸네일 분석해 정확한 속성만 자동 등록"
+          className="px-3 py-1.5 text-xs font-bold rounded bg-[#03c75a] hover:bg-[#02b150] text-white shadow">
+          🤖 속성 자동체크
+        </button>
+
+        <button
+          onClick={() => setBlacklistPanelOpen(true)}
+          title="W코드 블랙리스트 — 등록/매칭/일괄 삭제"
+          className="px-3 py-1.5 text-xs font-bold rounded bg-rose-600 hover:bg-rose-700 text-white shadow">
+          🚫 블랙리스트{blacklistSet.size > 0 ? ` (${blacklistSet.size})` : ''}
+        </button>
+        <label className={`flex items-center gap-1 text-xs cursor-pointer select-none px-2 py-1 rounded border ${
+          blacklistOnly
+            ? 'bg-rose-500/20 border-rose-400 text-rose-700 dark:text-rose-300 font-bold'
+            : `${C.border} ${C.sub} hover:${C.text}`
+        }`}>
+          <input type="checkbox" checked={blacklistOnly}
+                 onChange={e => setBlacklistOnly(e.target.checked)} />
+          🚫 블랙리스트만
+        </label>
+
         <button
           onClick={() => onEnqueueTopSales(500)}
           disabled={busy}
@@ -511,16 +655,8 @@ export default function NaverMyProductsPage() {
               {[20, 50, 100, 200].map(n => <option key={n} value={n}>{n}건</option>)}
             </select>
             <div className="flex-1" />
-            {/* 페이지네이션 */}
-            <div className="flex items-center gap-1">
-              <button disabled={page <= 1} onClick={() => setPage(p => Math.max(1, p - 1))}
-                      className={`px-2 py-0.5 text-xs border rounded ${C.border} ${C.text} disabled:opacity-30`}>◀</button>
-              <span className={`text-xs ${C.muted} min-w-[80px] text-center`}>
-                {page.toLocaleString()} / {totalPages.toLocaleString() || 1}
-              </span>
-              <button disabled={page >= totalPages} onClick={() => setPage(p => p + 1)}
-                      className={`px-2 py-0.5 text-xs border rounded ${C.border} ${C.text} disabled:opacity-30`}>▶</button>
-            </div>
+            {/* 페이지네이션 (위) — 숫자 최대 10개 + 처음/끝/이전/다음 */}
+            <Pager page={page} totalPages={totalPages} setPage={setPage} C={C} />
           </div>
 
           <div className="flex-1 overflow-auto">
@@ -559,13 +695,18 @@ export default function NaverMyProductsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {products.map((p, idx) => {
+                  {products
+                    .filter(p => !blacklistOnly || blacklistSet.has(p.product_code))
+                    .map((p, idx) => {
                     const folder = folders.find(f => f.id === p.folder_id);
                     const isSelected = selected.has(p.id);
+                    const isBlacklisted = blacklistSet.has(p.product_code);
                     const rank = salesMode ? (page - 1) * perPage + idx + 1 : null;
                     return (
                       <tr key={p.id} className={`border-t ${C.border} ${C.rowHover} ${C.text} ${
                         isSelected ? (dark ? 'bg-amber-900/20' : 'bg-amber-50') : ''
+                      } ${
+                        isBlacklisted ? `border-l-4 ${dark ? 'border-l-rose-500 bg-rose-900/10' : 'border-l-rose-500 bg-rose-50/40'}` : ''
                       }`}>
                         <td className="px-2 py-1 text-center">
                           <input
@@ -573,6 +714,12 @@ export default function NaverMyProductsPage() {
                             checked={isSelected}
                             onChange={() => toggleSelected(p.id)}
                           />
+                          {isBlacklisted && (
+                            <span title="블랙리스트 등록됨 — 패널에서 일괄 삭제 처리"
+                                  className={`block mt-0.5 text-[9px] font-bold ${dark ? 'text-rose-300' : 'text-rose-600'}`}>
+                              🚫
+                            </span>
+                          )}
                         </td>
                         {salesMode && (
                           <td className={`px-2 py-1 text-right font-bold ${
@@ -582,13 +729,30 @@ export default function NaverMyProductsPage() {
                           </td>
                         )}
                         <td className="px-2 py-1 cursor-pointer" onClick={() => setDetailId(p.id)}>
-                          {p.image_small ? (
-                            <img src={p.image_small} alt="" className="w-10 h-10 object-cover rounded hover:ring-2 hover:ring-emerald-400" loading="lazy" />
-                          ) : (
-                            <div className={`w-10 h-10 rounded ${dark ? 'bg-[#252540]' : 'bg-gray-200'}`} />
-                          )}
+                          {(() => {
+                            // 업스케일 파일은 joacham 호스팅으로 이전됨(로컬 /media 백업 이동). product_code 기반 공인 URL 사용
+                            const up = p.upscaled_image_url ? `http://www.joacham.com/imghost/${p.product_code}_1.jpg` : null;
+                            return (
+                          <HoverProductImage
+                            thumb={up || p.edited_image_url || p.image_small}
+                            large={p.image_large}
+                            edited={p.edited_image_url}
+                            upscaled={up}
+                            additional={p.additional_images || []}
+                            productCode={p.product_code}
+                            dark={dark}
+                          />
+                            );
+                          })()}
                         </td>
-                        <td className={`px-2 py-1 font-mono text-[11px] ${C.sub}`}>{p.product_code}</td>
+                        <td className={`px-2 py-1 font-mono text-[11px] ${C.sub}`}>
+                          <div>{p.product_code}</div>
+                          {(() => { const meta = productMeta[p.product_code]; if (!meta || (!meta.tag_count && !meta.attr_count)) return null;
+                            return <div className="flex gap-1 mt-0.5">
+                              {meta.tag_count > 0 && <span className="px-1 rounded text-[9px] bg-[#03c75a]/20 text-[#03c75a]" title="등록 태그수">🏷{meta.tag_count}</span>}
+                              {meta.attr_count > 0 && <span onClick={() => setAttrModal({ code: p.product_code, store: 0 })} className="px-1 rounded text-[9px] bg-indigo-500/20 text-indigo-400 cursor-pointer hover:bg-indigo-500/40" title="속성 현황 보기">🔧{meta.attr_count}</span>}
+                            </div>; })()}
+                        </td>
                         <td className="px-2 py-1 max-w-[280px] cursor-pointer" onClick={() => setDetailId(p.id)}>
                           <div className="truncate hover:underline" title={p.product_name || ''}>{p.product_name}</div>
                         </td>
@@ -637,6 +801,10 @@ export default function NaverMyProductsPage() {
               </table>
             )}
           </div>
+          {/* 페이지네이션 (아래) */}
+          <div className={`flex items-center justify-end px-3 py-2 border-t ${C.border}`}>
+            <Pager page={page} totalPages={totalPages} setPage={setPage} C={C} />
+          </div>
         </main>
       </div>
 
@@ -660,6 +828,54 @@ export default function NaverMyProductsPage() {
           onClose={() => setDetailId(null)}
           onSaved={() => { loadProducts(); }}
         />
+      )}
+
+      {/* W코드 블랙리스트 사이드 패널 */}
+      <WcodeBlacklistPanel open={blacklistPanelOpen} onClose={() => setBlacklistPanelOpen(false)} dark={dark} />
+
+      {attrModal && <ProductAttrModal sellerCode={attrModal.code} storeId={attrModal.store} onClose={() => setAttrModal(null)} />}
+
+      <BulkRegisterModal
+        open={bulkRegOpen}
+        onClose={() => setBulkRegOpen(false)}
+        dark={dark}
+        initialFolderId={selectedFolderId}
+      />
+
+      <RegisterManagerModal
+        open={regMgrOpen}
+        onClose={() => { setRegMgrOpen(false); loadProducts(); loadFolders(); }}
+        dark={dark}
+        initialStoreFolderId={selectedFolderId}
+      />
+
+      <LiveNameCheckModal
+        open={liveNameOpen}
+        onClose={() => setLiveNameOpen(false)}
+        dark={dark}
+      />
+
+      <BadNameModal
+        open={badNameOpen}
+        onClose={() => setBadNameOpen(false)}
+        dark={dark}
+      />
+
+      <DupSuspendModal
+        open={dupSuspendOpen}
+        onClose={() => setDupSuspendOpen(false)}
+        dark={dark}
+      />
+
+      <DiagnosisModal
+        open={diagnosisOpen}
+        onClose={() => setDiagnosisOpen(false)}
+        dark={dark}
+        initialStoreId={null}
+      />
+
+      {autoCheckOpen && (
+        <AttrAutoCheckModal onClose={() => { setAutoCheckOpen(false); loadProducts(); }} />
       )}
     </div>
   );
@@ -770,6 +986,24 @@ function ProductDetailModal({
   const [extraKws, setExtraKws] = useState<string[]>([]);
   const [naverName, setNaverName] = useState('');
   const [comment, setComment] = useState('');
+  // AI 컨펌
+  const [commentType, setCommentType] = useState<NameCommentType>('overall');
+  const [aiCommentOpen, setAiCommentOpen] = useState(false);
+  const [confirmBusy, setConfirmBusy] = useState(false);
+  const [confirmHistory, setConfirmHistory] = useState<NameConfirmationItem[]>([]);
+  // 버전/롤백
+  const [versionsInfo, setVersionsInfo] = useState<NameVersionsResponse | null>(null);
+  const [rollbackOpen, setRollbackOpen] = useState(false);
+  const [rollbackBusy, setRollbackBusy] = useState(false);
+  const [patchNotesOpen, setPatchNotesOpen] = useState(false);
+  // 썸네일 AI 편집 모달
+  const [thumbEditOpen, setThumbEditOpen] = useState(false);
+  // 상세 → 썸네일 추출 모달
+  const [thumbExtractOpen, setThumbExtractOpen] = useState(false);
+  // 변형 풀 갤러리 모달
+  const [galleryOpen, setGalleryOpen] = useState(false);
+  // 추출 → AI 편집 연동용 (base64)
+  const [editorInitB64, setEditorInitB64] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -781,8 +1015,15 @@ function ProductDetailModal({
       setD(r);
       setPool(p && p.ok ? p : null);
       setNaverName(r.naver_product_name || '');
-      setComment(((r as unknown) as { comment?: string }).comment || '');
+      setComment(r.comment || '');
       setExtraKws([]);
+      // 컨펌 히스토리 + 버전 스냅샷 (백그라운드)
+      fetchNaverNameConfirmations(productId, 5)
+        .then(h => setConfirmHistory(h.ok ? h.items : []))
+        .catch(() => setConfirmHistory([]));
+      fetchNaverNameVersions(productId, 10)
+        .then(v => setVersionsInfo(v.ok ? v : null))
+        .catch(() => setVersionsInfo(null));
       // 연관키워드 — multi-seed 대량 수집 (네이버 검색광고 한 호출에 ~1000개)
       const isHan = (s: string) => /[가-힣]/.test(s);
       const tokens = (r.product_name || '')
@@ -1054,6 +1295,82 @@ function ProductDetailModal({
     }
   };
 
+  // before/after diff — naver_product_name_before 를 baseline 으로 비교
+  const diffBeforeAfter = useMemo(() => {
+    const before = d?.naver_product_name_before || '';
+    const after = naverName || '';
+    const beforeTokens = tokenize(before);
+    const afterTokens = tokenize(after);
+    const afterLc = new Set(afterTokens.map(t => t.toLowerCase()));
+    const beforeLc = new Set(beforeTokens.map(t => t.toLowerCase()));
+    const removed = beforeTokens.filter(t => !afterLc.has(t.toLowerCase()));
+    const added = afterTokens.filter(t => !beforeLc.has(t.toLowerCase()));
+    const kept = afterTokens.filter(t => beforeLc.has(t.toLowerCase()));
+    return { before, after, removed, added, kept };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [d?.naver_product_name_before, naverName]);
+
+  const onConfirm = async () => {
+    if (!d) return;
+    // before 는 _before 컬럼 우선, 없으면 (최초 컨펌) 원본 product_name 사용
+    const before = d.naver_product_name_before || d.product_name || '';
+    if (!naverName.trim()) { flash('네이버 상품명이 비어 있음'); return; }
+    if (commentType !== 'overall' && !comment.trim()) {
+      if (!confirm(`코멘트가 비었습니다. ‘${commentType === 'wrong' ? '잘못된키워드 지적' : '빠진키워드 지적'}’ 컨펌은 코멘트가 학습 가치를 결정합니다. 그래도 저장할까요?`)) return;
+    }
+    setConfirmBusy(true);
+    try {
+      // 1) 본문 저장 먼저 (naverName + comment patch)
+      await patchNaverProduct(productId, {
+        naver_product_name: naverName,
+        comment: comment || null,
+      } as Partial<NaverProductDetail>);
+      // 2) 컨펌 등록
+      const r = await confirmNaverName(productId, {
+        before_name: before,
+        after_name: naverName,
+        comment: comment || null,
+        comment_type: commentType,
+      });
+      if (r.ok) {
+        const bk = (r.bad_keywords || []).length;
+        const wk = (r.white_keywords || []).length;
+        flash(`✅ 컨펌 저장 — 학습됨 (블랙 ${bk} / 화이트 ${wk}, ${r.category_type})`);
+        // 히스토리 갱신
+        fetchNaverNameConfirmations(productId, 5)
+          .then(h => setConfirmHistory(h.ok ? h.items : []))
+          .catch(() => {});
+        onSaved();
+      } else {
+        flash(`컨펌 실패: ${r.error || 'unknown'}`);
+      }
+    } catch (e: unknown) {
+      flash(`에러: ${(e as Error).message}`);
+    } finally {
+      setConfirmBusy(false);
+    }
+  };
+
+  const onRollback = async (snapshotId: number) => {
+    if (!confirm('이 스냅샷으로 상품명을 되돌립니다. 현재 상품명은 새 스냅샷으로 보존됩니다. 진행할까요?')) return;
+    setRollbackBusy(true);
+    try {
+      const r = await rollbackNaverName(productId, snapshotId);
+      if (r.ok && r.restored_name) {
+        flash(`⏪ 롤백 완료 (${r.restored_version}): ${r.restored_name}`);
+        setRollbackOpen(false);
+        await reload();
+        onSaved();
+      } else {
+        flash(`롤백 실패: ${r.error || 'unknown'}`);
+      }
+    } catch (e: unknown) {
+      flash(`에러: ${(e as Error).message}`);
+    } finally {
+      setRollbackBusy(false);
+    }
+  };
+
   const onRegenerate = async () => {
     setGenBusy(true);
     try {
@@ -1140,6 +1457,58 @@ function ProductDetailModal({
             <span>📋</span>
             <h2 className={`text-sm font-bold ${C.text}`}>상품 편집</h2>
             {d && <span className={`text-xs font-mono ${C.muted}`}>#{d.id} · W{d.product_code}</span>}
+            {/* 버전 라벨 — 코드 현재 버전 / 이 상품에 적용된 버전 */}
+            {versionsInfo && (
+              <span title={`코드: ${versionsInfo.code_version} / 상품: ${versionsInfo.current_version || '미적용'}`}
+                    className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${
+                      versionsInfo.current_version === versionsInfo.code_version
+                        ? (dark ? 'bg-emerald-900/40 text-emerald-300 border border-emerald-700' : 'bg-emerald-100 text-emerald-700 border border-emerald-300')
+                        : (dark ? 'bg-amber-900/40 text-amber-300 border border-amber-700' : 'bg-amber-100 text-amber-700 border border-amber-300')
+                    }`}>
+                상품명수정 네이버 {versionsInfo.code_version}
+                {versionsInfo.current_version && versionsInfo.current_version !== versionsInfo.code_version && (
+                  <> · 상품={versionsInfo.current_version}</>
+                )}
+              </span>
+            )}
+            {/* 롤백 드롭다운 토글 */}
+            {versionsInfo && versionsInfo.items.length > 0 && (
+              <div className="relative">
+                <button onClick={() => setRollbackOpen(o => !o)}
+                        className={`text-[10px] px-2 py-0.5 rounded font-bold ${
+                          rollbackOpen
+                            ? 'bg-amber-600 text-white'
+                            : dark ? 'bg-amber-900/30 text-amber-300 hover:bg-amber-900/50' : 'bg-amber-50 text-amber-700 hover:bg-amber-100 border border-amber-300'
+                        }`}>
+                  ⏪ 롤백 ({versionsInfo.items.length})
+                </button>
+                {rollbackOpen && (
+                  <div className={`absolute left-0 top-full mt-1 z-[95] w-[420px] rounded-lg shadow-2xl border ${C.bg} ${C.border}`}>
+                    <div className={`px-3 py-1.5 text-[10px] font-bold border-b ${C.border} ${C.muted}`}>
+                      이전 버전 스냅샷 — 클릭하여 복원
+                    </div>
+                    <div className="max-h-[300px] overflow-y-auto">
+                      {versionsInfo.items.map(s => (
+                        <button key={s.id}
+                                onClick={() => onRollback(s.id)}
+                                disabled={rollbackBusy}
+                                className={`w-full text-left px-3 py-1.5 text-[11px] border-b ${C.border} hover:bg-amber-100 dark:hover:bg-amber-900/30 disabled:opacity-40`}>
+                          <div className="flex items-center gap-1.5 mb-0.5">
+                            <span className={`font-mono font-bold ${dark ? 'text-amber-300' : 'text-amber-700'}`}>{s.version_tag}</span>
+                            <span className={`${C.muted} font-mono text-[9px]`}>
+                              {s.created_at?.slice(5, 16).replace('T', ' ')}
+                            </span>
+                            {s.source === 'manual' && <span className={`text-[9px] px-1 rounded ${dark ? 'bg-rose-900/40 text-rose-300' : 'bg-rose-100 text-rose-700'}`}>수동</span>}
+                          </div>
+                          <div className={`truncate ${C.text}`} title={s.naver_product_name || ''}>{s.naver_product_name}</div>
+                          {s.note && <div className={`${C.muted} text-[9px] italic`}>{s.note}</div>}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
             {d?.is_modified === 1 && (
               <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-600 dark:text-amber-400">수정됨</span>
             )}
@@ -1160,6 +1529,71 @@ function ProductDetailModal({
         {msg && (
           <div className="px-4 py-1 text-xs bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 border-b border-emerald-200 dark:border-emerald-800">
             {msg}
+          </div>
+        )}
+
+        {/* 📋 상품명AI패치 사항 안내 — 한줄 요약 + ▼ 펼침 */}
+        {versionsInfo?.patch_notes && versionsInfo.patch_notes.length > 0 && (
+          <div className={`border-b ${C.border} ${dark ? 'bg-[#181828]' : 'bg-violet-50/40'}`}>
+            <button
+              onClick={() => setPatchNotesOpen(o => !o)}
+              className="w-full px-4 py-1.5 flex items-center gap-2 text-left hover:bg-violet-100/40 dark:hover:bg-violet-900/20 transition-colors">
+              <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                dark ? 'bg-violet-900/40 text-violet-300 border border-violet-700' : 'bg-violet-100 text-violet-700 border border-violet-300'
+              }`}>
+                📋 상품명AI패치 안내 ({versionsInfo.patch_notes[0].version})
+              </span>
+              <span className={`text-[11px] flex-1 truncate ${C.sub}`} title={versionsInfo.patch_notes[0].summary}>
+                {versionsInfo.patch_notes[0].summary}
+              </span>
+              <span className={`text-[10px] ${C.muted}`}>{patchNotesOpen ? '▲ 접기' : '▼ 전체 보기'}</span>
+            </button>
+            {patchNotesOpen && (
+              <div className={`px-4 pb-3 space-y-2.5 max-h-[40vh] overflow-y-auto`}>
+                {versionsInfo.patch_notes.map(pn => (
+                  <div key={pn.version} className={`rounded-lg border ${C.border} ${C.panel} p-2.5`}>
+                    <div className="flex items-baseline gap-2 mb-1.5">
+                      <span className={`text-[11px] font-bold font-mono ${dark ? 'text-violet-300' : 'text-violet-700'}`}>
+                        {pn.version}
+                      </span>
+                      <span className={`text-[9px] font-mono ${C.muted}`}>{pn.date}</span>
+                      <span className={`text-[11px] ${C.text} flex-1`}>{pn.summary}</span>
+                    </div>
+                    {pn.issues.length > 0 && (
+                      <div className="mb-1.5">
+                        <div className={`text-[9px] font-bold mb-0.5 ${dark ? 'text-rose-300' : 'text-rose-700'}`}>
+                          🚫 지적된 문제
+                        </div>
+                        <ul className="space-y-0.5">
+                          {pn.issues.map((it, i) => (
+                            <li key={`is${i}`} className={`text-[10px] ${C.sub} pl-3 relative before:content-["•"] before:absolute before:left-0.5 before:text-rose-400`}>
+                              {it}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    {pn.fixes.length > 0 && (
+                      <div>
+                        <div className={`text-[9px] font-bold mb-0.5 ${dark ? 'text-emerald-300' : 'text-emerald-700'}`}>
+                          ✅ 적용한 수정
+                        </div>
+                        <ul className="space-y-0.5">
+                          {pn.fixes.map((it, i) => (
+                            <li key={`fx${i}`} className={`text-[10px] ${C.sub} pl-3 relative before:content-["•"] before:absolute before:left-0.5 before:text-emerald-400`}>
+                              {it}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                ))}
+                <div className={`text-[9px] ${C.muted} italic text-center pt-1`}>
+                  전체 패치 노트: docs/PATCH_NOTES_naver_name.md
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -1441,18 +1875,123 @@ function ProductDetailModal({
                 </div>
               )}
 
-              {/* 4) 코멘트 (프롬프트 엔지니어링) */}
-              <div>
-                <label className={`block text-[10px] font-bold ${dark ? 'text-violet-300' : 'text-violet-700'} mb-1`}>
-                  📝 코멘트 (DB 저장 · 추후 프롬프트 학습용)
-                </label>
-                <textarea
-                  value={comment}
-                  onChange={e => setComment(e.target.value)}
-                  rows={3}
-                  placeholder="이 상품에서 좋았던 키워드, 나빴던 키워드, 비전 분석이 틀린 부분 등 자유 메모. 추후 모델 fine-tuning 에 활용."
-                  className={`${C.input} border rounded w-full px-2 py-1.5 text-xs`}
-                />
+              {/* 4) AI 컨펌 학습 패널 — W코드/카테고리별 화이트·블랙 누적 */}
+              <div className={`border-2 rounded-lg p-2.5 ${dark ? 'border-violet-700 bg-violet-900/10' : 'border-violet-300 bg-violet-50/50'}`}>
+                <div className={`text-[11px] font-bold mb-1.5 flex items-center justify-between ${dark ? 'text-violet-300' : 'text-violet-700'}`}>
+                  <span>🧠 AI 상품명 컨펌 학습 (W{d.product_code} · 카테고리별 누적)</span>
+                  <span className={`text-[9px] font-normal ${C.muted}`}>
+                    삭제 {diffBeforeAfter.removed.length} · 추가 {diffBeforeAfter.added.length} · 유지 {diffBeforeAfter.kept.length}
+                  </span>
+                </div>
+
+                {/* before/after diff 미리보기 */}
+                {(diffBeforeAfter.before || diffBeforeAfter.after) && (
+                  <div className={`${C.panel} rounded p-2 mb-2 text-[11px] space-y-1`}>
+                    <div className="flex items-baseline gap-1.5">
+                      <span className={`text-[9px] font-bold ${C.muted}`}>BEFORE</span>
+                      <span className={`flex-1 ${C.muted}`}>{diffBeforeAfter.before || <i>(직전 AI 생성본 없음 — 첫 컨펌)</i>}</span>
+                    </div>
+                    <div className="flex items-baseline gap-1.5">
+                      <span className={`text-[9px] font-bold ${dark ? 'text-emerald-300' : 'text-emerald-700'}`}>AFTER</span>
+                      <span className={`flex-1 font-bold ${C.text}`}>{diffBeforeAfter.after}</span>
+                    </div>
+                    {(diffBeforeAfter.removed.length > 0 || diffBeforeAfter.added.length > 0) && (
+                      <div className="flex flex-wrap gap-1 pt-1">
+                        {diffBeforeAfter.removed.map(t => (
+                          <span key={`rm:${t}`}
+                                title="삭제된 키워드 → 블랙 학습 후보"
+                                className={`text-[10px] px-1.5 py-0.5 rounded line-through ${
+                                  dark ? 'bg-rose-900/40 text-rose-300 border border-rose-800' : 'bg-rose-100 text-rose-700 border border-rose-300'
+                                }`}>
+                            🗑 {t}
+                          </span>
+                        ))}
+                        {diffBeforeAfter.added.map(t => (
+                          <span key={`ad:${t}`}
+                                title="새로 추가된 키워드 → 화이트 학습 후보"
+                                className={`text-[10px] px-1.5 py-0.5 rounded ${
+                                  dark ? 'bg-emerald-900/40 text-emerald-300 border border-emerald-800' : 'bg-emerald-100 text-emerald-700 border border-emerald-300'
+                                }`}>
+                            ⭐ {t}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* 라디오 — 컨펌 분류 */}
+                <div className={`text-[10px] flex items-center flex-wrap gap-3 mb-2 ${C.label}`}>
+                  <span className="font-bold">컨펌 종류:</span>
+                  <label className="flex items-center gap-1 cursor-pointer">
+                    <input type="radio" name="cmt" checked={commentType === 'wrong'}
+                           onChange={() => setCommentType('wrong')} />
+                    <span className={commentType === 'wrong' ? 'font-bold text-rose-500' : ''}>🚫 잘못된키워드 지적</span>
+                  </label>
+                  <label className="flex items-center gap-1 cursor-pointer">
+                    <input type="radio" name="cmt" checked={commentType === 'missing'}
+                           onChange={() => setCommentType('missing')} />
+                    <span className={commentType === 'missing' ? `font-bold ${dark ? 'text-emerald-300' : 'text-emerald-700'}` : ''}>⭐ 빠진키워드 지적</span>
+                  </label>
+                  <label className="flex items-center gap-1 cursor-pointer">
+                    <input type="radio" name="cmt" checked={commentType === 'overall'}
+                           onChange={() => setCommentType('overall')} />
+                    <span className={commentType === 'overall' ? 'font-bold text-violet-500' : ''}>📋 전체적으로지적</span>
+                  </label>
+                </div>
+
+                {/* AI 컨멘트 작성하기 — 토글 + textarea */}
+                <div className="space-y-1.5">
+                  <button onClick={() => setAiCommentOpen(o => !o)}
+                          className={`text-[10px] px-2 py-1 rounded font-bold ${
+                            aiCommentOpen
+                              ? 'bg-violet-600 text-white'
+                              : dark ? 'bg-violet-900/40 text-violet-200 hover:bg-violet-900/60' : 'bg-violet-100 text-violet-700 hover:bg-violet-200'
+                          }`}>
+                    {aiCommentOpen ? '▼' : '▶'} AI 컨멘트 작성하기 {comment ? `(${comment.length}자)` : ''}
+                  </button>
+                  {aiCommentOpen && (
+                    <textarea
+                      value={comment}
+                      onChange={e => setComment(e.target.value)}
+                      rows={4}
+                      placeholder={
+                        commentType === 'wrong'
+                          ? '예) "낚시" 는 골프 우의에 안 어울리니 빼세요. 등산은 OK.'
+                          : commentType === 'missing'
+                            ? '예) "방수", "투습" 같은 기능 키워드가 빠짐. 다음부턴 꼭 포함.'
+                            : '예) 색상은 옵션 색상만 쓰고 비전 추측은 무시. 길이는 45자 이상 유지.'
+                      }
+                      className={`${C.input} border rounded w-full px-2 py-1.5 text-xs`}
+                    />
+                  )}
+                </div>
+
+                {/* 컨펌 히스토리 (최근 3건) */}
+                {confirmHistory.length > 0 && (
+                  <div className={`mt-2 pt-2 border-t ${C.border}`}>
+                    <div className={`text-[9px] font-bold mb-1 ${C.muted}`}>최근 컨펌 ({confirmHistory.length})</div>
+                    <div className="space-y-1">
+                      {confirmHistory.slice(0, 3).map(h => (
+                        <div key={h.id} className={`text-[10px] ${C.sub} flex items-baseline gap-1.5`}>
+                          <span className={`text-[9px] font-mono ${C.muted}`}>
+                            {h.created_at ? h.created_at.slice(5, 16).replace('T', ' ') : ''}
+                          </span>
+                          <span className={
+                            h.comment_type === 'wrong' ? 'text-rose-500' :
+                            h.comment_type === 'missing' ? (dark ? 'text-emerald-300' : 'text-emerald-700') :
+                            'text-violet-500'
+                          }>
+                            {h.comment_type === 'wrong' ? '🚫' : h.comment_type === 'missing' ? '⭐' : '📋'}
+                          </span>
+                          <span className="truncate flex-1" title={h.after_name || ''}>{h.after_name}</span>
+                          {h.bad_keywords?.length > 0 && <span className="text-rose-500">−{h.bad_keywords.length}</span>}
+                          {h.white_keywords?.length > 0 && <span className={dark ? 'text-emerald-300' : 'text-emerald-700'}>+{h.white_keywords.length}</span>}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* 5) 비전 결과 (참고용 + 재분석 버튼) */}
@@ -1494,8 +2033,111 @@ function ProductDetailModal({
 
                 {d.image_large && (
                   <div className={`${C.panel} rounded mb-2 p-2 border ${C.border}`}>
-                    <img src={d.image_large} alt="" className="w-full max-h-[350px] object-contain rounded" />
+                    <div className="flex items-center justify-between mb-1.5">
+                      <div className={`text-[10px] font-bold ${C.muted} flex items-center gap-1.5`}>
+                        <span>🖼 썸네일</span>
+                        {d.edited_image_url && (
+                          <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-600/20 text-emerald-500 font-mono">EDITED</span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <button onClick={() => setGalleryOpen(true)}
+                                title="저장된 변형 풀 (최대 20개) 보기/관리"
+                                className="text-[10px] px-2 py-0.5 rounded bg-sky-600 hover:bg-sky-700 text-white font-bold">
+                          🗂 갤러리
+                        </button>
+                        <button onClick={() => setThumbEditOpen(true)}
+                                title="배경제거 / 글씨제거 / 선명도+ / 회전 / 반전 / Gemini"
+                                className="text-[10px] px-2 py-0.5 rounded bg-violet-600 hover:bg-violet-700 text-white font-bold">
+                          🪄 AI 편집
+                        </button>
+                      </div>
+                    </div>
+                    <img src={d.edited_image_url || d.image_large} alt=""
+                         onClick={() => setThumbEditOpen(true)}
+                         className="w-full max-h-[350px] object-contain rounded cursor-pointer hover:ring-2 hover:ring-violet-400 transition-all" />
+                    {d.edited_image_url && (
+                      <div className={`text-[9px] ${C.muted} text-center mt-1 font-mono truncate`} title={d.edited_image_url}>
+                        {d.edited_image_url}
+                      </div>
+                    )}
                   </div>
+                )}
+
+                {d.additional_images && d.additional_images.length > 0 ? (
+                  <div className={`${C.panel} rounded mb-2 p-2 border ${C.border}`}>
+                    <div className={`text-[10px] font-bold mb-1.5 flex items-center gap-1.5 ${C.muted}`}>
+                      <span>🖼 추가이미지</span>
+                      <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono font-bold ${
+                        dark ? 'bg-sky-600/20 text-sky-300' : 'bg-sky-100 text-sky-700'
+                      }`}>
+                        {d.additional_images.length}장
+                      </span>
+                      <span className={`text-[9px] ml-auto ${C.muted}`}>클릭 → 원본 새 탭</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      {d.additional_images.map((src, i) => (
+                        <a key={i} href={src} target="_blank" rel="noopener noreferrer"
+                           className="block relative group">
+                          <img src={src} alt={`추가이미지 ${i + 1}`}
+                               className="w-full max-h-[180px] object-contain rounded bg-[repeating-conic-gradient(#80808022_0_25%,transparent_0_50%)] bg-[length:16px_16px] hover:ring-2 hover:ring-sky-400 transition-all" />
+                          <span className={`absolute top-1 left-1 text-[9px] px-1 py-0.5 rounded font-mono font-bold pointer-events-none ${
+                            dark ? 'bg-black/60 text-white' : 'bg-white/85 text-gray-700'
+                          }`}>
+                            #{i + 1}
+                          </span>
+                        </a>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  d.image_large && (
+                    <div className={`${C.panel} rounded mb-2 p-2 border ${C.border} border-dashed`}>
+                      <div className={`text-[10px] font-bold mb-1 flex items-center gap-1.5 ${C.muted}`}>
+                        <span>🖼 추가이미지</span>
+                        <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono ${
+                          dark ? 'bg-gray-700/40 text-gray-400' : 'bg-gray-100 text-gray-500'
+                        }`}>
+                          0장
+                        </span>
+                      </div>
+                      <div className={`text-[10px] text-center py-3 ${C.muted}`}>
+                        새 대장에 추가이미지 컬럼이 들어오면 자동 표시됩니다
+                      </div>
+                    </div>
+                  )
+                )}
+                {thumbEditOpen && d.image_large && (
+                  <ThumbnailEditor
+                    productId={d.id}
+                    productCode={d.product_code}
+                    productName={d.product_name || d.naver_product_name || ''}
+                    originalUrl={d.image_large}
+                    existingEditedUrl={d.edited_image_url}
+                    initialB64={editorInitB64}
+                    dark={dark}
+                    onClose={() => { setThumbEditOpen(false); setEditorInitB64(null); }}
+                    onSaved={(editedUrl) => {
+                      setD((prev) => prev ? { ...prev, edited_image_url: editedUrl } : prev);
+                      onSaved();
+                    }}
+                    onOpenGallery={() => { setThumbEditOpen(false); setGalleryOpen(true); }}
+                  />
+                )}
+                {galleryOpen && (
+                  <ThumbnailVariantGallery
+                    productId={d.id}
+                    productCode={d.product_code}
+                    productName={d.product_name || d.naver_product_name || ''}
+                    dark={dark}
+                    onClose={() => setGalleryOpen(false)}
+                    onChanged={(activeUrl) => {
+                      setD((prev) => prev ? { ...prev, edited_image_url: activeUrl } : prev);
+                      onSaved();
+                    }}
+                    onOpenEditor={() => setThumbEditOpen(true)}
+                    onOpenExtract={() => setThumbExtractOpen(true)}
+                  />
                 )}
 
                 {/* 네이버 상품명 — 썸네일 아래, 현재 편집 중인 값 실시간 반영 */}
@@ -1526,11 +2168,20 @@ function ProductDetailModal({
                   </div>
                 )}
                 <div className={`${C.panel} rounded p-2 ${C.border} border`}>
-                  <div className={`font-bold ${C.text} text-xs mb-1.5 flex items-center justify-between`}>
+                  <div className={`font-bold ${C.text} text-xs mb-1.5 flex items-center justify-between gap-2`}>
                     <span>📄 상세 페이지</span>
-                    <span className={`text-[10px] font-normal ${C.muted}`}>
-                      {d.detail_html ? `${d.detail_html.length.toLocaleString()}자` : '없음'}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className={`text-[10px] font-normal ${C.muted}`}>
+                        {d.detail_html ? `${d.detail_html.length.toLocaleString()}자` : '없음'}
+                      </span>
+                      {d.detail_html && (
+                        <button onClick={() => setThumbExtractOpen(true)}
+                                title="상세페이지에서 영역 지정해 썸네일로 추출"
+                                className="text-[10px] px-2 py-0.5 rounded bg-sky-600 hover:bg-sky-700 text-white font-bold">
+                          📐 썸네일 추출
+                        </button>
+                      )}
+                    </div>
                   </div>
                   {d.detail_html ? (
                     <div className="bg-white text-gray-900 rounded p-2 max-h-[55vh] overflow-y-auto text-xs"
@@ -1539,6 +2190,25 @@ function ProductDetailModal({
                     <div className={`text-xs ${C.muted} italic`}>저장된 상세 HTML 없음</div>
                   )}
                 </div>
+                {thumbExtractOpen && d.detail_html && (
+                  <DetailThumbExtractor
+                    productId={d.id}
+                    productCode={d.product_code}
+                    productName={d.product_name || d.naver_product_name || ''}
+                    detailHtml={d.detail_html}
+                    dark={dark}
+                    onClose={() => setThumbExtractOpen(false)}
+                    onSaved={(editedUrl) => {
+                      setD((prev) => prev ? { ...prev, edited_image_url: editedUrl } : prev);
+                      onSaved();
+                    }}
+                    onSendToEditor={(b64) => {
+                      setEditorInitB64(b64);
+                      setThumbEditOpen(true);
+                    }}
+                    onOpenGallery={() => setGalleryOpen(true)}
+                  />
+                )}
               </div>
             )}
           </div>
@@ -1620,11 +2290,157 @@ function ProductDetailModal({
           </button>
           <button onClick={onSave}
                   disabled={saving || loading}
+                  className={`px-3 py-1.5 text-xs font-bold rounded ${
+                    dark ? 'bg-[#252540] text-gray-200 hover:bg-[#2f2f50] border border-violet-700' : 'bg-violet-50 text-violet-700 hover:bg-violet-100 border border-violet-300'
+                  } disabled:opacity-40`}>
+            {saving ? '저장 중...' : '💾 저장만'}
+          </button>
+          <button onClick={onConfirm}
+                  disabled={confirmBusy || loading}
+                  title="현재 상품명을 저장하면서 W코드/카테고리별 학습 DB 에 컨펌 기록"
                   className="px-4 py-1.5 text-xs font-bold rounded bg-violet-600 hover:bg-violet-700 text-white disabled:opacity-40">
-            {saving ? '저장 중...' : '💾 저장'}
+            {confirmBusy ? '컨펌 중...' : '✅ 컨펌 저장 (학습)'}
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ─── HoverProductImage — 마우스 좌표 추적 + position:fixed 큰 미리보기 ───
+// OwnerClanProductsPage 패턴. 테이블 overflow 무시하고 viewport 전역에 띄움.
+function HoverProductImage({ thumb, large, edited, upscaled, additional, productCode, dark }: {
+  thumb: string | null;
+  large: string | null;
+  edited: string | null;
+  upscaled: string | null;
+  additional?: string[];
+  productCode: string;
+  dark: boolean;
+}) {
+  const [show, setShow] = useState(false);
+  const [pos, setPos] = useState({ x: 0, y: 0 });
+  const [swapIdx, setSwapIdx] = useState(0);
+  const addl = additional || [];
+
+  useEffect(() => {
+    if (!show || addl.length === 0) { setSwapIdx(0); return; }
+    const id = setInterval(() => {
+      setSwapIdx((i) => (i + 1) % (addl.length + 1));
+    }, 800);
+    return () => clearInterval(id);
+  }, [show, addl.length]);
+
+  if (!thumb) {
+    return <div className={`w-10 h-10 rounded ${dark ? 'bg-[#252540]' : 'bg-gray-200'}`} />;
+  }
+
+  const cellSrc = swapIdx === 0 ? thumb : (addl[swapIdx - 1] || thumb);
+
+  const imgs: { src: string; label: string; color: string; bg?: string }[] = [];
+  if (large) imgs.push({ src: large, label: '📷 원본', color: dark ? 'text-gray-400' : 'text-gray-500', bg: 'bg-white' });
+  if (edited) imgs.push({ src: edited, label: '✨ AI 편집본', color: dark ? 'text-violet-300' : 'text-violet-700' });
+  if (upscaled) imgs.push({ src: upscaled, label: '⚡ AI 업스케일 1.5x', color: dark ? 'text-emerald-300' : 'text-emerald-700' });
+  if (imgs.length === 0 && thumb) imgs.push({ src: thumb, label: '📷', color: dark ? 'text-gray-400' : 'text-gray-500', bg: 'bg-white' });
+
+  const previewW = imgs.length === 1 ? 880 : imgs.length === 2 ? 1080 : 1380;
+  const previewH = 760;
+  const left = Math.min(pos.x + 20, window.innerWidth - previewW - 16);
+  const top = Math.max(8, Math.min(pos.y - previewH / 2, window.innerHeight - previewH - 16));
+  const cellSize = imgs.length === 1 ? 860 : imgs.length === 2 ? 500 : 420;
+
+  return (
+    <div className="relative inline-block"
+         onMouseEnter={(e) => { setPos({ x: e.clientX, y: e.clientY }); setShow(true); }}
+         onMouseMove={(e) => setPos({ x: e.clientX, y: e.clientY })}
+         onMouseLeave={() => setShow(false)}>
+      <img src={cellSrc} alt=""
+           className={`w-10 h-10 object-cover rounded hover:ring-2 hover:ring-emerald-400 ${
+             upscaled ? 'ring-1 ring-emerald-500' : edited ? 'ring-1 ring-violet-500' : ''
+           }`}
+           loading="lazy" />
+      {upscaled && (
+        <span className="absolute top-0 right-0 text-[8px] px-1 rounded-bl bg-emerald-600 text-white font-bold pointer-events-none">⚡</span>
+      )}
+      {edited && !upscaled && (
+        <span className="absolute top-0 right-0 text-[8px] px-1 rounded-bl bg-violet-600 text-white font-bold pointer-events-none">✨</span>
+      )}
+      {addl.length > 0 && (
+        <span
+          className={`absolute bottom-0 right-0 text-[9px] leading-none px-1 py-0.5 rounded-tl font-bold pointer-events-none shadow ${
+            dark ? 'bg-sky-600/95 text-white' : 'bg-sky-500/95 text-white'
+          }`}
+          title={`추가이미지 ${addl.length}장 — 호버 시 순환 (800ms)`}
+        >
+          +{addl.length}
+        </span>
+      )}
+      {show && (
+        <div className="fixed z-[9999] pointer-events-none"
+             style={{ left, top }}>
+          <div className={`shadow-2xl rounded-lg p-3 border-2 ${
+            dark ? 'bg-[#1c1c2e] border-emerald-700' : 'bg-white border-emerald-400'
+          }`}>
+            <div className="flex gap-2">
+              {imgs.map((it, i) => (
+                <div key={i}>
+                  <img src={it.src}
+                       style={{ width: cellSize, height: cellSize }}
+                       className={`object-contain rounded ${it.bg || 'bg-[repeating-conic-gradient(#80808022_0_25%,transparent_0_50%)] bg-[length:24px_24px]'}`}
+                       alt="" />
+                  <div className={`text-sm text-center mt-1 font-bold ${it.color}`}>
+                    {it.label}
+                  </div>
+                </div>
+              ))}
+            </div>
+            {addl.length > 0 && (
+              <div className={`mt-3 pt-3 border-t ${dark ? 'border-[#2a2a40]' : 'border-gray-200'}`}>
+                <div className={`text-[11px] font-bold mb-1.5 flex items-center gap-1.5 ${dark ? 'text-sky-300' : 'text-sky-600'}`}>
+                  <span>🖼 추가이미지 {addl.length}장</span>
+                  <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono ${
+                    dark ? 'bg-sky-900/40 text-sky-300' : 'bg-sky-50 text-sky-600'
+                  }`}>
+                    현재 #{swapIdx === 0 ? '대표' : swapIdx}
+                  </span>
+                </div>
+                <div className="flex gap-2 flex-wrap">
+                  {addl.map((src, i) => (
+                    <div key={i} className="flex flex-col items-center">
+                      <div className={`relative rounded overflow-hidden ${
+                        swapIdx === i + 1 ? (dark ? 'ring-2 ring-sky-400' : 'ring-2 ring-sky-500') : ''
+                      }`}>
+                        <img src={src}
+                             style={{ width: 200, height: 200 }}
+                             className="object-contain bg-[repeating-conic-gradient(#80808022_0_25%,transparent_0_50%)] bg-[length:16px_16px]"
+                             alt="" />
+                        <span className={`absolute top-1 left-1 text-[9px] px-1 py-0.5 rounded font-mono font-bold ${
+                          dark ? 'bg-black/60 text-white' : 'bg-white/85 text-gray-700'
+                        }`}>
+                          #{i + 1}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            <div className={`text-xs mt-2 px-2 py-1 rounded text-center font-mono ${
+              dark ? 'bg-[#0f0f1a] text-gray-300' : 'bg-gray-50 text-gray-700'
+            }`}>
+              {productCode}
+              <span className="mx-2">·</span>
+              {upscaled && <span className="text-emerald-500 font-bold mr-2">⚡ 업스케일</span>}
+              {edited && <span className="text-violet-500 font-bold mr-2">✨ 편집</span>}
+              {addl.length > 0 && <span className="text-sky-500 font-bold mr-2">🖼 +{addl.length}</span>}
+              {!upscaled && !edited && addl.length === 0 && <span>원본 그대로</span>}
+            </div>
+            <div className={`text-[10px] text-center mt-0.5 ${dark ? 'text-gray-500' : 'text-gray-400'}`}>
+              👆 클릭 → 상세에서 AI 편집
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

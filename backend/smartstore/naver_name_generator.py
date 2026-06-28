@@ -32,10 +32,93 @@ DEFAULT_OLLAMA_URL = (
 DEFAULT_MODELS = ['exaone3.5:7.8b', 'qwen2.5:7b']
 HTTP_TIMEOUT = float(os.environ.get('NAVER_OLLAMA_TIMEOUT', '60'))
 
+# ── 상품명수정 네이버 — 패치 버전 ────────────────────────
+# 변경 시 docs/PATCH_NOTES_naver_name.md 에 항목 추가 필수.
+# 모달 헤더 표시 / 롤백 스냅샷 태깅에 사용.
+NAVER_NAME_VERSION = 'v1.02'
+
+# 모달 [📋 상품명AI패치 사항 안내] 섹션에 노출되는 구조화 패치 노트.
+# 최신 버전을 리스트 [0] 에 두고, 한 줄 summary 가 접힘 상태에 표시된다.
+# 변경 시 docs/PATCH_NOTES_naver_name.md 와 1:1 동기화.
+NAVER_NAME_PATCH_NOTES: list[dict] = [
+    {
+        'version': 'v1.02',
+        'date': '2026-05-26',
+        'summary': '정규식 경계 + evidence 엄격화 (괄호/하이픈/N세트 패턴 보완)',
+        'issues': [
+            'v1.01 단어경계 `(^|\\s)X(?=\\s|$)` 가 괄호/슬래시/하이픈 인식 못함 → (소꿉놀이 세트), (1세트) 등 잔존 4,468건',
+            'combined_option 의 "1개" 단순 단위가 set evidence 로 오인되어 안전망 미작동',
+            '`1세트`, `2세트` 같은 숫자+세트 노이즈 패턴 누락',
+        ],
+        'fixes': [
+            'boundary 를 `(?<![가-힣a-zA-Z0-9])X(?![가-힣a-zA-Z0-9])` 로 교체 — 한글/영숫자 인접만 합성어 보호, 그 외는 모두 경계',
+            'evidence 엄격화 — 단순 `1개` 미인정, `[2-9]\\d*개\\s*(세트|묶음|입|팩|박스|세|개입)` 또는 `\\d+(팩|박스)` 동반 시만',
+            '`\\d+세트` 노이즈 패턴 추가 (1세트, 10세트 등)',
+        ],
+    },
+    {
+        'version': 'v1.01',
+        'date': '2026-05-26',
+        'summary': '세트/색상 할루시네이션 안전망 + 롤백 인프라 도입',
+        'issues': [
+            '세트 할루시네이션 — 단일 상품인데 LLM 이 "세트/묶음/패키지/N개입" 자의적 박음 (64,077건)',
+            '색상 할루시네이션 — 옵션/원본 어디에도 없는 색상이 비전 추측 단독으로 박힘 (15,724건)',
+        ],
+        'fixes': [
+            'postprocess() 에 SET-안전망 추가 — 단서 없으면 세트류 자동 제거',
+            'postprocess() 에 COLOR-안전망 추가 — 36개 색상 단어, 단서 없으면 자동 제거',
+            '시스템 프롬프트 [절대 금지] 에 세트/색상 할루시네이션 명시',
+            '버전 스냅샷(naver_name_version_snapshot) + 롤백 API 도입',
+        ],
+    },
+]
+
 # ── 네이버 상품명 한도 ───────────────────────────────────
 NAVER_MAX_CHARS = 50    # 권장값 (네이버 권고)
 NAVER_MAX_BYTES = 100   # 한글 2바이트 환산
 NAVER_MIN_CHARS = 4
+
+# ── v1.02 안전망: 세트/패키지/수량 표현 (LLM 할루시네이션 방지) ─
+# 한글/영숫자 인접이면 합성어로 보고 보호. 그 외(공백/괄호/슬래시/하이픈 등)는 모두 경계로 처리.
+SET_NOISE_TOKENS = (
+    '세트', '묶음', '패키지', '구성품',
+)
+SET_NOISE_PATTERNS = (
+    re.compile(r'(?<![가-힣a-zA-Z0-9])\d+\s*세트(?![가-힣a-zA-Z0-9])'),     # 1세트, 2세트
+    re.compile(r'(?<![가-힣a-zA-Z0-9])\d+\s*개\s*세트(?![가-힣a-zA-Z0-9])'),
+    re.compile(r'(?<![가-힣a-zA-Z0-9])\d+\s*개\s*입(?![가-힣a-zA-Z0-9])'),
+    re.compile(r'(?<![가-힣a-zA-Z0-9])\d+\s*개\s*묶음(?![가-힣a-zA-Z0-9])'),
+    re.compile(r'(?<![가-힣a-zA-Z0-9])\d+\s*입(?![가-힣a-zA-Z0-9])'),
+    re.compile(r'(?<![가-힣a-zA-Z0-9])\d+\s*개세트(?![가-힣a-zA-Z0-9])'),
+    re.compile(r'(?<![가-힣a-zA-Z0-9])\d+\s*피스(?![가-힣a-zA-Z0-9])'),
+    re.compile(r'(?<![가-힣a-zA-Z0-9])\d+\s*팩(?![가-힣a-zA-Z0-9])'),
+    re.compile(r'(?<!\d)1\+1(?!\d)'),
+    re.compile(r'(?<!\d)2\+1(?!\d)'),
+    re.compile(r'(?<!\d)3\+1(?!\d)'),
+)
+# evidence — '1개' 단순 단위는 제외, 명확한 set 신호만 인정
+SET_EVIDENCE_TOKENS = (
+    '세트', '묶음', '패키지', '구성품', '구성',
+    '개입', '개 입', '개세트', '개 세트',
+    '개묶음', '개 묶음', '피스',
+    '+1', '+ 1',
+)
+# evidence 보강 — N>=2 인 'N개' 또는 'N개 + (세트|묶음|입|팩|박스|세)' 동반
+SET_EVIDENCE_PATTERNS = (
+    re.compile(r'[2-9]\d*\s*개\s*(?:세트|묶음|입|팩|박스|세|개입)'),
+    re.compile(r'\d+\s*(?:팩|박스)(?![가-힣])'),
+    re.compile(r'[2-9]\d*\s*개입'),
+)
+
+# ── v1.01 안전망: 36개 색상 단어 (옵션/원본 단서 없으면 제거) ───
+COLOR_TOKENS = (
+    '블랙', '화이트', '네이비', '그레이', '베이지', '카키', '브라운',
+    '핑크', '옐로우', '그린', '블루', '레드', '와인', '머스타드', '라벤더',
+    '퍼플', '오렌지', '민트', '아이보리', '차콜', '실버', '골드', '코랄',
+    '카멜', '모카',
+    '검정', '검은', '흰색', '하얀', '빨강', '노랑', '파랑', '초록', '보라',
+    '분홍', '회색', '갈색',
+)
 
 # ── 허용 특수문자 (네이버 공식) ──────────────────────────
 ALLOWED_SYMBOLS = set('()-·[]/&+,~.')
@@ -112,17 +195,16 @@ def _strip_company_prefix(text: str) -> str:
 
 
 def _dedupe_tokens(text: str) -> str:
-    """공백 기준 토큰화 → 동일 토큰 중복 제거(앞에 나온 것 유지).
-    브랜드명 1회만 표기 + 키워드 반복 금지 룰.
+    """공백 기준 토큰화 → 동일 토큰 **최대 2회**까지 허용 (네이버 SEO).
+    3회 이상은 패널티 — 자동 제거 (앞 2개만 유지).
     """
-    seen = set()
+    counts: dict[str, int] = {}
     out = []
     for tok in text.split():
         key = tok.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(tok)
+        counts[key] = counts.get(key, 0) + 1
+        if counts[key] <= 2:
+            out.append(tok)
     return ' '.join(out)
 
 
@@ -153,16 +235,165 @@ def _truncate_to_naver_limit(text: str) -> str:
     return ''
 
 
-def postprocess(text: str) -> str:
-    """LLM 응답 1차 라인 → 모든 SEO 후처리 적용."""
+def _build_evidence_blob(product: dict | None) -> str:
+    """원본 product_name + 옵션 + 키워드 + 속성을 한 덩어리 lower 문자열로.
+    안전망에서 단서 검색용."""
+    if not product:
+        return ''
+    parts = [
+        product.get('product_name') or '',
+        product.get('option1_name') or '',
+        product.get('option1_values') or '',
+        product.get('option2_name') or '',
+        product.get('option2_values') or '',
+        product.get('combined_option') or '',
+        product.get('keywords') or '',
+        product.get('product_attribute') or '',
+        product.get('model_name') or '',
+    ]
+    return (' '.join(parts)).lower()
+
+
+def _strip_set_hallucination(text: str, evidence: str) -> str:
+    """v1.02 — 원본/옵션/키워드 어디에도 세트/패키지/수량 단서가 없으면
+    LLM 출력의 해당 표현을 자동 제거.
+
+    개선:
+      - 한글/영숫자 외 모든 경계 인식 (괄호/슬래시/하이픈)
+      - '1개' 단순 단위는 evidence 미포함 (오인 방지)
+      - 'N세트' 숫자 prefix 패턴 추가
+    """
+    if not text:
+        return text
+    has_evidence = any(e in evidence for e in SET_EVIDENCE_TOKENS) \
+        or any(p.search(evidence) for p in SET_EVIDENCE_PATTERNS)
+    if has_evidence:
+        return text
+    out = text
+    # 1) 숫자+단어 결합 패턴 (1세트, 2개입, 1+1 등)
+    for pat in SET_NOISE_PATTERNS:
+        out = pat.sub(' ', out)
+    # 2) 단독 토큰 (세트/묶음/패키지/구성품) — 한글/영숫자 아닌 모든 경계 허용
+    for tok in SET_NOISE_TOKENS:
+        out = re.sub(
+            rf'(?<![가-힣a-zA-Z0-9]){re.escape(tok)}(?![가-힣a-zA-Z0-9])',
+            ' ', out,
+        )
+    return out
+
+
+def _strip_color_hallucination(text: str, evidence: str) -> str:
+    """v1.02 — 옵션/원본/키워드에 단서 없는 색상은 자동 제거.
+    경계: 한글/영숫자 외 모두 (괄호/슬래시/하이픈/쉼표 포함).
+    """
+    if not text:
+        return text
+    out = text
+    for col in COLOR_TOKENS:
+        if col.lower() in evidence:
+            continue  # 단서 있음 → 유지
+        out = re.sub(
+            rf'(?<![가-힣a-zA-Z0-9]){re.escape(col)}(?![가-힣a-zA-Z0-9])',
+            ' ', out,
+        )
+    return out
+
+
+def postprocess(text: str, product: dict | None = None) -> str:
+    """LLM 응답 1차 라인 → 모든 SEO 후처리 적용.
+
+    product 가 주어지면 v1.01 안전망(SET/COLOR 할루시네이션 제거) 도 적용.
+    """
     out = _strip_company_prefix(text)
     out = _strip_disallowed_chars(out)
     out = _strip_meaningless_jamo(out)
     out = _strip_banned_substrings(out)
+    if product is not None:
+        evidence = _build_evidence_blob(product)
+        out = _strip_set_hallucination(out, evidence)
+        out = _strip_color_hallucination(out, evidence)
     out = _normalize_whitespace(out)
     out = _dedupe_tokens(out)
     out = _truncate_to_naver_limit(out)
     return out
+
+
+def _enrich_short_name(name: str, product_id: int) -> str:
+    """결과가 너무 짧으면 keyword_volume 캐시의 고조회수 + GPU 적합 키워드를 자동 보강.
+    한도 50자/100바이트 안에서. 중복 토큰은 _dedupe_tokens 가 막아줌.
+    """
+    if not name:
+        return name
+    if len(name) >= 30 and calc_byte_length(name) >= 60:
+        return name  # 충분히 김
+
+    try:
+        from . import naver_my_product_service as _s
+        # 적합 키워드 (LLM 검증) — 있으면 strict, 없으면 lenient
+        relev = _fetch_relevance_cache(int(product_id))
+        rel_kws = (relev[0] if relev else []) or []
+        irrelev_kws = (relev[1] if relev else []) or []
+        strict_mode = bool(rel_kws or irrelev_kws)  # 캐시 있으면 strict
+        rel_set = {k.lower() for k in rel_kws}
+        irrelev_lower = {k.lower() for k in irrelev_kws}
+
+        # 키워드 풀 lookup
+        pool = _s.get_keyword_pool(int(product_id))
+        if not pool.get('ok'):
+            return name
+
+        volumes = pool.get('keyword_volumes') or {}
+        banned = set(map(str.lower,
+                         (pool.get('banned_keywords') or [])
+                         + (pool.get('season_banned_keywords') or [])))
+        seen_lower = {t.lower() for t in name.split()}
+
+        # 후보 수집 (소스별 우선순위, 중복 제거)
+        candidates: list[tuple[str, int]] = []
+        cand_set: set = set()
+
+        def _add(lst: list[str]):
+            for k in lst or []:
+                if not k or len(k) < 2:
+                    continue
+                lc = k.lower()
+                if lc in seen_lower or lc in cand_set:
+                    continue
+                if lc in banned or lc in irrelev_lower:
+                    continue
+                # strict: GPU 적합 캐시 있을 때 적합 set 에 없으면 reject
+                if strict_mode and lc not in rel_set:
+                    continue
+                vol = (volumes.get(k) or {}).get('total', 0)
+                candidates.append((k, vol))
+                cand_set.add(lc)
+
+        # 1순위: GPU 적합 키워드 (strict mode 의 메인)
+        _add(rel_kws)
+        # 2순위: preset (원본 검색태그) — strict 면 GPU 적합인것만, lenient 면 모두
+        _add(pool.get('preset_keywords') or [])
+        # 3순위: detail (이미지 OCR + HTML)
+        _add(pool.get('detail_keywords') or [])
+
+        # 조회수 desc
+        candidates.sort(key=lambda x: x[1], reverse=True)
+
+        out = name
+        for kw, _vol in candidates:
+            lc = kw.lower()
+            # substring (예: '여름바람막이' 안에 '여름' 이미 있음)
+            if lc in out.lower():
+                continue
+            cand = out + ' ' + kw
+            if len(cand) > NAVER_MAX_CHARS or calc_byte_length(cand) > NAVER_MAX_BYTES:
+                break
+            out = cand
+            if len(out) >= 35 and calc_byte_length(out) >= 60:
+                break
+        return out
+    except Exception as e:  # noqa: BLE001
+        logger.warning('enrich 실패: %s', e)
+        return name
 
 
 # ── LLM 프롬프트 ─────────────────────────────────────────
@@ -170,9 +401,12 @@ def postprocess(text: str) -> str:
 _SYSTEM_PROMPT = f"""당신은 네이버 쇼핑 상품명 SEO 전문가입니다.
 오너클랜 위탁판매 상품 정보를 보고 네이버 검색 노출에 최적화된 상품명을 만드세요.
 
-[글자 수]
-- 권장 50자 이내 / 최대 {NAVER_MAX_CHARS}자, {NAVER_MAX_BYTES}바이트 (한글 2바이트)
-- 50자 이상은 네이버가 "남용"으로 판단해 노출 패널티
+[글자 수 — 매우 중요]
+- **목표 35~50자 풍부하게 채우기**. 너무 짧으면 검색 노출 안 됨.
+- 최대 {NAVER_MAX_CHARS}자 / {NAVER_MAX_BYTES}바이트 (한글 2바이트)
+- 원본 상품명의 핵심 명사 키워드는 **최대한 보존** — 동의어 변환 OK, 단어 삭제는 신중히
+- 원본에 "낚시/등산/방수/캠핑" 같은 용도 키워드가 있으면 검색 다양화 위해 가능한 많이 포함
+- 단순화 ≠ 좋음. 검색 키워드 많을수록 노출 다양해짐.
 
 [필드 순서]
 1. 브랜드/제조사 (1회만)
@@ -187,6 +421,10 @@ _SYSTEM_PROMPT = f"""당신은 네이버 쇼핑 상품명 SEO 전문가입니다
 - 자연스러운 문장 구조 (단순 키워드 나열 금지)
 - 롱테일 키워드 조합 우선 (메인키워드 단독보다 세부키워드 조합이 노출 유리)
 - 핵심 정보는 앞쪽 25자 안에 배치
+- **원본보다 짧아지지 않도록 주의**. 원본에 있던 용도/소재/시즌 키워드는 정리 후 살려라.
+  예: 원본 "골프 우의 세트 상하의 레인슈트 골프 낚시 등산 생활방수 셋업 상하의세트"
+      → 골프(중복제거) + 우의/레인슈트/낚시/등산/방수 등 검색 키워드 모두 살려
+      "베르 남성 방수 우의 레인슈트 상하의 세트 골프 낚시 등산용 셋업"
 
 [색상 규칙 — 매우 중요]
 - 입력에 "⭐ 상품 옵션1번 색상(필수반영): X" 가 있으면 **반드시 X** 를 색상으로 사용
@@ -207,6 +445,8 @@ _SYSTEM_PROMPT = f"""당신은 네이버 쇼핑 상품명 SEO 전문가입니다
 - 특수문자: ! ? @ # $ * ★ ☆ ※ ▶ ◆ → 등 (허용: ( ) - · [ ] / & + , ~ .)
 - 한자, 일본어, 이모지
 - 가격/할인 정보
+- **세트/패키지/수량 할루시네이션 금지(v1.01)**: 원본 상품명/옵션/키워드 어디에도 "세트, 묶음, 패키지, N개입, N개세트, 1+1, 2+1" 단서가 없으면 절대 박지 마라. 검색 다양화 명목으로 자의적으로 "세트" 추가 금지.
+- **색상 할루시네이션 금지(v1.01)**: 옵션/원본/키워드에 명시되지 않은 색상은 비전 추측만으로 박지 마라. 단서 없는 색상은 후처리에서 자동 제거된다.
 
 [좋은 예]
 - "유니클로 남성 여름 린넨 반팔 셔츠 네이비 L"
@@ -270,15 +510,16 @@ def _infer_category_type(category_name: str | None) -> str:
 
 _CATEGORY_PROMPTS: dict[str, str] = {
     'apparel': """
-[패션의류 전용 룰 — 매우 중요]
-- 필드 순서: [브랜드] [성별] [시즌(선택)] [소재(선택)] [상품유형] [색상] [사이즈(선택)] [핏/디테일(선택)]
-- 좋은 예: "유니클로 남성 여름 린넨 반팔 셔츠 네이비 L 루즈핏"
-- 좋은 예: "여성 가을 면 혼방 후드 자켓 블랙 오버핏"
-- 성별: 원본/카테고리에서 명확하면 반드시 명시. 불명확하면 생략 (혼성 표기 금지)
-- 시즌: 1개만 — '봄가을' 같은 합성은 OK. "봄,가을,겨울" 동시 나열 금지
-- 사이즈: 원본/옵션에 명시되어 있으면 끝쪽에 추가, 추측 금지
-- 핏: 원본/비전에 있을 때만 ("루즈핏/오버핏/슬림핏/레귤러핏") — 추측 금지
-- 소매 길이(반팔/긴팔/민소매): 원본에 명시되어 있을 때만 (사진은 신뢰도 낮음)
+[패션의류 전용 룰]
+- 필드 순서: [브랜드] [성별] [시즌(선택)] [소재(선택)] [상품유형] [색상] [사이즈(선택)] [핏/디테일(선택)] [용도]
+- **원본의 용도 키워드는 살려라**: 골프, 낚시, 등산, 캠핑, 출근, 데일리, 작업복, 운동, 비즈니스 등
+- 좋은 예: "유니클로 남성 여름 린넨 반팔 셔츠 네이비 L 루즈핏 출근용"
+- 좋은 예: "베르 남성 방수 우의 레인슈트 상하의 세트 골프 낚시 등산 블루"
+- 성별: 원본/카테고리 명확할 때만. 불명확하면 생략 (혼성 표기 금지)
+- 시즌: 1개만 — '봄가을' 합성 OK. "봄,가을,겨울" 동시 나열 금지
+- 사이즈: 원본/옵션 명시되어 있을 때만
+- 핏/소매길이: 원본에 명시 있을 때만 (비전 추측 금지)
+- 목표 길이: 35~50자 (정보 풍부)
 """,
     'fashion_acc': """
 [패션잡화 전용 룰]
@@ -384,6 +625,38 @@ def _build_user(p: dict, vision: dict | None = None) -> str:
     if p.get('category_name'):
         parts.append(f'카테고리: {p["category_name"]}')
 
+    # ── AI 컨펌 학습 컨텍스트 ──────────────────────────────────────
+    # 1) 같은 W코드 직전 컨펌이 있으면 → 사용자가 검증한 after_name 이 최우선 골든 샘플
+    # 2) 같은 카테고리 누적 정책 top-N (white = 살려라, black = 절대 쓰지마)
+    try:
+        from . import naver_name_confirmation_service as _ncs
+        last_conf = _ncs.get_last_confirmation_for_product(p.get('product_code'))
+        if last_conf and last_conf.get('after_name'):
+            parts.append(
+                '⭐ 직전 사용자 컨펌 상품명(이 흐름을 그대로 유지하면서 개선): '
+                + last_conf['after_name']
+            )
+            if last_conf.get('ai_comment'):
+                parts.append(
+                    f'⭐ 사용자 지시({last_conf.get("comment_type") or "overall"}): '
+                    + last_conf['ai_comment']
+                )
+        cat_policy = _ncs.get_policy_for_generator(cat_type)
+        cat_white = cat_policy.get('white') or []
+        cat_black = cat_policy.get('black') or []
+        if cat_white:
+            parts.append(
+                f'⭐ 카테고리({cat_type}) 사용자 학습 화이트 키워드(가능하면 포함): '
+                + ', '.join(cat_white)
+            )
+        if cat_black:
+            parts.append(
+                f'🚫 카테고리({cat_type}) 사용자 학습 블랙 키워드(절대 사용 금지): '
+                + ', '.join(cat_black)
+            )
+    except Exception as _e:  # noqa: BLE001
+        logger.warning('confirmation 컨텍스트 주입 실패: %s', _e)
+
     # GPU 적합도 캐시 — 이전 검증에서 사용자가 인증한 키워드 우선 활용 + 부적합 회피
     pid = p.get('id')
     if pid:
@@ -394,10 +667,24 @@ def _build_user(p: dict, vision: dict | None = None) -> str:
                 parts.append(f'⭐ GPU 검증 적합 키워드(이 단어 우선 활용): {", ".join(rel[:20])}')
             if irrel:
                 parts.append(f'🚫 GPU 검증 부적합 키워드(절대 사용 금지): {", ".join(irrel[:20])}')
-    if p.get('brand'):
-        parts.append(f'브랜드: {p["brand"]}')
-    if p.get('manufacturer'):
-        parts.append(f'제조사: {p["manufacturer"]}')
+    # 브랜드/제조사 — naver_brand_policy DB 우선, 미등록은 휴리스틱
+    try:
+        from . import brand_policy_service as _bp
+
+        def _safe_brand(s):
+            if not s or not s.strip():
+                return None
+            return s.strip() if _bp.is_allowed(s) else None
+    except Exception:
+        def _safe_brand(s):
+            return s.strip() if s and s.strip() else None
+
+    sb = _safe_brand(p.get('brand'))
+    sm = _safe_brand(p.get('manufacturer'))
+    if sb:
+        parts.append(f'브랜드: {sb}')
+    if sm and sm != sb:
+        parts.append(f'제조사: {sm}')
     if p.get('model_name'):
         parts.append(f'모델명: {p["model_name"]}')
     if p.get('keywords'):
@@ -487,7 +774,8 @@ def _fetch_product(product_id: int) -> dict | None:
     fields = (
         'id, product_code, product_name, ai_product_name, ai_recommended_name, '
         'category_name, brand, manufacturer, model_name, keywords, detail_html, '
-        'option1_name, option1_values'
+        'option1_name, option1_values, option2_name, option2_values, '
+        'combined_option, product_attribute'
     )
     with connections['naverdb'].cursor() as cur:
         cur.execute(f"SELECT {fields} FROM naver_my_product WHERE id=%s", [product_id])
@@ -499,10 +787,33 @@ def _fetch_product(product_id: int) -> dict | None:
 
 
 def _save_naver_name(product_id: int, name: str):
+    """새 AI 상품명 저장 — 직전 값을 naver_product_name_before 에 백업 + 버전 스냅샷 기록.
+    스냅샷 source='auto' note='regenerate' 로 자동 누적 → 롤백 가능.
+    """
     with connections['naverdb'].cursor() as cur:
+        # 직전 상태 스냅샷 (이미 이름이 있을 때만)
         cur.execute(
-            "UPDATE naver_my_product SET naver_product_name=%s, synced_at=NOW() WHERE id=%s",
-            [name, product_id],
+            "SELECT product_code, naver_product_name, name_version "
+            "FROM naver_my_product WHERE id=%s",
+            [product_id],
+        )
+        row = cur.fetchone()
+        if row and row[1]:
+            prev_code, prev_name, prev_ver = row[0], row[1], row[2]
+            cur.execute(
+                """INSERT INTO naver_name_version_snapshot
+                     (product_id, product_code, version_tag, naver_product_name, source, note)
+                   VALUES (%s, %s, %s, %s, 'auto', 'before regenerate')""",
+                [product_id, prev_code, prev_ver or 'unknown', prev_name],
+            )
+        cur.execute(
+            """UPDATE naver_my_product
+                  SET naver_product_name_before = naver_product_name,
+                      naver_product_name = %s,
+                      name_version = %s,
+                      synced_at = NOW()
+                WHERE id=%s""",
+            [name, NAVER_NAME_VERSION, product_id],
         )
 
 
@@ -560,9 +871,14 @@ def generate_naver_name(product_id: int,
         first = _extract_first_line(raw)
         if not first:
             continue
-        result = postprocess(first)
+        result = postprocess(first, product=p)
         if not result or len(result) < NAVER_MIN_CHARS:
             continue
+
+        # 길이 부족 시 keyword pool 자동 보강 (조회수/적합도 기반)
+        result = _enrich_short_name(result, product_id)
+        result = _dedupe_tokens(result)
+        result = _truncate_to_naver_limit(result)
 
         _save_naver_name(product_id, result)
         elapsed_ms = int((time.time() - t0) * 1000)

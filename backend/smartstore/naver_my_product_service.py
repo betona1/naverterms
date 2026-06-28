@@ -158,9 +158,21 @@ def _iter_11st_products(batch_size: int = 1000) -> Iterable[list[dict]]:
 
 
 def _upsert_naverdb(rows: list[dict], folder_id: int) -> tuple[int, int]:
-    """naver_my_product 에 UPSERT. (inserted, updated) 반환."""
+    """naver_my_product 에 UPSERT. (inserted, updated) 반환.
+
+    블랙리스트(naver_wcode_blacklist) 등록된 W코드는 import 단계에서 차단.
+    """
     if not rows:
         return 0, 0
+
+    # 블랙리스트 가드: 등록된 W코드는 skip
+    from .wcode_blacklist_service import filter_blacklisted
+    pcs = [r.get('product_code') for r in rows if r.get('product_code')]
+    blocked = filter_blacklisted(pcs)
+    if blocked:
+        rows = [r for r in rows if r.get('product_code') not in blocked]
+        if not rows:
+            return 0, 0
 
     # MIRROR_COLUMNS 의 첫 컬럼이 product_code(UNIQUE). 추가 컬럼은 source_id/folder_id/copied_at.
     insert_cols = MIRROR_COLUMNS + ['source_id', 'folder_id', 'copied_at']
@@ -249,11 +261,12 @@ def start_import_from_11st(batch_size: int = 1000) -> dict:
 DETAIL_FIELDS = (
     'id, product_code, source_id, folder_id, '
     'product_name, market_product_name, '
-    'ai_product_name, ai_recommended_name, edited_product_name, naver_product_name, '
+    'ai_product_name, ai_recommended_name, edited_product_name, '
+    'naver_product_name, naver_product_name_before, '
     'naver_keywords, keywords, comment, '
     'category_code, category_name, manufacturer, brand, model_name, origin, '
     'ownerclan_price, consumer_price, market_price, shipping_fee, return_fee, '
-    'image_large, image_medium, image_small, '
+    'image_large, image_medium, image_small, edited_image_url, upscaled_image_url, '
     'option1_name, option1_values, option2_name, option2_values, combined_option, product_attribute, '
     'detail_html, '
     'sale_status, sync_status, is_modified, '
@@ -1050,6 +1063,219 @@ def enqueue_products(ids: list[int] | None = None,
     }
 
 
+def dispatch_tick(endpoints: list[str], target_buffer: int = 30) -> dict:
+    """11st dispatch 데몬이 5초마다 호출.
+    각 endpoint(워커) 별로 (pending+running) buffer 가 target_buffer 미만이면
+    naver_my_product_folder.queue_position 순으로 task INSERT.
+    """
+    if not endpoints:
+        return {'ok': True, 'added': 0}
+
+    # 1) 큐 폴더 (queue_position NOT NULL) — 우선순위 순서
+    with connections[NAVERDB].cursor() as cur:
+        cur.execute(
+            "SELECT id, queue_position FROM naver_my_product_folder "
+            "WHERE queue_position IS NOT NULL ORDER BY queue_position"
+        )
+        rows = cur.fetchall()
+    if not rows:
+        return {'ok': True, 'added': 0, 'reason': 'no_queue_folders'}
+
+    folder_ids = [r[0] for r in rows]
+    pos_map = {r[0]: r[1] for r in rows}
+    fph = ','.join(['%s'] * len(folder_ids))
+
+    total_added = 0
+    with connections[ADSDB].cursor() as cur:
+        for ep in endpoints:
+            # 현재 endpoint 가 들고 있는 platform='naver' task 수
+            cur.execute(
+                "SELECT COUNT(*) FROM ai_keyword_task "
+                "WHERE claimed_by=%s AND status IN ('pending','running') "
+                "AND platform='naver'",
+                [ep],
+            )
+            current = cur.fetchone()[0]
+            if current >= target_buffer:
+                continue
+            needed = target_buffer - current
+
+            # naverdb 상품 (naver_product_name NULL 인 미생성) — 큐 폴더 + 미존재 task
+            with connections[NAVERDB].cursor() as ncur:
+                ncur.execute(
+                    f"SELECT id, folder_id FROM naver_my_product "
+                    f"WHERE folder_id IN ({fph}) "
+                    f"  AND (naver_product_name IS NULL OR naver_product_name='') "
+                    f"ORDER BY FIELD(folder_id, {fph}), id "
+                    f"LIMIT %s",
+                    folder_ids + folder_ids + [needed * 2],
+                )
+                cands = ncur.fetchall()
+            if not cands:
+                continue
+
+            cand_ids = [c[0] for c in cands]
+            ph = ','.join(['%s'] * len(cand_ids))
+            # 'pending'/'running' 만 taken — done/error 는 retry 가능 → INSERT IGNORE 로 처리
+            cur.execute(
+                f"SELECT product_id FROM ai_keyword_task "
+                f"WHERE platform='naver' AND product_id IN ({ph}) "
+                f"  AND status IN ('pending','running')",
+                cand_ids,
+            )
+            taken = {r[0] for r in cur.fetchall()}
+
+            rows_to_insert = []
+            for pid, fid in cands:
+                if pid in taken:
+                    continue
+                rows_to_insert.append((pid, fid, pos_map[fid], ep, 'naver'))
+                if len(rows_to_insert) >= needed:
+                    break
+            if not rows_to_insert:
+                continue
+            # done/error 인 row 가 있어도 status='pending' 로 UPDATE (uniq_product 인덱스 회피)
+            cur.executemany(
+                """
+                INSERT INTO ai_keyword_task
+                  (product_id, folder_id, folder_queue_position, claimed_by, platform, status)
+                VALUES (%s, %s, %s, %s, %s, 'pending')
+                ON DUPLICATE KEY UPDATE
+                  platform=VALUES(platform),
+                  folder_id=VALUES(folder_id),
+                  folder_queue_position=VALUES(folder_queue_position),
+                  claimed_by=VALUES(claimed_by),
+                  status='pending',
+                  claimed_at=NULL, heartbeat_at=NULL, completed_at=NULL,
+                  error=NULL, retry_count=0
+                """,
+                rows_to_insert,
+            )
+            total_added += cur.rowcount
+
+    return {'ok': True, 'added': total_added}
+
+
+def list_folder_queue() -> list[dict]:
+    """현재 큐에 들어가 있는 폴더들 + 진척률.
+    100% 완료된 폴더는 queue_position=NULL 로 자동 정리하고 응답에서도 제외.
+    """
+    with connections[NAVERDB].cursor() as cur:
+        cur.execute(
+            """
+            SELECT f.id, f.name, f.queue_position,
+                   COUNT(p.id) AS total,
+                   SUM(p.naver_product_name IS NOT NULL AND p.naver_product_name<>'') AS done
+              FROM naver_my_product_folder f
+              LEFT JOIN naver_my_product p ON p.folder_id = f.id
+             WHERE f.queue_position IS NOT NULL
+             GROUP BY f.id, f.name, f.queue_position
+             ORDER BY f.queue_position
+            """
+        )
+        raw = cur.fetchall()
+
+        # 100% 완료된 폴더는 queue_position=NULL 처리
+        complete_ids: list[int] = []
+        rows: list[dict] = []
+        for fid, fname, pos, total, done in raw:
+            total = int(total or 0)
+            done = int(done or 0)
+            if total > 0 and done >= total:
+                complete_ids.append(fid)
+                continue
+            rows.append({
+                'folder_id': fid, 'folder_name': fname,
+                'queue_position': pos,
+                'total': total, 'done': done,
+                'remaining': total - done,
+                'pct': round(done * 100 / total, 1) if total else 0,
+            })
+
+        if complete_ids:
+            ph = ','.join(['%s'] * len(complete_ids))
+            cur.execute(
+                f"UPDATE naver_my_product_folder SET queue_position=NULL WHERE id IN ({ph})",
+                complete_ids,
+            )
+
+        return rows
+
+
+def set_folder_queue_positions(folder_ids: list[int],
+                                force_regenerate: bool = False) -> dict:
+    """폴더 큐 순서 일괄 갱신. 리스트에 없는 폴더는 queue_position=NULL.
+
+    Returns:
+      {ok, queue, already_complete: [folder_ids…]} — 100% 완료 폴더만 표기.
+      force_regenerate=True 면 그 폴더의 모든 상품 naver_product_name=NULL 로 reset
+      + 기존 ai_keyword_task 상태 reset → dispatch 가 다시 픽업.
+    """
+    # 1) 이미 완료(100%) 폴더 찾아두기 — UI 가 confirm 띄울 수 있게
+    already_complete: list[int] = []
+    if folder_ids and not force_regenerate:
+        with connections[NAVERDB].cursor() as cur:
+            ph = ','.join(['%s'] * len(folder_ids))
+            cur.execute(
+                f"""
+                SELECT f.id, COUNT(p.id) AS total,
+                       SUM(p.naver_product_name IS NOT NULL AND p.naver_product_name<>'') AS done
+                  FROM naver_my_product_folder f
+                  LEFT JOIN naver_my_product p ON p.folder_id = f.id
+                 WHERE f.id IN ({ph})
+                 GROUP BY f.id
+                """,
+                folder_ids,
+            )
+            for fid, total, done in cur.fetchall():
+                total = int(total or 0); done = int(done or 0)
+                if total > 0 and done >= total:
+                    already_complete.append(int(fid))
+
+    # 2) force_regenerate → 해당 폴더 상품들 naver_product_name 초기화 + task reset
+    if force_regenerate and folder_ids:
+        ph = ','.join(['%s'] * len(folder_ids))
+        with connections[NAVERDB].cursor() as ncur:
+            ncur.execute(
+                f"UPDATE naver_my_product SET naver_product_name=NULL, synced_at=NULL "
+                f"WHERE folder_id IN ({ph})",
+                folder_ids,
+            )
+        # ai_keyword_task reset → dispatch 가 다시 픽업
+        with connections[ADSDB].cursor() as acur:
+            # 해당 폴더의 product_id 들 가져와서 reset
+            with connections[NAVERDB].cursor() as ncur2:
+                ncur2.execute(
+                    f"SELECT id FROM naver_my_product WHERE folder_id IN ({ph})",
+                    folder_ids,
+                )
+                pids = [r[0] for r in ncur2.fetchall()]
+            if pids:
+                pph = ','.join(['%s'] * len(pids))
+                acur.execute(
+                    f"UPDATE ai_keyword_task SET status='pending', "
+                    f"claimed_by=NULL, claimed_at=NULL, heartbeat_at=NULL, "
+                    f"completed_at=NULL, error=NULL, retry_count=0 "
+                    f"WHERE platform='naver' AND product_id IN ({pph})",
+                    pids,
+                )
+
+    # 3) queue_position 일괄 갱신
+    with connections[NAVERDB].cursor() as cur:
+        cur.execute("UPDATE naver_my_product_folder SET queue_position=NULL")
+        for i, fid in enumerate(folder_ids, start=1):
+            cur.execute(
+                "UPDATE naver_my_product_folder SET queue_position=%s WHERE id=%s",
+                [i, int(fid)],
+            )
+
+    return {
+        'ok': True, 'queue': folder_ids,
+        'already_complete': already_complete,
+        'regenerated': force_regenerate,
+    }
+
+
 def get_queue_status() -> dict:
     """현재 platform='naver' 큐 상태 + 워커별 진행 현황."""
     out = {'pending': 0, 'running': 0, 'done_recent': 0, 'error': 0, 'by_worker': []}
@@ -1090,18 +1316,27 @@ def get_products(page: int = 1, per_page: int = 50,
                  folder_id: int | None = None,
                  search: str | None = None,
                  sort: str = 'id_desc',
-                 include_sales: bool = False) -> dict:
+                 include_sales: bool = False,
+                 category_code: str | None = None,
+                 registered: int | None = None,
+                 register_stage: str | None = None) -> dict:
     """상품 목록.
 
     sort:
         'id_desc'   (기본)
         'sales'     매출액 desc (eleven_sales_w_stats.total_amount)
         'updated'   updated_at desc
+        'category'  카테고리명 → id
+        'recommend' AI추천(=매출 상위, sales 와 동일 처리)
+    category_code: 카테고리코드 정확 일치 필터
+    registered: 0/1 등록완료 여부 필터 (None=전체)
     include_sales: 응답에 sales (total_amount, total_quantity, order_count) 포함
     """
     page = max(1, int(page))
     per_page = max(1, min(int(per_page), 500))
     offset = (page - 1) * per_page
+    if sort == 'recommend':
+        sort = 'sales'
 
     where = ['1=1']
     params: list = []
@@ -1112,14 +1347,26 @@ def get_products(page: int = 1, per_page: int = 50,
         where.append("(p.product_code LIKE %s OR p.product_name LIKE %s OR p.ai_product_name LIKE %s)")
         like = f'%{search}%'
         params += [like, like, like]
+    if category_code:
+        where.append('p.category_code=%s')
+        params.append(str(category_code))
+    if registered is not None:
+        where.append('p.registered=%s')
+        params.append(int(registered))
+    if register_stage == 'none':
+        where.append('p.register_stage IS NULL')
+    elif register_stage in ('candidate', 'queue'):
+        where.append('p.register_stage=%s')
+        params.append(register_stage)
     where_sql = ' AND '.join(where)
 
     fields = (
         'p.id, p.product_code, p.source_id, p.folder_id, p.product_name, '
         'p.ai_product_name, p.ai_recommended_name, p.edited_product_name, '
-        'p.naver_product_name, p.category_name, p.brand, p.manufacturer, p.origin, '
+        'p.naver_product_name, p.category_code, p.category_name, p.brand, p.manufacturer, p.origin, '
         'p.ownerclan_price, p.market_price, p.shipping_fee, p.return_fee, '
-        'p.image_small, p.image_large, p.sale_status, p.sync_status, '
+        'p.image_small, p.image_large, p.edited_image_url, p.upscaled_image_url, p.sale_status, p.sync_status, '
+        'p.registered, p.register_verified, p.registered_at, p.register_stage, '
         'p.copied_at, p.synced_at, p.created_at, p.updated_at'
     )
 
@@ -1155,6 +1402,7 @@ def get_products(page: int = 1, per_page: int = 50,
         order_clause = {
             'id_desc': 'p.id DESC',
             'updated': 'p.updated_at DESC, p.id DESC',
+            'category': 'p.category_name, p.id DESC',
         }.get(sort, 'p.id DESC')
         order_params = []
 

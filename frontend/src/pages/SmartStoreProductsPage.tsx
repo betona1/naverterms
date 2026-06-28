@@ -31,10 +31,17 @@ import {
   type ZeroMarginUpdateResult,
   type ZeroMarginLog,
   type ZeroMarginLogItem,
+  fetchOrphanSoldout,
+  startReconcile,
+  fetchReconcileStatus,
+  type OrphanSoldoutResult,
+  type ReconcileStatus,
 } from '../api/smartstoreProductApi';
 import { fetchStores, fetchStoreCounts, type SmartStore, type StoreCount } from '../api/smartstoreApi';
 import * as naverApi from '../api/naverApi';
+import { fetchProductMeta, type ProductMeta } from '../api/bulkRegisterApi';
 import ProductOrdersModal from '../components/smartstore/ProductOrdersModal';
+import { ProductAttrModal } from '../components/ProductAttrModal';
 
 const STATUS_LABELS: Record<string, string> = {
   SALE: '판매중',
@@ -66,6 +73,8 @@ export default function SmartStoreProductsPage() {
   const [storeCounts, setStoreCounts] = useState<StoreCount[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [products, setProducts] = useState<SmartStoreProduct[]>([]);
+  const [productMeta, setProductMeta] = useState<Record<string, ProductMeta>>({});
+  const [attrModal, setAttrModal] = useState<{ code: string; store: number } | null>(null);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(0);
@@ -93,6 +102,14 @@ export default function SmartStoreProductsPage() {
   const [orderModal, setOrderModal] = useState<{ code: string; name: string } | null>(null);
   const [rankTrackProduct, setRankTrackProduct] = useState<SmartStoreProduct | null>(null);
   const [trackedProductIds, setTrackedProductIds] = useState<Set<number>>(new Set());
+  // 오너클랜 이탈 SALE 박제(고아 품절)
+  const [orphan, setOrphan] = useState<OrphanSoldoutResult | null>(null);
+  const [orphanModalOpen, setOrphanModalOpen] = useState(false);
+  // 전체동기화(리콘실)
+  const [reconcile, setReconcile] = useState<ReconcileStatus | null>(null);
+  const [reconcileModalOpen, setReconcileModalOpen] = useState(false);
+  const [reconcileConfirmOpen, setReconcileConfirmOpen] = useState(false);
+  const reconcilePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // 구매키워드 모달
   const [buyKwModal, setBuyKwModal] = useState<{ productCode: string; productName: string } | null>(null);
   const [trackingRefreshing, setTrackingRefreshing] = useState(false);
@@ -239,6 +256,8 @@ export default function SmartStoreProductsPage() {
       setProducts(res.items);
       setTotal(res.total);
       setTotalPages(res.total_pages);
+      const codes = res.items.map((it: any) => it.seller_management_code).filter(Boolean);
+      if (codes.length) fetchProductMeta(codes, storeId).then(setProductMeta).catch(() => {});
     } catch {
       setProducts([]);
       setTotal(0);
@@ -255,8 +274,58 @@ export default function SmartStoreProductsPage() {
     setStats(s);
   }, [storeId]);
 
+  // 오너클랜 이탈 SALE 박제 조회
+  const loadOrphan = useCallback(async () => {
+    if (storeId < 0) return;
+    try { setOrphan(await fetchOrphanSoldout(storeId)); } catch { /* noop */ }
+  }, [storeId]);
+
   useEffect(() => { loadProducts(); }, [loadProducts]);
   useEffect(() => { loadStats(); }, [loadStats]);
+  useEffect(() => { loadOrphan(); }, [loadOrphan]);
+
+  // 진행 중인 리콘실 있으면 마운트 시 폴링 재개
+  useEffect(() => {
+    (async () => {
+      try {
+        const st = await fetchReconcileStatus();
+        if (st.running) { setReconcile(st); startReconcilePoll(); }
+        else if (st.results.length) setReconcile(st);
+      } catch { /* noop */ }
+    })();
+    return () => { if (reconcilePollRef.current) clearInterval(reconcilePollRef.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const startReconcilePoll = () => {
+    if (reconcilePollRef.current) clearInterval(reconcilePollRef.current);
+    reconcilePollRef.current = setInterval(async () => {
+      try {
+        const st = await fetchReconcileStatus();
+        setReconcile(st);
+        if (!st.running) {
+          if (reconcilePollRef.current) clearInterval(reconcilePollRef.current);
+          reconcilePollRef.current = null;
+          loadProducts(); loadStats(); loadOrphan();
+        }
+      } catch { /* noop */ }
+    }, 2000);
+  };
+
+  // 전체동기화 실행 (확인 모달에서 호출)
+  const doReconcile = async () => {
+    setReconcileConfirmOpen(false);
+    setReconcileModalOpen(true);
+    try {
+      const r = await startReconcile({ apply: true });
+      if (!r.ok) { alert(r.error || '시작 실패'); return; }
+      const st = await fetchReconcileStatus();
+      setReconcile(st);
+      startReconcilePoll();
+    } catch {
+      alert('전체동기화 시작 실패');
+    }
+  };
 
   // 동기화
   const handleSync = async () => {
@@ -661,6 +730,15 @@ export default function SmartStoreProductsPage() {
                 {syncing ? '동기화 중...' : '동기화'}
               </button>
             )}
+            <button
+              className="px-4 py-1.5 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50 font-medium"
+              onClick={() => (reconcile?.running ? setReconcileModalOpen(true) : setReconcileConfirmOpen(true))}
+              title="전 마켓 네이버 라이브와 DB 상품수 일치 (삭제분 반영)"
+            >
+              {reconcile?.running
+                ? `전체동기화 ${reconcile.done}/${reconcile.total}`
+                : '전체동기화'}
+            </button>
           </div>
         </div>
       </div>
@@ -741,7 +819,7 @@ export default function SmartStoreProductsPage() {
 
         {/* Stats bar */}
         {stats && (
-          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+          <div className="grid grid-cols-2 sm:grid-cols-6 gap-2">
             {/* 전체 */}
             <StatCard
               label="전체" labelColor="text-gray-400"
@@ -801,6 +879,23 @@ export default function SmartStoreProductsPage() {
                 />
               );
             })()}
+            {/* 오너클랜 이탈 SALE 박제(품절) */}
+            <button
+              type="button"
+              onClick={() => orphan && orphan.count > 0 && setOrphanModalOpen(true)}
+              className={`text-left bg-white dark:bg-gray-800 rounded border px-3 py-2 transition
+                ${orphan && orphan.count > 0
+                  ? 'border-red-400 dark:border-red-500 hover:ring-2 hover:ring-red-300 cursor-pointer'
+                  : 'border-gray-200 dark:border-gray-700 cursor-default'}`}
+              title="오너클랜 카탈로그에서 사라졌는데 판매중으로 박제된 상품 (사입불가)"
+            >
+              <div className="text-xs text-red-500 flex items-center gap-1">
+                품절박제 <span className="text-[10px] text-gray-400">(오너클랜이탈)</span>
+              </div>
+              <div className={`text-xl font-bold ${orphan && orphan.count > 0 ? 'text-red-600' : 'text-gray-400'}`}>
+                {orphan ? orphan.count.toLocaleString() : '-'}
+              </div>
+            </button>
             {/* 마지막 동기화 */}
             <div className="bg-white dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700 px-3 py-2">
               <div className="text-xs text-gray-400">마지막 동기화</div>
@@ -1028,6 +1123,11 @@ export default function SmartStoreProductsPage() {
                             >{p.seller_management_code}</a>
                           ) : <span className="text-gray-500">{p.seller_management_code}</span>
                         ) : <span className="text-gray-300">-</span>}
+                        {(() => { const meta = p.seller_management_code ? productMeta[p.seller_management_code] : null; if (!meta || (!meta.tag_count && !meta.attr_count)) return null;
+                          return <div className="flex gap-1 mt-0.5">
+                            {meta.tag_count > 0 && <span className="px-1 rounded text-[9px] bg-[#03c75a]/20 text-[#03c75a]" title="등록 태그수">🏷{meta.tag_count}</span>}
+                            {meta.attr_count > 0 && <span onClick={() => p.seller_management_code && setAttrModal({ code: p.seller_management_code, store: p.store_id || storeId })} className="px-1 rounded text-[9px] bg-indigo-500/20 text-indigo-400 cursor-pointer hover:bg-indigo-500/40" title="속성 현황 보기">🔧{meta.attr_count}</span>}
+                          </div>; })()}
                       </td>
                       <td className="px-2 py-2 text-xs text-gray-600 dark:text-gray-400 max-w-[180px]">
                         {categoryStr ? (
@@ -1439,6 +1539,163 @@ export default function SmartStoreProductsPage() {
           productName={orderModal.name}
           onClose={() => setOrderModal(null)}
         />
+      )}
+
+      {attrModal && <ProductAttrModal sellerCode={attrModal.code} storeId={attrModal.store} onClose={() => setAttrModal(null)} />}
+
+      {/* 품절박제(오너클랜 이탈 SALE) 모달 */}
+      {orphanModalOpen && orphan && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setOrphanModalOpen(false)}>
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-3xl mx-4 max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-3 border-b border-gray-200 dark:border-gray-700">
+              <div>
+                <h3 className="font-bold text-red-600">품절박제 상품 <span className="text-gray-800 dark:text-gray-100">{orphan.count.toLocaleString()}건</span></h3>
+                <p className="text-xs text-gray-400">오너클랜 카탈로그에서 사라졌는데 판매중(SALE)으로 박제 — 주문 들어와도 사입 불가</p>
+              </div>
+              <button className="text-gray-400 hover:text-gray-600 text-2xl leading-none" onClick={() => setOrphanModalOpen(false)}>&times;</button>
+            </div>
+            {orphan.by_store.length > 0 && (
+              <div className="px-5 py-2 flex flex-wrap gap-1.5 border-b border-gray-100 dark:border-gray-700">
+                {orphan.by_store.map(b => (
+                  <span key={b.store_id} className="text-xs px-2 py-0.5 rounded bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-300">
+                    {b.store_name} {b.count.toLocaleString()}
+                  </span>
+                ))}
+              </div>
+            )}
+            <div className="overflow-auto flex-1">
+              <table className="w-full text-xs">
+                <thead className="bg-gray-50 dark:bg-gray-700/50 sticky top-0">
+                  <tr className="text-gray-500">
+                    <th className="px-3 py-2 text-left">스토어</th>
+                    <th className="px-3 py-2 text-left">W코드</th>
+                    <th className="px-3 py-2 text-left">상품명</th>
+                    <th className="px-3 py-2 text-right">판매가</th>
+                    <th className="px-3 py-2 text-right">재고</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {orphan.products.map(p => (
+                    <tr key={p.id} className="border-t border-gray-100 dark:border-gray-700">
+                      <td className="px-3 py-1.5 whitespace-nowrap">{p.store_name}</td>
+                      <td className="px-3 py-1.5 font-mono text-gray-500">{p.seller_management_code}</td>
+                      <td className="px-3 py-1.5 max-w-xs truncate" title={p.name}>{p.name}</td>
+                      <td className="px-3 py-1.5 text-right">{p.sale_price.toLocaleString()}</td>
+                      <td className="px-3 py-1.5 text-right text-gray-400">{p.stock_quantity.toLocaleString()}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {orphan.count > orphan.products.length && (
+                <div className="px-3 py-2 text-xs text-gray-400 text-center">… 외 {(orphan.count - orphan.products.length).toLocaleString()}건 (상위 {orphan.products.length}건 표시)</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 전체동기화 확인 모달 */}
+      {reconcileConfirmOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setReconcileConfirmOpen(false)}>
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-md mx-4" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-3 border-b border-gray-200 dark:border-gray-700">
+              <h3 className="font-bold flex items-center gap-2">
+                <span className="text-indigo-500">🔄</span> 전체동기화
+              </h3>
+              <button className="text-gray-400 hover:text-gray-600 text-2xl leading-none" onClick={() => setReconcileConfirmOpen(false)}>&times;</button>
+            </div>
+            <div className="px-5 py-4 text-sm text-gray-600 dark:text-gray-300 space-y-2">
+              <p>전 마켓의 <b>네이버 라이브 상품수와 DB를 일치</b>시킵니다.</p>
+              <ul className="text-xs space-y-1 bg-gray-50 dark:bg-gray-700/40 rounded p-3">
+                <li>• 네이버에서 <b className="text-red-600">삭제된 상품은 DB에서도 제거</b> (DB 미러만, 네이버 원본 보존)</li>
+                <li>• 신규/변경 상품은 추가·갱신(UPSERT)</li>
+                <li>• <b className="text-orange-500">삭제비율 50% 초과</b> 스토어는 안전상 자동 보류</li>
+                <li>• 24개 스토어 병렬 처리 · 진행률 표시 · 완료 후 마켓ID별 리포트</li>
+              </ul>
+            </div>
+            <div className="px-5 py-3 border-t border-gray-200 dark:border-gray-700 flex justify-end gap-2">
+              <button className="px-4 py-1.5 text-sm rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700"
+                onClick={() => setReconcileConfirmOpen(false)}>취소</button>
+              <button className="px-4 py-1.5 text-sm rounded bg-indigo-600 text-white hover:bg-indigo-700 font-medium"
+                onClick={doReconcile}>동기화 시작</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 전체동기화 리포트 모달 */}
+      {reconcileModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => { if (!reconcile?.running) setReconcileModalOpen(false); }}>
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-4xl mx-4 max-h-[88vh] flex flex-col" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-3 border-b border-gray-200 dark:border-gray-700">
+              <div>
+                <h3 className="font-bold flex items-center gap-2">
+                  전체동기화 리포트
+                  {reconcile?.running && <span className="text-xs font-normal text-indigo-500 animate-pulse">진행 중 {reconcile.done}/{reconcile.total}</span>}
+                  {reconcile && !reconcile.running && reconcile.phase === 'done' && <span className="text-xs font-normal text-green-600">완료</span>}
+                </h3>
+                <p className="text-xs text-gray-400">네이버 라이브 ↔ DB 상품수 일치 (삭제분 반영, DB 미러만)</p>
+              </div>
+              <button className="text-gray-400 hover:text-gray-600 text-2xl leading-none disabled:opacity-30" disabled={reconcile?.running} onClick={() => setReconcileModalOpen(false)}>&times;</button>
+            </div>
+            {reconcile?.running && (
+              <div className="px-5 pt-3">
+                <div className="h-2 bg-gray-200 dark:bg-gray-700 rounded overflow-hidden">
+                  <div className="h-full bg-indigo-500 transition-all" style={{ width: `${reconcile.total ? (reconcile.done / reconcile.total) * 100 : 0}%` }} />
+                </div>
+              </div>
+            )}
+            <div className="overflow-auto flex-1 p-3">
+              {reconcile && reconcile.results.length > 0 ? (
+                <table className="w-full text-xs">
+                  <thead className="bg-gray-50 dark:bg-gray-700/50 sticky top-0">
+                    <tr className="text-gray-500">
+                      <th className="px-2 py-2 text-left">마켓ID</th>
+                      <th className="px-2 py-2 text-left">스토어</th>
+                      <th className="px-2 py-2 text-right">라이브</th>
+                      <th className="px-2 py-2 text-right">DB전</th>
+                      <th className="px-2 py-2 text-right">삭제</th>
+                      <th className="px-2 py-2 text-right">DB후</th>
+                      <th className="px-2 py-2 text-center">결과</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {[...reconcile.results].sort((a, b) => a.store_id - b.store_id).map(r => {
+                      const badge = r.status === 'api_error' ? ['API오류', 'text-red-500']
+                        : r.status === 'empty_skip' ? ['빈응답스킵', 'text-yellow-500']
+                        : r.status === 'ratio_block' ? ['비율초과보류', 'text-orange-500']
+                        : r.matched ? ['일치 ✓', 'text-green-600']
+                        : ['처리', 'text-gray-400'];
+                      return (
+                        <tr key={r.store_id} className="border-t border-gray-100 dark:border-gray-700">
+                          <td className="px-2 py-1.5 text-gray-500">{r.store_id}</td>
+                          <td className="px-2 py-1.5">{r.name}</td>
+                          <td className="px-2 py-1.5 text-right">{(r.live || 0).toLocaleString()}</td>
+                          <td className="px-2 py-1.5 text-right text-gray-400">{(r.db_before || 0).toLocaleString()}</td>
+                          <td className={`px-2 py-1.5 text-right ${r.deleted ? 'text-red-600 font-medium' : 'text-gray-400'}`}>{(r.deleted || 0).toLocaleString()}</td>
+                          <td className="px-2 py-1.5 text-right font-medium">{(r.db_after || r.db_before || 0).toLocaleString()}</td>
+                          <td className={`px-2 py-1.5 text-center ${badge[1]}`}>{badge[0]}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              ) : (
+                <div className="text-center text-gray-400 py-10 text-sm">{reconcile?.running ? '스토어 처리 중…' : '데이터 없음'}</div>
+              )}
+            </div>
+            {reconcile && reconcile.summary && (
+              <div className="px-5 py-3 border-t border-gray-200 dark:border-gray-700 text-xs flex flex-wrap gap-x-4 gap-y-1">
+                <span>스토어 <b>{reconcile.summary.stores}</b></span>
+                <span className="text-green-600">일치 <b>{reconcile.summary.matched}</b></span>
+                <span className="text-red-600">총삭제 <b>{reconcile.summary.total_deleted.toLocaleString()}</b></span>
+                <span>DB합계 <b>{reconcile.summary.db_total.toLocaleString()}</b></span>
+                {reconcile.summary.blocked.length > 0 && <span className="text-orange-500">보류 {reconcile.summary.blocked.join(',')}</span>}
+                {reconcile.summary.errors.length > 0 && <span className="text-red-500">오류 {reconcile.summary.errors.join(',')}</span>}
+              </div>
+            )}
+          </div>
+        </div>
       )}
 
       {/* 구매키워드 모달 */}

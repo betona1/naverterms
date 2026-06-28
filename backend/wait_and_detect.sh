@@ -5,7 +5,7 @@
 set -e
 cd /home/joacham/projects/naverterms/backend
 
-WORKERS=("ws220" "ws227" "ws228" "ws229" "ws230" "ws231" "vm11" "vm12" "vm13" "vm14" "ws15")
+WORKERS=("ws220" "ws227" "ws228" "ws229" "ws230" "ws231" "ws218" "ws226" "vm11" "vm12" "vm13" "vm14" "ws15")
 
 echo "=== 라벨 재크롤 완료 대기 시작 $(date '+%H:%M:%S') ==="
 while true; do

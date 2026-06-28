@@ -535,3 +535,73 @@ export async function uploadProductImage(
   });
   return data;
 }
+
+// ─── 오너클랜 이탈 SALE 박제(고아 품절) ───
+export interface OrphanSoldoutProduct {
+  id: number;
+  store_id: number;
+  store_name: string;
+  origin_product_no: number;
+  channel_product_no: number;
+  seller_management_code: string;
+  name: string;
+  sale_price: number;
+  stock_quantity: number;
+  registered_at: string | null;
+  last_modified_at: string | null;
+}
+export interface OrphanSoldoutResult {
+  count: number;
+  by_store: { store_id: number; store_name: string; count: number }[];
+  products: OrphanSoldoutProduct[];
+}
+export async function fetchOrphanSoldout(storeId = 0): Promise<OrphanSoldoutResult> {
+  const { data } = await api.get<OrphanSoldoutResult>('/orphan-soldout/', { params: { store_id: storeId } });
+  return data;
+}
+
+// ─── 전체동기화(리콘실) ───
+export interface ReconcileStoreResult {
+  store_id: number;
+  name: string;
+  status: string;          // ok | preview | ratio_block | api_error | empty_skip
+  live: number;
+  db_before: number;
+  to_delete: number;
+  to_add: number;
+  deleted: number;
+  upserted: number | null;
+  db_after: number;
+  matched: boolean;
+  del_ratio?: number;
+  error?: string;
+  sync_error?: string;
+}
+export interface ReconcileStatus {
+  running: boolean;
+  phase: 'idle' | 'running' | 'done' | 'error';
+  total: number;
+  done: number;
+  started_at: string | null;
+  finished_at: string | null;
+  apply: boolean;
+  results: ReconcileStoreResult[];
+  error: string | null;
+  summary: {
+    stores: number;
+    total_deleted: number;
+    total_upserted: number;
+    matched: number;
+    blocked: number[];
+    errors: number[];
+    db_total: number;
+  };
+}
+export async function startReconcile(opts?: { apply?: boolean; force?: boolean; max_delete_ratio?: number }): Promise<{ ok: boolean; started?: boolean; error?: string }> {
+  const { data } = await api.post('/reconcile/', opts || {});
+  return data;
+}
+export async function fetchReconcileStatus(): Promise<ReconcileStatus> {
+  const { data } = await api.get<ReconcileStatus>('/reconcile/');
+  return data;
+}

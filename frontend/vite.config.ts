@@ -22,6 +22,18 @@ export default defineConfig({
           });
         },
       },
+      // 이미지 AI 마이크로서비스 (port 8902) — base64 payload 가 크므로 타임아웃 5분
+      '/image-ai': {
+        target: 'http://localhost:8902',
+        changeOrigin: true,
+        timeout: 300000,
+        rewrite: (path) => path.replace(/^\/image-ai/, ''),
+      },
+      // Django MEDIA (편집된 썸네일) — 8901 그대로 프록시
+      '/media': {
+        target: 'http://localhost:8901',
+        changeOrigin: true,
+      },
     },
   },
 })

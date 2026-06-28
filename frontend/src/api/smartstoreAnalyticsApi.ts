@@ -161,16 +161,38 @@ export async function syncCategories(): Promise<{ synced: number; errors: number
 export interface RegistrationLimitStore {
   store_id: number;
   store_name: string;
+  login_id: string | null;        // 원본 로그인 아이디
+  business_name: string | null;   // 원본 사업자명
   transaction_amount: number;
   order_count: number;
   recent_sold_products: number;
   total_products: number;
   sales_ratio: number;
   current_limit: number;
+  limit_source: 'api' | 'estimate';
   next_limit: number | null;
   needed_amount: number | null;
   needed_orders: number | null;
   period_label: string;
+  // 네이버 내부 API 실제값 (limit_source==='api' 일 때 유효)
+  applied_ymd: string | null;
+  api_sale_amount: number | null;        // 거래액(최근 3개월)
+  api_sale_count: number | null;         // 판매 건수(최근 3개월)
+  api_monthly_ratio: number | null;      // 판매상품비중(이번달) %
+  api_daily_ratio: number | null;        // 판매상품비중(전일) %
+  api_90d_avg: number | null;            // 평균 등록 상품수(90일)
+  api_sale_product_count: number | null; // 판매 상품수(13개월)
+  ratio_ok: boolean;                     // 비중 >= 3% 충족 여부
+  reg_target_3pct: number | null;        // 3% 도달 목표 평균등록수
+  reg_reduce_avg: number | null;         // 90일평균 기준 줄여야 할 양
+  reg_current_ok: boolean;               // 현재 등록수가 이미 목표 이하
+  // 90일 평균 추세 → 3% 도달 예상시점
+  trend_points: number;                  // 보유 스냅샷 일수
+  avg_slope_per_day: number | null;      // 평균등록 일별 변화량
+  eta_days: number | null;               // 3% 도달까지 예상 일수
+  eta_date: string | null;               // 예상 도달 날짜
+  eta_status: 'met' | 'projected' | 'collecting' | 'need_reduce' | 'no_decline';
+  captured_date: string | null;
 }
 
 export interface RegistrationLimitTier {
@@ -189,5 +211,29 @@ export interface RegistrationLimitData {
 
 export async function fetchRegistrationLimits(): Promise<RegistrationLimitData> {
   const { data } = await api.get<RegistrationLimitData>('/registration-limits/');
+  return data;
+}
+
+// ── 상품등록한도 실측 수집 (네이버 내부 API) ──
+
+export interface PolicyCollectStatus {
+  running: boolean;
+  phase: string;
+  login_idx: number;
+  total_logins: number;
+  store_idx: number;
+  current_login: string | null;
+  current_store: string | null;
+  logs: string[];
+  error: string | null;
+}
+
+export async function startPolicyCollect(loginIds?: number[]): Promise<{ ok: boolean; error?: string }> {
+  const { data } = await api.post('/policy/collect/', loginIds ? { login_ids: loginIds } : {});
+  return data;
+}
+
+export async function fetchPolicyStatus(): Promise<PolicyCollectStatus> {
+  const { data } = await api.get<PolicyCollectStatus>('/policy/status/');
   return data;
 }

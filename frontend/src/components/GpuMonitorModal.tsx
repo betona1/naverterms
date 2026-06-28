@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { fetchGpuStatus, fetchGpuLogs, fetchBulkProgress, type GpuWorker, type GpuLog, type BulkProgress, type FolderProgress, type WorkerRateWindow } from '../api/gpuMonitorApi';
+import { UpscaleJobsPanel } from './UpscaleJobsPanel';
+import { ProductAttrPanel } from './ProductAttrPanel';
+
+type TabKey = 'monitor' | 'upscale' | 'attrs';
 
 interface Props {
   open: boolean;
@@ -28,12 +32,15 @@ const EVENT_COLOR: Record<string, string> = {
 };
 
 export default function GpuMonitorModal({ open, onClose }: Props) {
+  const [tab, setTab] = useState<TabKey>('monitor');
   const [workers, setWorkers] = useState<GpuWorker[]>([]);
   const [logs, setLogs] = useState<GpuLog[]>([]);
   const [progress, setProgress] = useState<BulkProgress | null>(null);
   const [selectedEndpoint, setSelectedEndpoint] = useState<string>('');
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [lastFetched, setLastFetched] = useState<string>('');
+  const [tgReportEnabled, setTgReportEnabled] = useState<boolean>(false);
+  const [tgToggling, setTgToggling] = useState(false);
   const [logsExpanded, setLogsExpanded] = useState(false);
   // 칩 스트립 — 윈도우별 처리량 표시 + 처리량 정렬 토글
   const [rateWindow, setRateWindow] = useState<WorkerRateWindow>('1h');
@@ -64,7 +71,27 @@ export default function GpuMonitorModal({ open, onClose }: Props) {
   useEffect(() => {
     if (!open) return;
     load();
+    fetch('/api/smartstore/naver-products/tg-report/')
+      .then(r => r.json()).then(d => setTgReportEnabled(!!d.enabled)).catch(() => {});
   }, [open, load]);
+
+  const toggleTgReport = async (checked: boolean) => {
+    setTgToggling(true);
+    try {
+      const r = await fetch('/api/smartstore/naver-products/tg-report/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: checked }),
+      });
+      const d = await r.json();
+      setTgReportEnabled(!!d.enabled);
+      if (d.enabled && d.sent_now) {
+        // 즉시 1회 보고 + 매시 정각 보고
+      }
+    } finally {
+      setTgToggling(false);
+    }
+  };
 
   useEffect(() => {
     if (!open || !autoRefresh) {
@@ -104,17 +131,47 @@ export default function GpuMonitorModal({ open, onClose }: Props) {
   const saveQueue = useCallback(async (newIds: number[]) => {
     setQueueIds(newIds);
     try {
-      const r = await fetch('/api/gpu/folder-queue/', {
+      const r = await fetch('/api/smartstore/naver-products/folder-queue/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ folder_ids: newIds }),
       });
       const j = await r.json();
-      if (!j.ok) alert('큐 저장 실패: ' + (j.error || 'unknown'));
+      if (!j.ok) {
+        alert('큐 저장 실패: ' + (j.error || 'unknown'));
+        return;
+      }
+      // 완료 폴더 추가 시도면 confirm → force_regenerate
+      if (Array.isArray(j.already_complete) && j.already_complete.length > 0) {
+        const names = j.already_complete
+          .map((fid: number) => {
+            const f = (progress?.folders || []).find(x => x.folder_id === fid);
+            return f?.folder_name || `#${fid}`;
+          })
+          .join(', ');
+        const ok = window.confirm(
+          `이미 100% 완료된 폴더입니다: ${names}\n\n` +
+          `이 폴더를 다시 작업하시겠습니까?\n(YES → 모든 상품의 네이버 상품명 초기화 후 재추론)`
+        );
+        if (ok) {
+          const r2 = await fetch('/api/smartstore/naver-products/folder-queue/', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ folder_ids: newIds, force_regenerate: true }),
+          });
+          const j2 = await r2.json();
+          if (j2.ok) {
+            alert(`✅ ${names} 재추론 시작 — 5초 안에 워커가 픽업합니다`);
+          } else {
+            alert('재추론 실패: ' + (j2.error || 'unknown'));
+          }
+        }
+      }
     } catch (e) {
       alert('큐 저장 오류: ' + e);
     }
-  }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [progress?.folders]);
 
   const handleDropToQueue = useCallback((insertIdx?: number) => {
     if (dragFid == null) return;
@@ -233,6 +290,14 @@ export default function GpuMonitorModal({ open, onClose }: Props) {
               <input type="checkbox" checked={autoRefresh} onChange={e => setAutoRefresh(e.target.checked)} className="w-3 h-3 accent-violet-600" />
               자동 새로고침 (5초)
             </label>
+            <label className={`inline-flex items-center gap-1 text-[11px] cursor-pointer ${tgReportEnabled ? 'text-sky-600 dark:text-sky-400 font-bold' : 'text-gray-500'}`}
+              title="체크 즉시 1회 보고 + 매시 정각마다 텔레그램으로 큐 진척 자동 보고">
+              <input type="checkbox" checked={tgReportEnabled}
+                onChange={e => toggleTgReport(e.target.checked)}
+                disabled={tgToggling}
+                className="w-3 h-3 accent-sky-600" />
+              📨 텔레그램 1시간 보고
+            </label>
             {lastFetched && <span className="text-[10px] text-gray-400">last: {lastFetched}</span>}
           </div>
           <div className="flex items-center gap-2">
@@ -241,6 +306,47 @@ export default function GpuMonitorModal({ open, onClose }: Props) {
             <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl ml-1">×</button>
           </div>
         </div>
+
+        {/* 탭 헤더 */}
+        <div className="flex items-center gap-1 px-3 py-1.5 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/40">
+          <button onClick={() => setTab('monitor')}
+                  className={`px-3 py-1.5 text-xs font-bold rounded-t transition-all flex items-center gap-1.5 ${
+                    tab === 'monitor'
+                      ? 'bg-gradient-to-b from-violet-600 to-violet-700 text-white shadow'
+                      : 'text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'
+                  }`}>
+            🖥 GPU 모니터링
+          </button>
+          <button onClick={() => setTab('upscale')}
+                  className={`px-3 py-1.5 text-xs font-bold rounded-t transition-all flex items-center gap-1.5 ${
+                    tab === 'upscale'
+                      ? 'bg-gradient-to-b from-emerald-600 to-emerald-700 text-white shadow'
+                      : 'text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'
+                  }`}>
+            🎨 AI 이미지 작업
+          </button>
+          <button onClick={() => setTab('attrs')}
+                  className={`px-3 py-1.5 text-xs font-bold rounded-t transition-all flex items-center gap-1.5 ${
+                    tab === 'attrs'
+                      ? 'bg-gradient-to-b from-amber-500 to-amber-600 text-white shadow'
+                      : 'text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'
+                  }`}>
+            🤖 상품속성
+          </button>
+        </div>
+
+        {/* 탭 본문 */}
+        {tab === 'upscale' && (
+          <div className="flex-1 min-h-0 overflow-hidden">
+            <UpscaleJobsPanel />
+          </div>
+        )}
+        {tab === 'attrs' && (
+          <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+            <ProductAttrPanel />
+          </div>
+        )}
+        {tab === 'monitor' && <>
 
         {/* GPU 상태 스트립 — 11대 한눈에. 클릭 시 해당 워커 로그 필터.
             우측: 라디오(5/10/30/60분) + 정렬 토글. 각 칩 위에 선택 윈도우의 처리 건수. */}
@@ -575,6 +681,8 @@ export default function GpuMonitorModal({ open, onClose }: Props) {
             </div>
           )}
         </div>
+
+        </>}{/* /monitor 탭 */}
       </div>
     </div>
   );

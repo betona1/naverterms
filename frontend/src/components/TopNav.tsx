@@ -4,6 +4,7 @@ interface Props {
   onStoreSettings: () => void;
   onPowerControl: () => void;
   onGpuMonitor: () => void;
+  onBrandPolicy: () => void;
   dark: boolean;
   onToggleTheme: () => void;
 }
@@ -23,7 +24,10 @@ interface GroupItem {
 
 const NAV_GROUPS: GroupItem[] = [
   { key: 'products',       label: '스마트스토어상품', color: '#03c75a', page: 'products' },
-  { key: 'naver-products', label: 'My상품',          color: '#22c55e', page: 'naver-products' },
+  { key: 'naver-products', label: 'My상품',          color: '#22c55e', children: [
+    { key: 'naver-products', label: '상품목록' },
+    { key: 'naver-dup',      label: '중복진단' },
+  ]},
   { key: 'analytics',      label: '스토어분석',      color: '#10b981', page: 'analytics' },
   { key: 'attr',           label: '상품속성',        color: '#14b8a6', children: [
     { key: 'attr-analytics', label: '상품속성분석' },
@@ -55,7 +59,7 @@ function findGroup(page: string): GroupItem | undefined {
   return undefined;
 }
 
-export default function TopNav({ page, onPageChange, onStoreSettings, onPowerControl, onGpuMonitor, dark, onToggleTheme }: Props) {
+export default function TopNav({ page, onPageChange, onStoreSettings, onPowerControl, onGpuMonitor, onBrandPolicy, dark, onToggleTheme }: Props) {
   const activeGroup = findGroup(page);
   const subItems = activeGroup?.children;
 
@@ -126,6 +130,14 @@ export default function TopNav({ page, onPageChange, onStoreSettings, onPowerCon
                       d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/>
               </svg>
             )}
+          </button>
+          <button onClick={onBrandPolicy}
+                  title="브랜드/제조사 화이트·블랙리스트"
+                  className={`p-1.5 rounded transition-all
+                    ${dark ? 'text-amber-400 hover:text-amber-200 hover:bg-amber-900/30' : 'text-amber-600 hover:text-amber-700 hover:bg-amber-50'}`}>
+            <svg className="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M7 7h.01M7 3h5a2 2 0 0 1 1.414.586l7 7a2 2 0 0 1 0 2.828l-7 7a2 2 0 0 1-2.828 0l-7-7A2 2 0 0 1 3 12V7a4 4 0 0 1 4-4z" />
+            </svg>
           </button>
           <button onClick={onGpuMonitor}
                   title="워커 모니터링 (GPU + 일반 크롤링)"
