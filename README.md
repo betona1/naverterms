@@ -131,13 +131,55 @@ pm2 logs naverterms-backend
 
 ---
 
-## 6. 크롬 확장프로그램
+## 6. 네이버치트키 확장프로그램 (Chrome Extension)
 
-`chrome-extension/` 디렉토리를 크롬 **확장프로그램 관리 → 압축해제된 확장프로그램 로드**
-로 불러오거나, 앱 내 **도우미프로그램(`#extension`)** 페이지에서 ZIP 을 받아 설치합니다.
+> **네이버치트키 확장프로그램** — 네이버쇼핑/스마트스토어/지마켓 데이터를
+> 브라우저에서 직접 수집해 백엔드로 전송하는 크롬 확장프로그램입니다.
+> (소스: `chrome-extension/`, manifest 표기명 "쇼핑 통합 도우미", v3.0.26)
 
-확장프로그램은 네이버쇼핑 검색결과의 `__NEXT_DATA__` 를 파싱해
-백엔드(`/api/naver/ext/search-result/`)로 전송합니다.
+### 6.1 설치 방법
+
+1. 크롬 주소창에 `chrome://extensions` 입력 → 우상단 **개발자 모드** 켜기
+2. **압축해제된 확장프로그램을 로드** 클릭 → 이 프로젝트의 `chrome-extension/` 폴더 선택
+3. (또는) 앱의 **도구 → 도우미프로그램(`#extension`)** 페이지에서 ZIP 다운로드 후 압축해제하여 로드
+4. 설치 후 브라우저 우상단 퍼즐 아이콘에서 **네이버치트키**를 고정(📌)
+
+### 6.2 주요 기능
+
+| 기능 | 대상 사이트 | 설명 |
+|------|------------|------|
+| Term 수집 | search.shopping.naver.com | 검색결과 `__NEXT_DATA__` 파싱 → term/상품 수집 |
+| 순위추적 | search.shopping.naver.com | 키워드별 상품/스토어 순위 수집 |
+| 구매수 추적 | search.shopping.naver.com | 상품 구매수/리뷰수 수집 |
+| 스마트스토어 | smartstore.naver.com | 상품 페이지 데이터 수집 (`content_smartstore.js`) |
+| 로하스 | com.exponet.co.kr | 로하스 상품 수집 (`bg_lohas.js`, `crawl_lohas.js`) |
+| 지마켓 | gmarket.co.kr | 지마켓 순위추적 (`bg_gmarket.js`) |
+
+### 6.3 내부/외부 듀얼 모드
+
+확장프로그램 팝업에서 **저장 모드**를 전환할 수 있습니다.
+
+| 모드 | 전송 대상 | 용도 |
+|------|----------|------|
+| **외부(external)** | 현재 열려 있는 웹앱 페이지로 `postMessage` 전달 | 일반 사용자 — 웹 UI 에서 직접 수집 |
+| **내부(internal)** | 내부 API(`INTERNAL_API`)로 직접 POST | 운영 서버 자동 수집 |
+
+> 내부 모드 전송 주소는 `chrome-extension/background.js` 상단 `INTERNAL_API`
+> 상수에 정의돼 있습니다. 다른 환경에서 쓰려면 이 값을 자신의 백엔드 주소로 바꾸세요.
+
+### 6.4 동작 흐름
+
+```
+[외부 모드] 확장프로그램 → 네이버쇼핑 검색 → __NEXT_DATA__ 파싱
+  → window.postMessage → 프론트엔드 useNaverExtension 훅
+  → POST /api/naver/ext/search-result/ → DB 저장
+
+[내부 모드] 확장프로그램 → 네이버쇼핑 검색 → __NEXT_DATA__ 파싱
+  → 직접 POST {INTERNAL_API}/ext/search-result/ → DB 저장
+```
+
+> ⚠️ 확장프로그램은 봇 탐지 우회를 위해 모바일 UA·랜덤 딜레이를 사용합니다.
+> 과도한 수집은 IP 차단/CAPTCHA 를 유발할 수 있으니 딜레이 설정을 유지하세요.
 
 ---
 
