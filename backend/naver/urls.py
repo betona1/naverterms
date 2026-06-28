@@ -28,7 +28,11 @@ urlpatterns = [
     path('products/<int:keyword_id>/', views.ProductsView.as_view()),
     path('tags/<int:keyword_id>/', views.TagStatsView.as_view()),
 
-    # 순위추적
+    # 순위추적 — 상품
+    path('rank/products/', views.TrackingProductListView.as_view()),
+    path('rank/products/<int:pk>/', views.TrackingProductDetailView.as_view()),
+    path('rank/products/parse/', views.TrackingProductParseView.as_view()),
+    # 순위추적 — 키워드/실행
     path('rank/track/', views.RunRankTrackingView.as_view()),
     path('rank/targets/', views.RankTargetListView.as_view()),
     path('rank/targets/<int:pk>/', views.RankTargetDetailView.as_view()),
@@ -38,6 +42,8 @@ urlpatterns = [
     path('rank/pivot/', views.RankPivotView.as_view()),
     path('rank/tracked-products/', views.RankTrackedProductsView.as_view()),
     path('rank/toggle-auto/', views.RankToggleAutoView.as_view()),
+    path('rank/groups/', views.RankGroupsView.as_view()),
+    path('rank/matrix/', views.RankMatrixView.as_view()),
 
     # 스케줄
     path('schedules/', views.ScheduleListView.as_view()),
@@ -100,4 +106,9 @@ urlpatterns = [
     path('purchase/history/', views.PurchaseHistoryView.as_view()),
     path('purchase/summary/', views.PurchaseSummaryView.as_view()),
     path('purchase/toggle-auto/', views.PurchaseToggleAutoView.as_view()),
+
+    # 아이템스카우트
+    path('itemscout/products/', views.ItemScoutProductListView.as_view()),
+    path('itemscout/products/<int:pk>/', views.ItemScoutProductDetailView.as_view()),
+    path('itemscout/records/', views.ItemScoutRecordView.as_view()),
 ]

@@ -27,6 +27,9 @@ import AttrRegisterPage from './pages/AttrRegisterPage';
 import WorkersPage from './pages/WorkersPage';
 import NaverMyProductsPage from './pages/NaverMyProductsPage';
 import NaverDupPage from './pages/NaverDupPage';
+import ApiSettingsPage from './pages/ApiSettingsPage';
+import CompetitorPage from './pages/CompetitorPage';
+import ItemScoutPage from './pages/ItemScoutPage';
 
 const PAGE_KEY = 'nt-page';
 
@@ -52,7 +55,17 @@ const HASH_MAP: Record<string, string> = {
   '#workers': 'workers',
   '#naver-products': 'naver-products',
   '#naver-dup': 'naver-dup',
+  '#apisettings': 'apisettings',
+  '#competitor': 'competitor',
+  '#itemscout': 'itemscout',
 };
+
+const PAGE_KEYS = [
+  'terms', 'synonyms', 'autocomplete', 'results', 'rank', 'products', 'extension',
+  'ownerclan', 'analytics', 'keywords', 'catkeywords', 'cunning', 'purchase',
+  'reports', 'store-collect', 'attr-analytics', 'missing-attrs', 'attr-register',
+  'workers', 'naver-products', 'naver-dup', 'apisettings', 'competitor', 'itemscout',
+];
 
 export default function App() {
   const { dark, toggle } = useTheme();
@@ -80,7 +93,7 @@ export default function App() {
         setPage('product-edit');
         return;
       }
-      if (h && ['terms', 'synonyms', 'autocomplete', 'results', 'rank', 'products', 'extension', 'ownerclan', 'analytics', 'keywords', 'catkeywords', 'cunning', 'purchase', 'reports', 'store-collect', 'attr-analytics', 'missing-attrs', 'attr-register', 'workers', 'naver-products', 'naver-dup'].includes(h)) {
+      if (h && PAGE_KEYS.includes(h)) {
         setPage(h);
         try { localStorage.setItem(PAGE_KEY, h); } catch { /* */ }
       }
@@ -130,6 +143,9 @@ export default function App() {
           {page === 'workers' && <WorkersPage />}
           {page === 'naver-products' && <NaverMyProductsPage />}
           {page === 'naver-dup' && <NaverDupPage />}
+          {page === 'apisettings' && <ApiSettingsPage />}
+          {page === 'competitor' && <CompetitorPage />}
+          {page === 'itemscout' && <ItemScoutPage />}
         </main>
       </div>
       {showStoreSettings && (

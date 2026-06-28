@@ -46,6 +46,9 @@ const NAV_GROUPS: GroupItem[] = [
     { key: 'purchase',     label: '구매추적' },
     { key: 'keywords',     label: '연관키워드' },
     { key: 'catkeywords',  label: '카테고리키워드' },
+    { key: 'competitor',   label: '타사상품분석' },
+    { key: 'itemscout',    label: '판매량추적' },
+    { key: 'apisettings',  label: 'API설정' },
     { key: 'extension',    label: '도우미프로그램' },
   ]},
 ];

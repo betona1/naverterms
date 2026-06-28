@@ -16,7 +16,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'naver',
     'smartstore',
-    'ownerclan',
+    'competitor',
 ]
 
 MIDDLEWARE = [
@@ -26,6 +26,22 @@ MIDDLEWARE = [
 
 ROOT_URLCONF = 'config.urls'
 WSGI_APPLICATION = 'config.wsgi.application'
+
+_DB_HOST = os.getenv('DB_HOST', 'localhost')
+_DB_PORT = int(os.getenv('DB_PORT', 3306))
+_DB_USER = os.getenv('DB_USER', 'mueres')
+_DB_PASS = os.getenv('DB_PASSWORD', 'mueres').strip("'")
+
+def _db(name):
+    return {
+        'ENGINE': 'django.db.backends.mysql',
+        'NAME': name,
+        'HOST': _DB_HOST,
+        'PORT': _DB_PORT,
+        'USER': _DB_USER,
+        'PASSWORD': _DB_PASS,
+        'OPTIONS': {'charset': 'utf8mb4'},
+    }
 
 DATABASES = {
     'default': {

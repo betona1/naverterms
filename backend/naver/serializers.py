@@ -3,7 +3,7 @@ from .models import (
     NaverKeyword, NaverSearchSnapshot, NaverTermAnalysis,
     NaverRankTarget, NaverRankHistory, NaverTrackingSchedule,
     NaverPurchaseTarget, NaverPurchaseHistory,
-    NaverSynonym,
+    NaverSynonym, NaverTrackingProduct,
 )
 
 
@@ -59,6 +59,12 @@ class NaverRankHistorySerializer(serializers.ModelSerializer):
 class NaverTrackingScheduleSerializer(serializers.ModelSerializer):
     class Meta:
         model = NaverTrackingSchedule
+        fields = '__all__'
+
+
+class NaverTrackingProductSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = NaverTrackingProduct
         fields = '__all__'
 
 
