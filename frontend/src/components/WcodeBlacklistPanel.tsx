@@ -403,7 +403,7 @@ export default function WcodeBlacklistPanel({ open, onClose, dark }: Props) {
                       삭제 대상: {({my:'마이상품', pre:'예비상품', oc:'오너클랜'} as const)[tab as 'my'|'pre'|'oc']}
                     </div>
                     <button onClick={onProcess}
-                            disabled={deleteBusy || checked.size === 0 || tab === 'register'}
+                            disabled={deleteBusy || checked.size === 0}
                             className="px-3 py-1 text-[11px] font-bold rounded bg-rose-600 hover:bg-rose-700 text-white disabled:opacity-40">
                       {deleteBusy ? '⏳' : `🗑 체크 ${checked.size}개 삭제`}
                     </button>

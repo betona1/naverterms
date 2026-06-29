@@ -17,7 +17,7 @@ interface Product {
   latest_date: string | null;
 }
 
-interface Record {
+interface ItemRecord {
   id: number;
   product_id: number;
   product_name: string;
@@ -29,7 +29,7 @@ interface Record {
 export default function ItemScoutPage() {
   const { dark } = useTheme();
   const [products, setProducts] = useState<Product[]>([]);
-  const [records, setRecords] = useState<Record[]>([]);
+  const [records, setRecords] = useState<ItemRecord[]>([]);
   const [loading, setLoading] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
   const [newName, setNewName] = useState('');
@@ -97,7 +97,6 @@ export default function ItemScoutPage() {
 
   // 최근 날짜 기준 테이블 데이터
   const latestDate = records.length ? records.reduce((a, b) => a.record_date > b.record_date ? a : b).record_date : null;
-  const todayRecords = latestDate ? records.filter(r => r.record_date === latestDate) : [];
 
   return (
     <div className="p-4 space-y-4">

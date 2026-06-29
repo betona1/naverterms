@@ -302,7 +302,7 @@ export default function CompetitorPage() {
   const [products, setProducts] = useState<CompetitorProduct[]>([]);
   const [selected, setSelected] = useState<CompetitorProduct | null>(null);
   const [loading, setLoading] = useState(false);
-  const [crawling, setCrawling] = useState<Record<number, boolean>>({});
+  const [, setCrawling] = useState<Record<number, boolean>>({});
   const [allCrawling, setAllCrawling] = useState(false);
   const [urlInput, setUrlInput] = useState('');
   const [kwInput, setKwInput] = useState('');

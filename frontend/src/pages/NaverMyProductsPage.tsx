@@ -5,7 +5,7 @@ import {
   startImportFrom11st, fetchImportStatus, generateNaverName,
   enqueueGenerate, fetchQueueStatus, moveNaverProducts,
   fetchNaverProductDetail, patchNaverProduct, clearVisionCache,
-  fetchKeywordPool, fetchRelatedKeywords, fetchRelatedKeywordsMulti, fetchKeywordRelevance,
+  fetchKeywordPool, fetchRelatedKeywordsMulti, fetchKeywordRelevance,
   confirmNaverName, fetchNaverNameConfirmations,
   fetchNaverNameVersions, rollbackNaverName,
   type NaverProductItem, type NaverProductFolder, type ImportState,
@@ -948,7 +948,7 @@ function FolderMoveModal({
 
 
 function ProductDetailModal({
-  productId, folders, dark, onClose, onSaved,
+  productId, dark, onClose, onSaved,
 }: {
   productId: number;
   folders: NaverProductFolder[];
@@ -1212,7 +1212,6 @@ function ProductDetailModal({
   const applyAutoFill = () => {
     const adds = autoFillCandidates.filter(c => !currentTokens.has(c.kw.toLowerCase())).map(c => c.kw);
     if (adds.length === 0) { flash('추가할 키워드 없음'); return; }
-    setSelectedOrder(prev => [...prev, ...adds]);
     setNaverName(prev => {
       const tokens = tokenize(prev);
       const used = new Set(tokens.map(t => t.toLowerCase()));

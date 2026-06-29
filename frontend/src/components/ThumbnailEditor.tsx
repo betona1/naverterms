@@ -17,8 +17,8 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  aiBgRemove, aiTextRemove, aiUpscale, aiRotate, aiGeminiEdit, aiFlip,
-  aiAdjust, aiFilter, aiBlur, aiPadSquare, aiFrame, aiOcr,
+  aiBgRemove, aiTextRemove, aiUpscale, aiRotate, aiFlip,
+  aiAdjust, aiFilter, aiPadSquare, aiFrame, aiOcr,
   fluxFill, fluxRedux, fluxKontext, fluxCanny, fluxDepth, fluxUpscale, fluxIPAdapter,
   addVariant, fetchVariants,
   type ImageOpResult, type FluxResult, type ImageRef, type OcrResult,
@@ -59,7 +59,7 @@ const GEN_PRESETS: { label: string; prompt: string; emoji: string }[] = [
 ];
 
 type Op = {
-  type: 'bg_remove' | 'text_remove' | 'upscale' | 'rotate';
+  type: 'bg_remove' | 'text_remove' | 'upscale' | 'rotate' | 'restore';
   label: string;
   elapsed_ms: number;
   meta?: Record<string, unknown>;
@@ -117,9 +117,6 @@ export function ThumbnailEditor({
   const [adjBrightness, setAdjBrightness] = useState(1.0);
   const [adjContrast, setAdjContrast] = useState(1.0);
   const [adjSaturation, setAdjSaturation] = useState(1.0);
-  // 블러/비네팅
-  const [blurRadius, setBlurRadius] = useState(0);
-  const [vignetteStr, setVignetteStr] = useState(0);
   // 후처리
   const [padColor, setPadColor] = useState('#ffffff');
   const [frameBorder, setFrameBorder] = useState(0);
@@ -129,7 +126,6 @@ export function ThumbnailEditor({
   // OCR 결과
   const [ocrResult, setOcrResult] = useState<OcrResult | null>(null);
   // 생성형 AI
-  const [provider, setProvider] = useState<'flux' | 'gemini'>('flux');  // FLUX 기본
   const [fluxFeature, setFluxFeature] = useState<FluxFeature>('fill');
   const [genPrompt, setGenPrompt] = useState('');
   const [refImageB64, setRefImageB64] = useState<string | null>(null);
@@ -137,7 +133,7 @@ export function ThumbnailEditor({
   const [fluxStrength, setFluxStrength] = useState(0.7);
   const [fluxScale, setFluxScale] = useState(2.0);
   // 변형 풀 mini-strip
-  const [variants, setVariants] = useState<ThumbnailVariant[]>([]);
+  const [, setVariants] = useState<ThumbnailVariant[]>([]);
   const [variantCount, setVariantCount] = useState(0);
   const variantMax = 20;
   // 마지막 작업 타입 (저장 시 source_type 결정)
@@ -564,7 +560,7 @@ export function ThumbnailEditor({
                           {restoreRect && restoreRect.w > 4 && (
                             <button onClick={applyRestore} disabled={isBusy}
                                     className="bg-emerald-500 hover:bg-emerald-600 px-3 py-0.5 rounded font-bold disabled:opacity-40">
-                              {busy === '복원중' ? '⏳' : '✓ 적용'}
+                              ✓ 적용
                             </button>
                           )}
                           <button onClick={() => { setRestoreMode(false); setRestoreRect(null); }}

@@ -658,7 +658,6 @@ export default function NaverRankPage() {
 
   const targetColors = ['#03c75a', '#0078d7', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316'];
   const targetLabelMap: Record<number, string> = {};
-  let colorIdx = 0;
   for (const g of groups) {
     for (const k of g.keywords) {
       targetLabelMap[k.target_id] = `${k.keyword} - ${g.display_name}`;

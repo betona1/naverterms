@@ -10,12 +10,6 @@ interface Props {
   onClose: () => void;
 }
 
-const STATUS_DOT: Record<string, string> = {
-  ok:       'bg-emerald-500',
-  degraded: 'bg-amber-500',
-  dead:     'bg-rose-600 animate-pulse',
-  unknown:  'bg-gray-400',
-};
 const STATUS_LABEL: Record<string, string> = {
   ok: '정상', degraded: '느려짐', dead: '응답없음', unknown: '미확인',
 };
@@ -199,7 +193,7 @@ export default function GpuMonitorModal({ open, onClose }: Props) {
   const staleWorkers = useMemo(() => workers.filter(w => w.status !== 'dead' && w.stale), [workers]);
 
   // 워커별 model set 중 모두 공통으로 가진 것만 헤더에 표시. 빠진 워커는 카드에서 ⚠ 표시.
-  const { commonModels, perWorkerMissing } = useMemo(() => {
+  const { commonModels } = useMemo(() => {
     if (workers.length === 0) return { commonModels: [] as string[], perWorkerMissing: {} as Record<string, string[]> };
     const sets = workers.map(w => new Set(w.available_models || []));
     const union = new Set<string>();

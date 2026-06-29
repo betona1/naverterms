@@ -9,7 +9,7 @@ import {
   startPolicyCollect, fetchPolicyStatus,
   type OverviewData, type BusinessDetailData, type StoreDetailData,
   type TrendRow, type CategoryNode, type TopProductRow,
-  type BusinessSummary, type StoreOverviewItem, type MiniCategory,
+  type BusinessSummary, type MiniCategory,
   type RegistrationLimitData, type RegistrationLimitStore, type PolicyCollectStatus,
 } from '../api/smartstoreAnalyticsApi';
 import { formatKRW, formatKoreanWon, formatKoreanShort } from '../utils/format';
@@ -68,9 +68,9 @@ export default function SmartStoreAnalyticsPage() {
   const [view, setView] = useState<ViewMode>('overview');
   const [overviewTab, setOverviewTab] = useState<OverviewTab>('business');
   const [selectedBusinessCode, setSelectedBusinessCode] = useState('');
-  const [selectedBusinessName, setSelectedBusinessName] = useState('');
+  const [, setSelectedBusinessName] = useState('');
   const [selectedStoreId, setSelectedStoreId] = useState(0);
-  const [selectedStoreName, setSelectedStoreName] = useState('');
+  const [, setSelectedStoreName] = useState('');
 
   // filters
   const [periodPreset, setPeriodPreset] = useState('thisYear');
@@ -778,9 +778,10 @@ function TrendChart({ trend, ...s }: StyleProps & { trend: TrendRow[] }) {
               fontSize: 12, borderRadius: 8, boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
             }}
             labelStyle={{ color: s.dark ? '#fff' : '#111', fontWeight: 700 }}
-            formatter={(value: number, name: string) => {
-              if (name === '주문수' || name === '수량') return [value.toLocaleString(), name];
-              return [formatKRW(value) + '원', name];
+            formatter={(value, name) => {
+              const num = Number(value);
+              if (name === '주문수' || name === '수량') return [num.toLocaleString(), name];
+              return [formatKRW(num) + '원', name];
             }}
           />
           <Legend wrapperStyle={{ fontSize: 11 }} />
@@ -865,7 +866,7 @@ function CategoryBarChart({ categories, title, selectedCatName, onBack, ...s }: 
               background: s.tooltipBg, border: `1px solid ${s.tooltipBorder}`,
               fontSize: 12, borderRadius: 8,
             }}
-            formatter={(value: number) => [formatKRW(value) + '원', '매출액']}
+            formatter={(value) => [formatKRW(Number(value)) + '원', '매출액']}
           />
           <Bar dataKey="total_amount" radius={[0, 4, 4, 0]}>
             {chartData.map((_, i) => (

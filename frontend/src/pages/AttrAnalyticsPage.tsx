@@ -710,13 +710,6 @@ function Section({ dark, title, children }:
   );
 }
 
-const CLASSIFICATION_LABEL: Record<string, string> = {
-  'MULTI_SELECT': '복수선택',
-  'SINGLE_SELECT': '단일선택',
-  'INPUT': '직접입력',
-  'NUMERIC': '숫자',
-};
-
 function SsAdminAttributeTable({ dark, groups }: { dark: boolean; groups: AttrGroup[] }) {
   // attribute_type 별로 그룹화 (PRIMARY → 주요속성, 그 외 → 기타속성)
   const buckets: Record<string, AttrGroup[]> = {};

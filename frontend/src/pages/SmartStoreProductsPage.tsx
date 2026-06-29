@@ -84,7 +84,7 @@ export default function SmartStoreProductsPage() {
   const [searchInput, setSearchInput] = useState('');
   const [stats, setStats] = useState<ProductStats | null>(null);
   const [loading, setLoading] = useState(false);
-  const [soldoutFilter, setSoldoutFilter] = useState(false);
+  const [soldoutFilter] = useState(false);
   const [filterMode, setFilterMode] = useState<'all' | 'focus' | 'premium' | 'sold' | 'changes' | 'status_mm' | 'field_chg' | 'reverse_margin' | 'no_master'>('all');
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState('');
@@ -132,7 +132,6 @@ export default function SmartStoreProductsPage() {
   const [zmTab, setZmTab] = useState<'preview' | 'logs'>('preview');
   const [zmLogs, setZmLogs] = useState<ZeroMarginLog[]>([]);
   const [zmLogDetail, setZmLogDetail] = useState<ZeroMarginLogItem[] | null>(null);
-  const [zmLogId, setZmLogId] = useState(0);
   // 뷰 모드: 'default' = 기존 테이블, 'detail' = 대장보기(상세)
   const [viewMode, setViewMode] = useState<'default' | 'detail'>('default');
   // 정렬
@@ -1323,7 +1322,7 @@ export default function SmartStoreProductsPage() {
                       )}
                     </div>
                     {(() => {
-                      const code = p.channel_product_no || String(p.origin_product_no);
+                      const code = String(p.channel_product_no || p.origin_product_no);
                       return (
                         <button
                           className="text-[10px] text-blue-500 dark:text-blue-400 hover:underline mt-0.5 inline-block"

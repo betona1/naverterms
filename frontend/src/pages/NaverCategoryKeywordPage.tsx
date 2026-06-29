@@ -189,7 +189,7 @@ export default function NaverCategoryKeywordPage() {
       const data = await naverApi.getCategoryKeywordRank({ cid: deepestCid, startDate, endDate, age, gender, device });
       const list = data.ranks || [];
       setRows(list);
-      const cacheNote = data.cached ? ` (캐시 ${new Date(data.cached_at).toLocaleString('ko-KR')})` : '';
+      const cacheNote = data.cached_at ? ` (캐시 ${new Date(data.cached_at).toLocaleString('ko-KR')})` : '';
       setStatusMsg(`${catPath.join(' > ')} — ${list.length}개 키워드${cacheNote}`);
       setLoading(false);
 
