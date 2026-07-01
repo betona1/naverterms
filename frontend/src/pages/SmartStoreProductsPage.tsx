@@ -27,6 +27,8 @@ import {
   executeZeroMarginUpdate,
   fetchZeroMarginLogs,
   fetchZeroMarginLogDetail,
+  fetchRestockSummary,
+  type RestockSummary,
   type ZeroMarginPreviewItem,
   type ZeroMarginUpdateResult,
   type ZeroMarginLog,
@@ -83,6 +85,7 @@ export default function SmartStoreProductsPage() {
   const [search, setSearch] = useState('');
   const [searchInput, setSearchInput] = useState('');
   const [stats, setStats] = useState<ProductStats | null>(null);
+  const [restockSummary, setRestockSummary] = useState<RestockSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [soldoutFilter] = useState(false);
   const [filterMode, setFilterMode] = useState<'all' | 'focus' | 'premium' | 'sold' | 'changes' | 'status_mm' | 'field_chg' | 'reverse_margin' | 'no_master'>('all');
@@ -242,6 +245,18 @@ export default function SmartStoreProductsPage() {
     }).catch(() => { /* ignore */ });
     return () => { alive = false; };
   }, []);
+
+  // 재입고 재활성화 요약 — 판매중지 필터일 때만 표시
+  useEffect(() => {
+    if (status === 'SUSPENSION' && storeId >= 0) {
+      let alive = true;
+      fetchRestockSummary(storeId)
+        .then(r => { if (alive) setRestockSummary(r); })
+        .catch(() => { if (alive) setRestockSummary(null); });
+      return () => { alive = false; };
+    }
+    setRestockSummary(null);
+  }, [status, storeId]);
 
   // 상품 목록 조회
   const loadProducts = useCallback(async () => {
@@ -902,6 +917,30 @@ export default function SmartStoreProductsPage() {
                 {stats.last_synced_at ? new Date(stats.last_synced_at).toLocaleString('ko-KR') : '-'}
               </div>
             </div>
+          </div>
+        )}
+
+        {/* 재입고 재활성화 안내 — 판매중지 필터일 때만 */}
+        {status === 'SUSPENSION' && restockSummary && restockSummary.candidates > 0 && (
+          <div className="rounded-lg border border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-900/20 px-4 py-3 flex flex-wrap items-center gap-x-6 gap-y-1">
+            <div className="flex items-center gap-2">
+              <span className="text-emerald-600 dark:text-emerald-400 text-lg">🔄</span>
+              <span className="text-sm font-semibold text-emerald-800 dark:text-emerald-200">
+                판매중지 → 판매중 전환 대기(오너클랜 재입고){' '}
+                <b className="text-base">{restockSummary.candidates.toLocaleString()}</b>개
+              </span>
+            </div>
+            <span className="text-sm text-emerald-700 dark:text-emerald-300">
+              상품수 제한으로 지금 <b className="text-base">{restockSummary.reactivatable.toLocaleString()}</b>건만 가능합니다
+            </span>
+            {restockSummary.blocked_over_limit > 0 && (
+              <span className="text-sm text-amber-600 dark:text-amber-400">
+                한도초과로 대기 {restockSummary.blocked_over_limit.toLocaleString()}건
+              </span>
+            )}
+            <span className="text-xs text-gray-500 dark:text-gray-400 ml-auto">
+              매일 자동 전환 (한도 여유분만 · 역마진 시 가격 자동수정)
+            </span>
           </div>
         )}
 

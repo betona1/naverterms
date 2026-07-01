@@ -22,6 +22,7 @@ urlpatterns = [
     path('products/suspend/', views.SmartStoreProductSuspendView.as_view()),
     path('products/focus/', views.SmartStoreProductFocusView.as_view()),
     path('products/restock-check/', views.SmartStoreProductRestockCheckView.as_view()),
+    path('products/restock-summary/', views.SmartStoreRestockSummaryView.as_view()),
     path('products/orders/', views.SmartStoreProductOrdersView.as_view()),
     path('products/orphan-wcodes/', views.SmartStoreProductOrphanWCodesView.as_view()),
     path('products/orphan-soldout/', views.SmartStoreProductOrphanSoldoutView.as_view()),

@@ -476,6 +476,16 @@ class SmartStoreProductRestockCheckView(APIView):
         return Response(result)
 
 
+class SmartStoreRestockSummaryView(APIView):
+    """재입고 재활성화 요약 (UI 표시용): 대기/지금가능/한도초과대기 건수.
+    ?store_id=0(또는 미지정) → 전체 합산, 특정 store_id → 해당 스토어."""
+    def get(self, request):
+        from . import restock_service
+        sid = request.query_params.get('store_id')
+        sid = int(sid) if sid and sid.lstrip('-').isdigit() and int(sid) > 0 else None
+        return Response(restock_service.get_summary(sid))
+
+
 class SmartStoreProductOrphanWCodesView(APIView):
     def get(self, request):
         store_ids = request.query_params.getlist('store_ids')

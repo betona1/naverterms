@@ -160,6 +160,21 @@ export async function fetchAllStoresStats(): Promise<Record<number, ProductStats
   return data;
 }
 
+export interface RestockSummary {
+  candidates: number;         // 재입고 대기 (판매중지+재고복귀) 총수
+  reactivatable: number;      // 지금 한도여유 내 전환 가능 수
+  blocked_over_limit: number; // 한도초과로 대기 중인 수
+  per_store: {
+    store_id: number; store_name: string; candidates: number;
+    limit: number; active: number; headroom: number; reactivatable: number;
+  }[];
+}
+
+export async function fetchRestockSummary(storeId: number): Promise<RestockSummary> {
+  const { data } = await api.get<RestockSummary>('/restock-summary/', { params: { store_id: storeId } });
+  return data;
+}
+
 function _buildParams(params: {
   storeIds?: number[]; statuses?: string[]; wOnly?: boolean;
   search?: string; hasOrders?: boolean; isFocus?: boolean;
