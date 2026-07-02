@@ -7,7 +7,8 @@ with connections['myproduct'].cursor() as c:
     c.execute("SELECT DISTINCT store_id FROM smartstoreIdList WHERE store_pw<>'' AND store_id IS NOT NULL")
     logins=[r[0] for r in c.fetchall()]
 log('대상 로그인 %d개: %s'%(len(logins),logins))
-CONC=5; here=os.path.dirname(os.path.abspath(__file__)); worker=os.path.join(here,'diagnosis_worker.py')
+CONC=int(os.environ.get('DIAG_CONC','2')); here=os.path.dirname(os.path.abspath(__file__)); worker=os.path.join(here,'diagnosis_worker.py')
+log('동시 워커 CONC=%d (워커당 python+Chrome ~4GB, DIAG_CONC 로 조절, 순차=1)'%CONC)
 running=[]; queue=list(logins); started=0
 while queue or running:
     running=[(l,p) for l,p in running if p.poll() is None]

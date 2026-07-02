@@ -13,7 +13,8 @@ nc.execute("SELECT DISTINCT store_id FROM naver_product_diagnosis"); have=set(r[
 # 한 스토어라도 미수집인 로그인 = 재수집 대상 (단, betona1/betona8 성공분 제외 위해 '모든 스토어 수집됨'이면 skip)
 todo=[lid for lid,pks in login_stores.items() if any(pk not in have for pk in pks)]
 log('재수집 대상 로그인 %d개: %s'%(len(todo),todo))
-CONC=3; here=os.path.dirname(os.path.abspath(__file__)); worker=os.path.join(here,'diagnosis_worker.py')
+CONC=int(os.environ.get('DIAG_CONC','2')); here=os.path.dirname(os.path.abspath(__file__)); worker=os.path.join(here,'diagnosis_worker.py')
+log('동시 워커 CONC=%d (워커당 python+Chrome ~4GB, DIAG_CONC 로 조절, 순차=1)'%CONC)
 running=[]; queue=list(todo); started=0
 while queue or running:
     running=[(l,p) for l,p in running if p.poll() is None]
