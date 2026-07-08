@@ -194,7 +194,7 @@ def get_overview(start_date=None, end_date=None):
                    COALESCE(SUM(o.payment_price), 0) as revenue,
                    COALESCE(SUM(o.settlement_price), 0) as settle,
                    COALESCE(SUM({COST_EXPR}), 0) as cost
-            FROM orders_order o
+            FROM joacham.orders_order o
             JOIN myproduct.smartstore_product p
                 ON o.product_seller_code = p.seller_management_code
             WHERE {where_sql}
@@ -234,7 +234,7 @@ def get_overview(start_date=None, end_date=None):
         cur.execute("""
             SELECT p.store_id,
                    COUNT(DISTINCT o.product_seller_code) as recent_sold_products
-            FROM orders_order o
+            FROM joacham.orders_order o
             JOIN myproduct.smartstore_product p
                 ON o.product_seller_code = p.seller_management_code
             WHERE o.order_date >= DATE_SUB(CURDATE(), INTERVAL 13 MONTH)
@@ -560,7 +560,7 @@ def get_registration_limits():
             SELECT p.store_id,
                    COUNT(*) as order_count,
                    COALESCE(SUM(o.payment_price), 0) as transaction_amount
-            FROM orders_order o
+            FROM joacham.orders_order o
             JOIN myproduct.smartstore_product p
                 ON o.product_seller_code = p.seller_management_code
             WHERE {where_sql}
@@ -573,7 +573,7 @@ def get_registration_limits():
         cur.execute("""
             SELECT p.store_id,
                    COUNT(DISTINCT o.product_seller_code) as recent_sold_products
-            FROM orders_order o
+            FROM joacham.orders_order o
             JOIN myproduct.smartstore_product p
                 ON o.product_seller_code = p.seller_management_code
             WHERE o.order_date >= DATE_SUB(CURDATE(), INTERVAL 13 MONTH)
@@ -709,7 +709,7 @@ def get_store_detail(store_id, start_date=None, end_date=None, period='monthly')
                    COALESCE(SUM(o.payment_price), 0) as revenue,
                    COALESCE(SUM(o.settlement_price), 0) as settle,
                    COALESCE(SUM({COST_EXPR}), 0) as cost
-            FROM orders_order o
+            FROM joacham.orders_order o
             WHERE {where_sql} {store_filter}
         """, params + store_params)
         s = _dictfetchall(cur)[0]
@@ -745,7 +745,7 @@ def get_store_detail(store_id, start_date=None, end_date=None, period='monthly')
                    COALESCE(SUM(o.payment_price), 0) as revenue,
                    COALESCE(SUM(o.settlement_price), 0) as settle,
                    COALESCE(SUM({COST_EXPR}), 0) as cost
-            FROM orders_order o
+            FROM joacham.orders_order o
             WHERE {where_sql} {store_filter}
             GROUP BY period ORDER BY period
         """, params + store_params)
@@ -801,7 +801,7 @@ def get_business_detail(code, start_date=None, end_date=None, period='monthly'):
                    COALESCE(SUM(o.payment_price), 0) as revenue,
                    COALESCE(SUM(o.settlement_price), 0) as settle,
                    COALESCE(SUM({COST_EXPR}), 0) as cost
-            FROM orders_order o
+            FROM joacham.orders_order o
             JOIN myproduct.smartstore_product p
                 ON o.product_seller_code = p.seller_management_code
             WHERE {where_sql} AND p.store_id IN ({','.join(['%s']*len(store_ids))})
@@ -839,7 +839,7 @@ def get_business_detail(code, start_date=None, end_date=None, period='monthly'):
                    COALESCE(SUM(o.payment_price), 0) as revenue,
                    COALESCE(SUM(o.settlement_price), 0) as settle,
                    COALESCE(SUM({COST_EXPR}), 0) as cost
-            FROM orders_order o
+            FROM joacham.orders_order o
             WHERE {where_sql} {store_filter}
             GROUP BY period ORDER BY period
         """, params + store_params)
@@ -991,7 +991,7 @@ def _get_top_products(store_ids, start_date=None, end_date=None, limit=20, store
                    COALESCE(SUM(o.payment_price), 0) as revenue,
                    COALESCE(SUM(o.settlement_price), 0) as settle,
                    COALESCE(SUM({COST_EXPR}), 0) as cost
-            FROM orders_order o
+            FROM joacham.orders_order o
             WHERE {where_sql} {store_filter}
             GROUP BY o.product_seller_code
             ORDER BY revenue DESC

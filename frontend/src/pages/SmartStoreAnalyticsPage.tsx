@@ -1076,10 +1076,14 @@ function TopProductsTable({ products, ...s }: StyleProps & { products: TopProduc
 function RegistrationLimitPanel({ data, onReload, ...s }: StyleProps & { data: RegistrationLimitData; onReload: () => void }) {
   const [expanded, setExpanded] = useState(true);
   const [status, setStatus] = useState<PolicyCollectStatus | null>(null);
+  const [showLog, setShowLog] = useState(false);
+  const [showGuide, setShowGuide] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const logBoxRef = useRef<HTMLDivElement | null>(null);
 
   const apiCount = data.stores.filter(st => st.limit_source === 'api').length;
   const running = !!status?.running;
+  const logs = status?.logs ?? [];
 
   const poll = useCallback(() => {
     fetchPolicyStatus().then(st => {
@@ -1093,14 +1097,29 @@ function RegistrationLimitPanel({ data, onReload, ...s }: StyleProps & { data: R
   }, [onReload]);
 
   const handleCollect = useCallback(async () => {
+    setShowLog(true);
     const r = await startPolicyCollect();
     if (r.ok || r.error === 'already_running') {
       poll();
       if (!pollRef.current) pollRef.current = setInterval(poll, 3000);
+    } else {
+      setStatus(prev => ({
+        running: false, phase: 'error', login_idx: 0, total_logins: 0, store_idx: 0,
+        current_login: null, current_store: null,
+        logs: [...(prev?.logs ?? []), `[에러] 수집 시작 실패: ${r.error ?? 'unknown'}`],
+        error: r.error ?? 'start_failed',
+      }));
     }
   }, [poll]);
 
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+
+  // 새 로그 도착 시 맨 아래로 자동 스크롤
+  useEffect(() => {
+    if (showLog && logBoxRef.current) {
+      logBoxRef.current.scrollTop = logBoxRef.current.scrollHeight;
+    }
+  }, [logs.length, showLog]);
 
   return (
     <div className={`rounded-xl border p-4 ${s.card}`}>
@@ -1126,7 +1145,95 @@ function RegistrationLimitPanel({ data, onReload, ...s }: StyleProps & { data: R
             {status.current_login ?? ''} {status.current_store ? `/ ${status.current_store}` : ''}
           </span>
         )}
+        {(logs.length > 0 || showLog) && (
+          <button
+            onClick={() => setShowLog(v => !v)}
+            className={`text-[11px] px-2 py-1 rounded transition-colors ${s.dark
+              ? 'bg-[#2a2a40] text-gray-300 hover:bg-[#33334d]'
+              : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+        >
+            {showLog ? '▲ 로그 숨기기' : '▼ 진행 로그'}
+          </button>
+        )}
+        <button
+          onClick={() => setShowGuide(v => !v)}
+          className={`text-[11px] px-2 py-1 rounded transition-colors ${showGuide
+            ? 'bg-[#03c75a]/15 text-[#03c75a]'
+            : s.dark ? 'bg-[#2a2a40] text-gray-300 hover:bg-[#33334d]' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+        >
+          ℹ 등록한도 기준
+        </button>
       </div>
+
+      {showGuide && (
+        <div className={`mb-3 rounded-lg border overflow-hidden ${s.dark ? 'border-[#2a2a40]' : 'border-gray-200'}`}>
+          <div className={`flex items-center justify-between px-3 py-1.5 text-[11px] font-semibold ${s.dark ? 'bg-[#12121e] text-gray-300' : 'bg-gray-100 text-gray-600'}`}>
+            <span>네이버 스마트스토어 상품 등록 한도 기준 <span className="font-normal opacity-70">(2026-06-02 신정책)</span></span>
+            <button onClick={() => setShowGuide(false)} className="opacity-60 hover:opacity-100">✕</button>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-[11px] border-collapse">
+              <thead>
+                <tr className={s.dark ? 'text-gray-400' : 'text-gray-500'}>
+                  <th className={`text-left px-3 py-2 font-semibold border-b ${s.dark ? 'border-[#2a2a40]' : 'border-gray-200'}`}>상품 등록 한도</th>
+                  <th className={`text-right px-3 py-2 font-semibold border-b ${s.dark ? 'border-[#2a2a40]' : 'border-gray-200'}`}>거래액 <span className="opacity-60">(최근 3개월)</span></th>
+                  <th className={`text-right px-3 py-2 font-semibold border-b ${s.dark ? 'border-[#2a2a40]' : 'border-gray-200'}`}>판매건수 <span className="opacity-60">(최근 3개월)</span></th>
+                  <th className={`text-right px-3 py-2 font-semibold border-b ${s.dark ? 'border-[#2a2a40]' : 'border-gray-200'}`}>판매 상품 비중</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[
+                  { limit: '50,000개', amount: '6,000만원 이상', count: '1,000건 이상', ratio: '3% 이상' },
+                  { limit: '20,000개', amount: '2,000만원 이상', count: '400건 이상', ratio: '3% 이상' },
+                  { limit: '10,000개', amount: '1,000만원 이상', count: '200건 이상', ratio: '3% 이상' },
+                  { limit: '5,000개', amount: '500만원 이상', count: '100건 이상', ratio: '3% 이상' },
+                  { limit: '1,000개', amount: '500만원 미만', count: '100건 미만', ratio: '—' },
+                ].map((r, i) => (
+                  <tr key={r.limit} className={i % 2 ? (s.dark ? 'bg-[#12121e]/40' : 'bg-gray-50/60') : ''}>
+                    <td className={`px-3 py-2 font-bold ${s.dark ? 'text-[#03c75a]' : 'text-[#02a34a]'}`}>{r.limit}</td>
+                    <td className={`px-3 py-2 text-right ${s.txt}`}>{r.amount}</td>
+                    <td className={`px-3 py-2 text-right ${s.txt}`}>{r.count}</td>
+                    <td className={`px-3 py-2 text-right ${s.txtSub}`}>{r.ratio}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className={`px-3 py-2 text-[10px] leading-relaxed ${s.dark ? 'bg-[#0b0b14] text-gray-400' : 'bg-white text-gray-500'}`}>
+            판매실적은 <b>거래액 또는 판매건수</b> 중 하나만 충족하면 됩니다 (둘 중 상위 조건 적용). 판매 상품 비중(전체 등록 상품 중 판매된 비율) <b>3% 이상</b>도 함께 충족해야 상위 한도가 부여됩니다. 기본 한도는 <b>1,000개</b>입니다.
+          </div>
+        </div>
+      )}
+
+      {showLog && (
+        <div className={`mb-3 rounded-lg border overflow-hidden ${s.dark ? 'border-[#2a2a40]' : 'border-gray-200'}`}>
+          <div className={`flex items-center justify-between px-3 py-1.5 text-[11px] font-semibold ${s.dark ? 'bg-[#12121e] text-gray-300' : 'bg-gray-100 text-gray-600'}`}>
+            <span>
+              한도 실측 수집 로그
+              {running
+                ? <span className="ml-2 text-[#03c75a]">● 진행중 {status?.login_idx ?? 0}/{status?.total_logins ?? 0}</span>
+                : status
+                  ? <span className={`ml-2 ${status.error ? 'text-red-400' : 'text-gray-400'}`}>{status.error ? '● 에러' : '● 완료'}</span>
+                  : null}
+            </span>
+            <button onClick={() => setShowLog(false)} className="opacity-60 hover:opacity-100">✕</button>
+          </div>
+          <div
+            ref={logBoxRef}
+            className={`px-3 py-2 h-52 overflow-y-auto font-mono text-[11px] leading-relaxed whitespace-pre-wrap ${s.dark ? 'bg-[#0b0b14] text-gray-300' : 'bg-[#1c1c2e] text-gray-100'}`}
+          >
+            {logs.length === 0
+              ? <span className="opacity-50">수집을 시작하면 진행 로그가 여기에 표시됩니다…</span>
+              : logs.map((line, i) => (
+                <div key={i} className={
+                  line.includes('에러') || line.includes('실패') || line.toLowerCase().includes('error') ? 'text-red-400'
+                    : line.includes('한도=') || line.includes('완료') ? 'text-[#03c75a]'
+                      : ''
+                }>{line}</div>
+              ))}
+          </div>
+        </div>
+      )}
 
       {expanded && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">

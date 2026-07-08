@@ -68,7 +68,7 @@ def get_product_orders(seller_code=None, product_name=None, start_date=None, end
                 WHEN supply_price>0 THEN supply_price
                 ELSE 0
             END AS cost
-        FROM orders_order
+        FROM joacham.orders_order
         WHERE {where_sql}
         ORDER BY
             CASE WHEN site_name = %s THEN 0 ELSE 1 END,
@@ -157,7 +157,7 @@ def get_sold_seller_codes():
     status_ph = ','.join(['%s'] * len(VALID_ORDER_STATUSES))
     sql = f"""
         SELECT DISTINCT product_seller_code
-        FROM orders_order
+        FROM joacham.orders_order
         WHERE order_status IN ({status_ph})
           AND site_name = %s
           AND product_seller_code IS NOT NULL
@@ -186,7 +186,7 @@ def update_product_sales_summary():
                    COALESCE(SUM(quantity), 0),
                    COALESCE(SUM(payment_price), 0),
                    COUNT(*)
-            FROM orders_order
+            FROM joacham.orders_order
             WHERE order_status IN ({status_ph})
               AND site_name = %s
               AND product_seller_code IS NOT NULL AND product_seller_code != ''
@@ -200,7 +200,7 @@ def update_product_sales_summary():
                    COALESCE(SUM(quantity), 0),
                    COALESCE(SUM(payment_price), 0),
                    COUNT(*)
-            FROM orders_order
+            FROM joacham.orders_order
             WHERE order_status IN ({status_ph})
               AND site_name NOT IN ({exclude_ph})
               AND product_seller_code IS NOT NULL AND product_seller_code != ''
