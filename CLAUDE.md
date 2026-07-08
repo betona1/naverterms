@@ -185,8 +185,32 @@ naverterms/
 
 | 테이블 | 주요 컬럼 | 설명 |
 |--------|-----------|------|
-| smartstoreIdList | store_id, store_pw, store_name, commerce_api_key, commerce_secret_key | 스마트스토어 계정 |
+| smartstoreIdList | store_id, store_pw, store_name, store_url, commerce_api_key, commerce_secret_key, is_active, memo | 스마트스토어 계정 |
 | smartstore_product | origin_product_no(unique), name, sale_price, status_type, seller_management_code, ownerclan_soldout | 상품 카탈로그 |
+
+> ### ⭐ 네이버 스마트스토어 계정 자격증명 위치 (계정 아이디 / OpenAPI 키)
+>
+> **모든 스마트스토어 로그인 계정과 커머스 OpenAPI 키의 단일 출처(SSOT)는 `myproduct.smartstoreIdList` 테이블입니다.**
+> 다른 프로젝트(11st/gmarket 등)에서 "네이버 계정 어디 있냐"로 못 찾는 경우가 많음 → **여기가 정답**.
+>
+> | 컬럼 | 내용 |
+> |------|------|
+> | `store_id` | 스마트스토어 **로그인 아이디** |
+> | `store_pw` | 로그인 비밀번호 |
+> | `commerce_api_key` | 커머스 OpenAPI **클라이언트 ID(application key)** |
+> | `commerce_secret_key` | 커머스 OpenAPI **시크릿** (OAuth2 bcrypt 서명용, §9.1) |
+> | `store_name` / `store_url` / `is_active` / `memo` | 스토어명 / URL / 활성여부 / 메모 |
+>
+> - **DB 접속**: `myproduct` @ `192.168.219.200:3306` — 자격증명은 `naverterms/.env` 의 `MYPRODUCT_DB_*` (하드코딩 금지)
+> - **UI 관리**: TopNav 우측 ⚙️ 상점설정(StoreSettingsModal) → API `/api/smartstore/stores/`
+> - **코드 진입점**: `backend/smartstore/smartstore_service.py` (raw SQL). `diagnosis_worker.py`·`bulk_suspend.py` 등 배치가 여기서 로그인/API키를 read.
+> - **조회 예시**:
+>   ```bash
+>   cd backend && python3 -c "import os,django; os.environ.setdefault('DJANGO_SETTINGS_MODULE','config.settings'); django.setup(); \
+>   from django.db import connections; c=connections['myproduct'].cursor(); \
+>   c.execute('SELECT id,store_id,store_name,commerce_api_key,is_active FROM smartstoreIdList ORDER BY id'); \
+>   [print(r) for r in c.fetchall()]"
+>   ```
 
 ---
 
