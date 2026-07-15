@@ -68,12 +68,16 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument('--days', type=int, default=1,
                             help='조회 기간 일수 (기본: 1 = 오늘)')
+        parser.add_argument('--start', help='조회 시작일 YYYY-MM-DD (지정 시 --days 무시, 백필용)')
+        parser.add_argument('--end', help='조회 종료일 YYYY-MM-DD (기본: --start 와 동일)')
         parser.add_argument('--page-size', type=int, default=500,
                             help='페이지당 항목수 (기본: 500)')
         parser.add_argument('--no-telegram', action='store_true',
                             help='텔레그램 보고 안함')
         parser.add_argument('--dry-run', action='store_true',
                             help='DB 변경 없이 조회만')
+        parser.add_argument('--no-reactivate', action='store_true',
+                            help='재입고 상품의 네이버 자동 재활성화(PUT) 생략 — 백필용')
 
     def handle(self, *args, **options):
         days = options['days']
@@ -94,8 +98,12 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS('오너클랜 로그인 성공'))
 
         # 2. 날짜 기준 변동 내역 조회 (selfcode 필터 없음)
-        end_date = datetime.now().strftime('%Y-%m-%d')
-        start_date = (datetime.now() - timedelta(days=days - 1)).strftime('%Y-%m-%d')
+        if options.get('start'):
+            start_date = options['start']
+            end_date = options.get('end') or start_date
+        else:
+            end_date = datetime.now().strftime('%Y-%m-%d')
+            start_date = (datetime.now() - timedelta(days=days - 1)).strftime('%Y-%m-%d')
         self.stdout.write(f'조회 기간: {start_date} ~ {end_date}')
 
         all_changes = self._fetch_all_changes(
@@ -115,7 +123,8 @@ class Command(BaseCommand):
 
         # 4. 이전 상태 조회 + DB 업데이트 + transition 추적
         if not dry_run:
-            result, transitions = self._update_db_with_transitions(product_status)
+            result, transitions = self._update_db_with_transitions(
+                product_status, reactivate=not options.get('no_reactivate', False))
         else:
             transitions = self._get_transitions_dry(product_status)
             result = {'ownerclan_updated': 0, 'smartstore_soldout': 0, 'smartstore_cleared': 0}
@@ -295,7 +304,7 @@ class Command(BaseCommand):
                     old[row[0]] = row[1]
         return old
 
-    def _update_db_with_transitions(self, product_status):
+    def _update_db_with_transitions(self, product_status, reactivate=True):
         """DB 업데이트 + transition(이전상태→새상태) 추적"""
         # 1) 이전 상태 조회
         codes = list(product_status.keys())
@@ -357,7 +366,9 @@ class Command(BaseCommand):
 
         # 5) 재입고 상품 → 스마트스토어 자동 재활성화 (SUSPENSION → SALE)
         reactivate_result = {'success': 0, 'fail': 0}
-        if restock_codes:
+        if restock_codes and not reactivate:
+            self.stdout.write(f'  [--no-reactivate] 재활성화 PUT 생략 (재입고 {len(restock_codes)}개는 미러만 갱신)')
+        elif restock_codes:
             try:
                 from smartstore.smartstore_product_service import reactivate_products
                 reactivate_result = reactivate_products(restock_codes)

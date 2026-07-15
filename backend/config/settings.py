@@ -17,6 +17,7 @@ INSTALLED_APPS = [
     'naver',
     'smartstore',
     'competitor',
+    'ownerclan',
 ]
 
 MIDDLEWARE = [

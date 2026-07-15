@@ -710,8 +710,10 @@ def _sync_store_batch(store_id, items, api_key, secret_key):
                         time.sleep(0.3)
                         break
 
-                product['statusType'] = new_status
-                put_resp = requests.put(url, json={'originProduct': product}, headers=headers, timeout=30)
+                # 상태만 변경 — 전용 엔드포인트 사용.
+                # (전체상품 PUT 은 stale 검증오류[금지태그/단위가격 등]로 400 나면서 상태변경 자체가 실패함)
+                cs_url = f'https://api.commerce.naver.com/external/v1/products/origin-products/{opno}/change-status'
+                put_resp = requests.put(cs_url, json={'statusType': new_status}, headers=headers, timeout=30)
                 put_resp.raise_for_status()
 
                 with connections['myproduct'].cursor() as c:
@@ -733,18 +735,20 @@ def _sync_store_batch(store_id, items, api_key, secret_key):
                     except Exception:
                         pass
                     continue
-                elif sc in (400, 404):
-                    db_st = 'CLOSE' if sc == 404 else 'SUSPENSION'
+                elif sc == 404:
+                    # 상품 자체가 삭제됨 → CLOSE 로 DB 정리
                     with connections['myproduct'].cursor() as c:
-                        c.execute("UPDATE smartstore_product SET status_type=%s WHERE id=%s", [db_st, target['id']])
-                    if old_ss != db_st:
-                        res['changes'].append((target, old_ss, db_st))
+                        c.execute("UPDATE smartstore_product SET status_type=%s WHERE id=%s", ['CLOSE', target['id']])
+                    if old_ss != 'CLOSE':
+                        res['changes'].append((target, old_ss, 'CLOSE'))
                     res['skipped'] += 1
-                    res['skipped_items'].append({'product_code': target['product_code'], 'status': str(sc), 'store': target.get('store_name', '')})
+                    res['skipped_items'].append({'product_code': target['product_code'], 'status': '404', 'store': target.get('store_name', '')})
                     time.sleep(0.3)
                     break
                 else:
-                    res['errors'].append({'product_code': target['product_code'], 'error': str(e)})
+                    # 400 등은 상태변경 실패 → DB 를 함부로 바꾸지 않고 에러로 남김 (오탐 방지)
+                    body = e.response.text[:150] if e.response is not None else ''
+                    res['errors'].append({'product_code': target['product_code'], 'error': f'HTTP {sc}: {body}'})
                     break
             except Exception as e:
                 res['errors'].append({'product_code': target['product_code'], 'error': str(e)})
