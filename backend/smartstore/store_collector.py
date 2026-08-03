@@ -288,27 +288,52 @@ def _login(driver, login_id, login_pw, display_env):
 
 def _get_store_list(driver):
     from selenium.webdriver.common.by import By
+    from selenium.common.exceptions import NoSuchElementException
 
     stores = []
-    try:
-        store_btn = driver.find_element(By.XPATH, '//*[@id="_gnb_nav"]/ul/li[2]/a')
-        store_btn.click()
-        time.sleep(3)
-
-        items = driver.find_elements(By.CSS_SELECTOR, 'span[class*="text-title"]')
-        for item in items:
-            display_name = item.text.strip()
-            if display_name:
-                clean = display_name.replace('스마트스토어', '').replace('주식회사 ', '').replace('주식회사', '').strip()
-                stores.append((display_name, clean))
-
+    for attempt in range(2):
         try:
-            _xkey('Escape', _get_display_env())
-        except:
-            pass
-        time.sleep(1)
-    except Exception as e:
-        _log(f'스토어 목록 조회 실패: {e}')
+            # 로그인 직후 뜨는 공지 모달이 스토어 전환 버튼을 덮어 click intercepted 발생
+            # → _switch_store 와 동일하게 팝업 닫기 + 모달 강제 제거 + JS 클릭
+            _close_popups(driver)
+            time.sleep(1)
+            driver.execute_script("""
+                document.querySelectorAll('.modal, [uib-modal-window]').forEach(function(el) {
+                    el.remove();
+                });
+                document.querySelectorAll('.modal-backdrop').forEach(function(el) {
+                    el.remove();
+                });
+            """)
+            time.sleep(0.5)
+
+            store_btn = driver.find_element(By.XPATH, '//*[@id="_gnb_nav"]/ul/li[2]/a')
+            driver.execute_script("arguments[0].click();", store_btn)
+            time.sleep(3)
+
+            items = driver.find_elements(By.CSS_SELECTOR, 'span[class*="text-title"]')
+            for item in items:
+                display_name = item.text.strip()
+                if display_name:
+                    clean = display_name.replace('스마트스토어', '').replace('주식회사 ', '').replace('주식회사', '').strip()
+                    stores.append((display_name, clean))
+
+            try:
+                _xkey('Escape', _get_display_env())
+            except:
+                pass
+            time.sleep(1)
+        except NoSuchElementException:
+            # 다계정 전환 링크 자체가 없음 = 단일 스토어 계정. 재시도 무의미
+            _log('스토어 전환 버튼 없음 — 단일 스토어 계정으로 처리')
+            return []
+        except Exception as e:
+            _log(f'스토어 목록 조회 실패({attempt + 1}/2): {e}')
+
+        if stores:
+            break
+        if attempt == 0:
+            time.sleep(2)
     return stores
 
 
