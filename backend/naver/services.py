@@ -7,6 +7,7 @@ import hashlib
 import base64
 import logging
 import urllib.parse
+from django.conf import settings
 from collections import Counter
 from datetime import timedelta
 import requests as http_requests
@@ -387,6 +388,20 @@ def search_related_keywords(hint_keyword):
 
 NAVER_SHOP_API = 'https://openapi.naver.com/v1/search/shop.json'
 
+# 2026-08 네이버가 쇼핑 검색 오픈API(shop.json)를 폐지했다.
+# 같은 키로 blog.json 은 200 인데 shop.json 만 404 SE05 로 죽는다 — 키 문제가 아니다.
+# 이제 순위조회는 로그인 세션으로 쇼핑 검색을 직접 긁는 수밖에 없다.
+NAVER_SHOP_API_DEAD_MSG = (
+    '네이버가 쇼핑 검색 API 제공을 중단했습니다(SE05). '
+    '순위조회는 네이버 로그인 후 크롤링 방식으로만 가능합니다. '
+    '"네이버 로그인" 버튼으로 로그인한 뒤 다시 시도해 주세요.'
+)
+
+
+class NaverLoginRequired(Exception):
+    """쇼핑 검색이 로그인 세션 없이는 불가능한 상태 (API 폐지 / 봇차단 418)."""
+    pass
+
 
 def _naver_search(keyword, display=100, start=1):
     """네이버 쇼핑 검색 API 호출"""
@@ -404,6 +419,15 @@ def _naver_search(keyword, display=100, start=1):
         'X-Naver-Client-Id': client_id,
         'X-Naver-Client-Secret': client_secret,
     }, timeout=10)
+
+    # 폐지된 API — 재시도해도 소용없으니 안내 가능한 예외로 바꿔 올린다
+    if resp.status_code == 404 and 'SE05' in resp.text:
+        logger.error('[순위추적] 쇼핑 검색 API 폐지 응답(SE05): %s', resp.text[:200])
+        raise NaverLoginRequired(NAVER_SHOP_API_DEAD_MSG)
+    if resp.status_code in (401, 403, 418, 429):
+        raise NaverLoginRequired(
+            f'네이버 검색 차단({resp.status_code}). 네이버 로그인 후 다시 시도해 주세요.')
+
     resp.raise_for_status()
     return resp.json()
 
@@ -506,6 +530,10 @@ def run_rank_tracking(target_ids=None):
                 })
                 logger.info(f'  [{target.target_value}] {rank or "미발견"}위')
 
+        except NaverLoginRequired:
+            # 검색 자체가 막힌 상태 — 키워드마다 똑같이 실패한다.
+            # 여기서 삼키면 "N개 조회 완료" 로 성공처럼 보이니 즉시 위로 올린다.
+            raise
         except Exception as e:
             logger.error(f'[순위추적] "{keyword}" 실패: {e}')
             for target in kw_targets:
@@ -547,6 +575,118 @@ def get_datalab_categories(parent_cid='0'):
         children = data.get('childList', [])
         return [{'cid': str(c['cid']), 'pid': str(c['pid']), 'name': c['name']} for c in children]
     raise Exception(f'DataLab category API error: {resp.status_code}')
+
+
+# 카테고리 전체 트리 캐시 — 4단계를 매번 훑으면 수천 번 호출이라 못 쓴다.
+# 카테고리는 거의 안 바뀌므로 파일에 담아두고 하루 한 번만 갱신한다.
+_CATEGORY_TREE_CACHE = os.path.join(
+    getattr(settings, 'BASE_DIR', os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    'exports', 'datalab_category_tree.json')
+_CATEGORY_TREE_TTL = 86400 * 7        # 7일
+_CATEGORY_TREE_GAP = 0.7              # 요청 간격 — 429 를 피하는 최소한
+
+
+def get_datalab_category_tree(force=False, max_depth=4):
+    """전 카테고리를 평평하게 편 목록.
+
+    반환: [{cid, name, path: '대>중>소>세', depth, chain: [{cid,name}, ...]}, ...]
+    검색창에서 키워드 하나로 전 단계를 뒤지려면 트리 전체가 있어야 한다.
+    """
+    if not force and os.path.exists(_CATEGORY_TREE_CACHE):
+        age = time.time() - os.path.getmtime(_CATEGORY_TREE_CACHE)
+        if age < _CATEGORY_TREE_TTL:
+            try:
+                with open(_CATEGORY_TREE_CACHE, encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception:
+                pass
+
+    # 데이터랩은 간격 없이 때리면 429 를 낸다 (2026-09-04 실측 — 내가 그렇게 막혔다).
+    # 요청 사이를 띄우고, 429 를 만나면 **재시도하지 않고 즉시 멈춘다**(재시도는 차단을 늘린다).
+    # 중간 결과는 체크포인트에 남겨 다음 실행이 이어받는다.
+    ckpt = _CATEGORY_TREE_CACHE + '.partial'
+    done = {}
+    out = []
+    if os.path.exists(ckpt):
+        try:
+            with open(ckpt, encoding='utf-8') as f:
+                d = json.load(f)
+            out, done = d.get('out', []), d.get('done', {})
+        except Exception:
+            out, done = [], {}
+
+    stopped = [False]
+
+    def save():
+        os.makedirs(os.path.dirname(ckpt), exist_ok=True)
+        with open(ckpt, 'w', encoding='utf-8') as f:
+            json.dump({'out': out, 'done': done}, f, ensure_ascii=False)
+
+    def walk(parent_cid, chain, depth):
+        if depth > max_depth or stopped[0]:
+            return
+        if parent_cid in done:
+            children = done[parent_cid]
+        else:
+            try:
+                children = get_datalab_categories(parent_cid)
+            except Exception as e:
+                if '429' in str(e):
+                    stopped[0] = True       # 차단됐다 — 더 때리지 않는다
+                return
+            done[parent_cid] = children
+            if len(done) % 50 == 0:
+                save()
+            time.sleep(_CATEGORY_TREE_GAP)
+        for c in children:
+            if stopped[0]:
+                return
+            ch = chain + [{'cid': c['cid'], 'name': c['name']}]
+            out.append({
+                'cid': c['cid'],
+                'name': c['name'],
+                'path': ' > '.join(x['name'] for x in ch),
+                'depth': depth,
+                'chain': ch,
+            })
+            walk(c['cid'], ch, depth + 1)
+
+    out.clear()
+    walk('0', [], 1)
+    save()
+    if stopped[0]:
+        raise Exception('데이터랩 429 — 수집을 중단했습니다. 잠시 후 이어서 받으세요 '
+                        f'(현재 {len(out):,}개 확보)')
+    os.makedirs(os.path.dirname(_CATEGORY_TREE_CACHE), exist_ok=True)
+    with open(_CATEGORY_TREE_CACHE, 'w', encoding='utf-8') as f:
+        json.dump(out, f, ensure_ascii=False)
+    try:
+        os.unlink(ckpt)
+    except OSError:
+        pass
+    return out
+
+
+def search_datalab_categories(keyword, limit=200):
+    """카테고리명·경로에서 키워드를 찾는다. 공백으로 나눠 **모두 포함**하는 것만.
+
+    정렬: 마지막 단계 이름이 정확히 일치 → 이름이 키워드로 시작 → 깊이 얕은 순.
+    """
+    kw = (keyword or '').strip()
+    if not kw:
+        return []
+    terms = [t for t in kw.split() if t]
+    tree = get_datalab_category_tree()
+    hits = []
+    for node in tree:
+        hay = node['path']
+        if all(t in hay for t in terms):
+            name = node['name']
+            score = (0 if name == kw else 1 if name.startswith(kw) else
+                     2 if kw in name else 3)
+            hits.append((score, node['depth'], len(node['path']), node))
+    hits.sort(key=lambda x: (x[0], x[1], x[2]))
+    return [h[3] for h in hits[:limit]]
 
 
 def _fetch_category_keyword_rank_live(cid, start_date, end_date, age='', gender='', device='', max_count=500):

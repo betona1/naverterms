@@ -1,5 +1,8 @@
+import json
+import os
 from collections import defaultdict
 from datetime import timedelta
+from django.conf import settings
 from django.utils import timezone
 from django.db.models import Max, Q
 from rest_framework.views import APIView
@@ -290,6 +293,62 @@ class ExtCaptchaStatusView(APIView):
         return Response({'status': 'ok', 'type': captcha_type, 'resolved': resolved})
 
 
+class ExtLogView(APIView):
+    """확장프로그램 로그 수집 (2026-08-07).
+
+    확장프로그램은 사용자 브라우저 안에서 돌아 서버에서 들여다볼 수가 없다.
+    내부용 빌드만 여기로 로그를 보내 원격 진단을 가능하게 한다.
+    파일로 쌓는다 — DB 테이블을 만들 만큼 오래 보관할 값이 아니고, tail 로 바로 볼 수 있어야 한다.
+    """
+    LOG_PATH = os.path.join(settings.BASE_DIR, 'exports', 'ext_log.jsonl')
+    MAX_BYTES = 5 * 1024 * 1024
+
+    def post(self, request):
+        lines = request.data.get('lines') or []
+        if not isinstance(lines, list):
+            return Response({'error': 'lines 는 배열이어야 합니다'}, status=400)
+        src = str(request.data.get('src', '?'))[:20]
+        ver = str(request.data.get('ver', '?'))[:20]
+
+        os.makedirs(os.path.dirname(self.LOG_PATH), exist_ok=True)
+        # 무한정 쌓이지 않게 — 넘으면 통째로 새로 시작한다 (진단용이라 과거분은 가치가 낮다)
+        try:
+            if os.path.getsize(self.LOG_PATH) > self.MAX_BYTES:
+                os.replace(self.LOG_PATH, self.LOG_PATH + '.1')
+        except OSError:
+            pass
+
+        with open(self.LOG_PATH, 'a', encoding='utf-8') as f:
+            for ln in lines[:200]:
+                if not isinstance(ln, dict):
+                    continue
+                f.write(json.dumps({
+                    # 이 프로젝트는 USE_TZ=False 라 now() 가 이미 로컬시각(naive)이다.
+                    # localtime() 을 씌우면 naive 라고 거부당한다.
+                    'at': timezone.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    'src': src, 'ver': ver,
+                    'msg': str(ln.get('msg', ''))[:2000],
+                    'data': ln.get('data'),
+                }, ensure_ascii=False) + '\n')
+        return Response({'status': 'ok', 'saved': len(lines)})
+
+    def get(self, request):
+        """최근 N줄 조회 — 브라우저에서도 확인할 수 있게."""
+        n = min(int(request.query_params.get('n', 50)), 500)
+        try:
+            with open(self.LOG_PATH, encoding='utf-8') as f:
+                tail = f.readlines()[-n:]
+        except FileNotFoundError:
+            return Response({'lines': []})
+        out = []
+        for t in tail:
+            try:
+                out.append(json.loads(t))
+            except ValueError:
+                continue
+        return Response({'lines': out})
+
+
 # ──── 가중치 분석 ────
 
 class AnalysisView(APIView):
@@ -421,6 +480,9 @@ class RunRankTrackingView(APIView):
         try:
             result = services.run_rank_tracking(target_ids)
             return Response(result)
+        except services.NaverLoginRequired as e:
+            # 프론트가 "네이버 로그인 후 이용" 안내 + 로그인 버튼을 띄우는 신호
+            return Response({'error': str(e), 'code': 'naver_login_required'}, status=503)
         except ValueError as e:
             return Response({'error': str(e)}, status=400)
         except Exception as e:
@@ -1286,6 +1348,32 @@ class DatalabCategoryView(APIView):
         try:
             categories = services.get_datalab_categories(parent_cid)
             return Response(categories)
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
+
+
+class DatalabCategorySearchView(APIView):
+    """카테고리 키워드 검색 — 전 단계에서 이름/경로로 찾는다.
+
+    GET /api/naver/datalab/category-search/?q=원피스
+    → [{cid, name, path, depth, chain:[{cid,name},...]}, ...]
+    chain 을 그대로 쓰면 대>중>소>세 선택을 한 번에 채울 수 있다.
+    """
+    def get(self, request):
+        q = request.query_params.get('q', '').strip()
+        if not q:
+            return Response([])
+        try:
+            limit = min(int(request.query_params.get('limit', 200)), 500)
+        except ValueError:
+            limit = 200
+        # 트리 캐시가 아직 없으면 만드는 데 몇 분 걸린다. 빈 배열 대신 사정을 알려준다.
+        import os as _os
+        if not _os.path.exists(services._CATEGORY_TREE_CACHE):
+            return Response({'error': '카테고리 목록을 준비하는 중입니다. 잠시 후 다시 시도하세요.',
+                             'building': True}, status=503)
+        try:
+            return Response(services.search_datalab_categories(q, limit))
         except Exception as e:
             return Response({'error': str(e)}, status=500)
 

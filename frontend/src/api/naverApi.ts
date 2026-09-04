@@ -252,6 +252,20 @@ export interface EnrichData {
   productCount?: number;
   category?: string;
 }
+export interface CategorySearchHit {
+  cid: string;
+  name: string;
+  path: string;          // '대 > 중 > 소 > 세'
+  depth: number;
+  chain: { cid: string; name: string }[];
+}
+
+/** 카테고리 전 단계에서 키워드로 검색. chain 으로 대>중>소>세를 한 번에 채울 수 있다. */
+export async function searchDatalabCategories(q: string, limit = 200): Promise<CategorySearchHit[]> {
+  const { data } = await api.get('/datalab/category-search/', { params: { q, limit } });
+  return Array.isArray(data) ? data : [];
+}
+
 export async function getDatalabCategories(parentCid = '0'): Promise<DatalabCategory[]> {
   const { data } = await api.get('/datalab/categories/', { params: { cid: parentCid } });
   return data;

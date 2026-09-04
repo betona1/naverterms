@@ -22,6 +22,7 @@ urlpatterns = [
     path('ext/purchase-result/', views.ExtPurchaseResultView.as_view()),
     path('ext/captcha-status/', views.ExtCaptchaStatusView.as_view()),
     path('ext/rank-result/', views.ExtRankResultView.as_view()),
+    path('ext/log/', views.ExtLogView.as_view()),
 
     # 분석
     path('analysis/<int:keyword_id>/', views.AnalysisView.as_view()),
@@ -61,6 +62,7 @@ urlpatterns = [
 
     # 카테고리키워드 (데이터랩)
     path('datalab/categories/', views.DatalabCategoryView.as_view()),
+    path('datalab/category-search/', views.DatalabCategorySearchView.as_view()),
     path('datalab/category-keywords/', views.DatalabCategoryKeywordRankView.as_view()),
     path('datalab/enrich-keywords/', views.KeywordEnrichView.as_view()),
     path('datalab/category-names/', views.CategoryNameLookupView.as_view()),

@@ -1,7 +1,7 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { useTheme } from '../hooks/useTheme';
 import * as naverApi from '../api/naverApi';
-import type { DatalabCategory, CategoryKeywordRank, EnrichData } from '../api/naverApi';
+import type { DatalabCategory, CategoryKeywordRank, EnrichData, CategorySearchHit } from '../api/naverApi';
 
 type SortKey = 'rank' | 'keyword' | 'pcQc' | 'moQc' | 'totalQc' | 'compIdx' | 'productCount' | 'category';
 type SortDir = 'asc' | 'desc';
@@ -91,6 +91,17 @@ export default function NaverCategoryKeywordPage() {
   const [sel4, setSel4] = useState('');
   const [catLoading, setCatLoading] = useState(false);
 
+  // 카테고리 빠른검색 — 4단계를 하나씩 고르는 게 번거로워 키워드로 한 번에 찾는다.
+  const [catQuery, setCatQuery] = useState('');
+  const [catHits, setCatHits] = useState<CategorySearchHit[]>([]);
+  const [catSearching, setCatSearching] = useState(false);
+  const [pickedCid, setPickedCid] = useState('');
+  const [catMsg, setCatMsg] = useState('');
+  // 계단식 select 는 부모가 바뀌면 자식을 지운다. 그래서 한 번에 못 넣고
+  // 각 단계 목록이 로드될 때마다 하나씩 채워야 한다. 그 대기열.
+  const pendingChain = useRef<string[]>([]);
+  const autoSearch = useRef(false);
+
   // Filters
   const [startDate, setStartDate] = useState(daysAgo(30));
   const [endDate, setEndDate] = useState(toDateStr(new Date()));
@@ -133,24 +144,37 @@ export default function NaverCategoryKeywordPage() {
   // Load top-level categories on mount
   useEffect(() => { naverApi.getDatalabCategories('0').then(setCat1List).catch(() => {}); }, []);
 
+  /** 대기열의 idx 번째 cid 가 방금 로드된 목록에 있으면 그 단계를 선택한다. */
+  const applyPending = useCallback((idx: number, list: DatalabCategory[],
+                                    setter: (v: string) => void) => {
+    const want = pendingChain.current[idx];
+    if (want && list.some(c => c.cid === want)) setter(want);
+  }, []);
+
   // Cascade effects
   useEffect(() => {
     setCat2List([]); setSel2(''); setCat3List([]); setSel3(''); setCat4List([]); setSel4('');
     if (!sel1) return;
     setCatLoading(true);
-    naverApi.getDatalabCategories(sel1).then(setCat2List).catch(() => setCat2List([])).finally(() => setCatLoading(false));
+    naverApi.getDatalabCategories(sel1)
+      .then(list => { setCat2List(list); applyPending(1, list, setSel2); })
+      .catch(() => setCat2List([])).finally(() => setCatLoading(false));
   }, [sel1]);
   useEffect(() => {
     setCat3List([]); setSel3(''); setCat4List([]); setSel4('');
     if (!sel2) return;
     setCatLoading(true);
-    naverApi.getDatalabCategories(sel2).then(setCat3List).catch(() => setCat3List([])).finally(() => setCatLoading(false));
+    naverApi.getDatalabCategories(sel2)
+      .then(list => { setCat3List(list); applyPending(2, list, setSel3); })
+      .catch(() => setCat3List([])).finally(() => setCatLoading(false));
   }, [sel2]);
   useEffect(() => {
     setCat4List([]); setSel4('');
     if (!sel3) return;
     setCatLoading(true);
-    naverApi.getDatalabCategories(sel3).then(setCat4List).catch(() => setCat4List([])).finally(() => setCatLoading(false));
+    naverApi.getDatalabCategories(sel3)
+      .then(list => { setCat4List(list); applyPending(3, list, setSel4); })
+      .catch(() => setCat4List([])).finally(() => setCatLoading(false));
   }, [sel3]);
 
   // Enrich keywords in batches
@@ -179,6 +203,45 @@ export default function NaverCategoryKeywordPage() {
     setEnrichProgress(null);
   }, []);
 
+  // ── 카테고리 빠른검색 ──
+  const runCatSearch = useCallback(async (q: string) => {
+    const kw = q.trim();
+    if (!kw) { setCatHits([]); return; }
+    setCatSearching(true);
+    setCatMsg('');
+    try {
+      setCatHits(await naverApi.searchDatalabCategories(kw, 200));
+    } catch (e: any) {
+      setCatHits([]);
+      // 503 = 트리 캐시 생성 중. 사용자가 "왜 안 나오지" 하지 않게 사정을 알린다.
+      setCatMsg(e?.response?.data?.error || '카테고리 검색에 실패했습니다.');
+    } finally {
+      setCatSearching(false);
+    }
+  }, []);
+
+  // 타이핑이 멈추면 검색 (300ms) — 글자마다 때리면 서버가 시끄럽다
+  useEffect(() => {
+    const t = setTimeout(() => runCatSearch(catQuery), 300);
+    return () => clearTimeout(t);
+  }, [catQuery, runCatSearch]);
+
+  /** 검색 결과를 고르면 대>중>소>세를 채우고 바로 조회한다. */
+  const pickCategory = useCallback((hit: CategorySearchHit) => {
+    setPickedCid(hit.cid);
+    pendingChain.current = hit.chain.map(c => c.cid);
+    autoSearch.current = true;
+    const first = hit.chain[0]?.cid || '';
+    if (first === sel1) {
+      // 대분류가 그대로면 cascade effect 가 안 돌아 대기열이 소비되지 않는다.
+      // 아래 단계를 직접 채운다.
+      applyPending(1, cat2List, setSel2);
+      if (hit.chain.length === 1) { setSel2(''); setSel3(''); setSel4(''); }
+    } else {
+      setSel1(first);
+    }
+  }, [sel1, cat2List, applyPending]);
+
   const search = useCallback(async () => {
     if (!deepestCid) { setError('카테고리를 선택하세요'); return; }
     enrichAbort.current = true;
@@ -204,6 +267,20 @@ export default function NaverCategoryKeywordPage() {
       setLoading(false);
     }
   }, [deepestCid, startDate, endDate, age, gender, device, catPath, doEnrich]);
+
+  // 대기열이 다 채워지면 자동으로 조회한다 (검색 결과를 고른 경우)
+  useEffect(() => {
+    if (!autoSearch.current) return;
+    const want = pendingChain.current;
+    if (!want.length) return;
+    const cur = [sel1, sel2, sel3, sel4].filter(Boolean);
+    if (cur.length >= want.length && cur[want.length - 1] === want[want.length - 1]) {
+      autoSearch.current = false;
+      pendingChain.current = [];
+      search();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sel1, sel2, sel3, sel4]);
 
   // Build enriched rows
   const enrichedRows: EnrichedRow[] = useMemo(() => rows.map(r => {
@@ -326,6 +403,62 @@ export default function NaverCategoryKeywordPage() {
         <div className="flex flex-wrap items-center gap-2">
           <span className={`text-[13px] font-bold ${dark ? 'text-white' : 'text-gray-900'}`}>카테고리</span>
           {catLoading && <span className="text-[11px] text-[#228be6] animate-pulse">로딩...</span>}
+        </div>
+
+        {/* 빠른검색 — 4단계를 하나씩 고르지 않고 키워드로 한 번에 찾는다 */}
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-2">
+            <input
+              className={`${inputCls} flex-1 min-w-[220px]`}
+              placeholder="카테고리 검색 — 예: 원피스, 캠핑 의자, 강아지 사료 (띄어쓰기로 좁힘)"
+              value={catQuery}
+              onChange={e => setCatQuery(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && catHits.length > 0) pickCategory(catHits[0]);
+                if (e.key === 'Escape') { setCatQuery(''); setCatHits([]); }
+              }}
+            />
+            {catSearching && <span className="text-[11px] text-[#228be6] animate-pulse">검색중...</span>}
+            {catQuery && !catSearching && (
+              <span className={`text-[11px] ${dark ? 'text-gray-400' : 'text-gray-500'}`}>
+                {catHits.length}건
+              </span>
+            )}
+            {catQuery && (
+              <button onClick={() => { setCatQuery(''); setCatHits([]); }}
+                className={`text-[11px] px-2 py-1 rounded border ${dark ? 'border-[#444] text-gray-300 hover:bg-[#333]' : 'border-gray-300 text-gray-600 hover:bg-gray-50'}`}>
+                지우기
+              </button>
+            )}
+          </div>
+
+          {catHits.length > 0 && (
+            <div className={`border rounded max-h-[240px] overflow-y-auto ${dark ? 'border-[#444] bg-[#252525]' : 'border-gray-200 bg-gray-50'}`}>
+              {catHits.map(h => (
+                <label key={h.cid}
+                  className={`flex items-center gap-2 px-2.5 py-1.5 cursor-pointer text-[12px] border-b last:border-b-0
+                    ${dark ? 'border-[#3a3a3a] hover:bg-[#333]' : 'border-gray-100 hover:bg-white'}
+                    ${pickedCid === h.cid ? (dark ? 'bg-[#1e3a5f]' : 'bg-blue-50') : ''}`}>
+                  <input type="radio" name="catHit" className="accent-[#03c75a]"
+                    checked={pickedCid === h.cid}
+                    onChange={() => pickCategory(h)} />
+                  <span className={`shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium
+                    ${dark ? 'bg-[#3a3a3a] text-gray-300' : 'bg-gray-200 text-gray-700'}`}>
+                    {['', '대', '중', '소', '세'][h.depth] || h.depth}
+                  </span>
+                  <span className={dark ? 'text-gray-200' : 'text-gray-800'}>{h.path}</span>
+                </label>
+              ))}
+            </div>
+          )}
+          {catMsg && (
+            <div className="text-[11px] px-1 text-[#e03131]">{catMsg}</div>
+          )}
+          {catQuery && !catSearching && !catMsg && catHits.length === 0 && (
+            <div className={`text-[11px] px-1 ${dark ? 'text-gray-500' : 'text-gray-400'}`}>
+              결과 없음 — 더 짧은 말로 찾아보세요
+            </div>
+          )}
         </div>
         <div className="flex flex-wrap gap-2">
           <div className="flex flex-col gap-0.5">
